@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+from tools.base import BaseTool, ToolResult, ToolValidationError
+
+
+SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
+MAX_MATCHES = 50
+
+
+class GrepTool(BaseTool):
+    name = "grep"
+    description = "Search repository text using a keyword or regular expression."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "pattern": {"type": "string", "description": "Regex or literal search pattern."},
+            "path": {"type": "string", "description": "Optional path relative to repo root."},
+        },
+        "required": ["pattern"],
+    }
+
+    read_only = True
+    dangerous = False
+    concurrency_safe = True
+
+    def validate(self, args: dict, context) -> None:
+        if not args.get("pattern"):
+            raise ToolValidationError("grep requires pattern")
+        try:
+            re.compile(str(args["pattern"]))
+        except re.error as exc:
+            raise ToolValidationError(f"invalid regex: {exc}") from exc
+
+    def call(self, args: dict, context) -> ToolResult:
+        pattern = re.compile(str(args["pattern"]))
+        root = context.safe_path(args.get("path", "."))
+
+        if not root.exists():
+            return ToolResult(ok=False, content=f"Path not found: {args.get('path', '.')}", error="path not found")
+
+        files = [root] if root.is_file() else self._iter_files(root)
+        matches: list[str] = []
+        scanned_files = 0
+
+        for file_path in files:
+            scanned_files += 1
+            try:
+                lines = file_path.read_text(encoding="utf-8").splitlines()
+            except UnicodeDecodeError:
+                continue
+
+            for line_no, line in enumerate(lines, start=1):
+                if pattern.search(line):
+                    rel_path = file_path.relative_to(context.repo_path)
+                    preview = line.strip()
+                    matches.append(f"{rel_path}:{line_no}: {preview}")
+                    if len(matches) >= MAX_MATCHES:
+                        return ToolResult(
+                            ok=True,
+                            content="\n".join(matches),
+                            metadata={
+                                "match_count": len(matches),
+                                "scanned_files": scanned_files,
+                                "truncated": True,
+                            },
+                        )
+
+        content = "\n".join(matches) if matches else "No matches found."
+        return ToolResult(
+            ok=True,
+            content=content,
+            metadata={"match_count": len(matches), "scanned_files": scanned_files, "truncated": False},
+        )
+
+    def _iter_files(self, root: Path):
+        for path in root.rglob("*"):
+            if any(part in SKIP_DIRS for part in path.parts):
+                continue
+            if path.is_file():
+                yield path
+
