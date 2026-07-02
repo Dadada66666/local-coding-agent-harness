@@ -8,4 +8,4 @@ venv/
 .env
 .agent/runs/*
 !.agent/runs/.gitkeep
-
+*.egg-info/

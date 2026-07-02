@@ -12,7 +12,7 @@ app = typer.Typer(help="Local Coding Agent Harness")
 
 @app.command()
 def run(
-    task: str = typer.Argument(..., help="Bug, issue, or development request."),
+    task: str | None = typer.Argument(None, help="Optional one-shot task. Omit it to enter interactive mode."),
     repo: Path = typer.Option(Path("."), "--repo", "-r", help="Repository path to operate on."),
     permission: str = typer.Option(
         PermissionMode.MANUAL_APPROVAL,
@@ -23,7 +23,34 @@ def run(
 ) -> None:
     validate_permission(permission)
     runner = build_agent_runner(repo_path=repo, permission_mode=permission)
-    context = runner.run(task)
+
+    if task:
+        context = runner.run(task)
+        typer.echo(f"Report saved to: {context.run_dir / 'report.md'}")
+        return
+
+    context = runner.start_interactive()
+    typer.echo("Local Coding Agent Harness")
+    typer.echo("输入问题，回车发送。输入 q 或 exit 退出。")
+
+    while True:
+        try:
+            query = typer.prompt("agent")
+        except (EOFError, KeyboardInterrupt):
+            typer.echo("")
+            break
+
+        query = query.strip()
+        if query.lower() in {"q", "quit", "exit"}:
+            break
+        if not query:
+            continue
+
+        runner.submit(context, query)
+        if context.final_text:
+            typer.echo(context.final_text)
+
+    runner.finish(context)
     typer.echo(f"Report saved to: {context.run_dir / 'report.md'}")
 
 
@@ -57,4 +84,3 @@ def validate_permission(permission: str) -> None:
 
 if __name__ == "__main__":
     app()
-

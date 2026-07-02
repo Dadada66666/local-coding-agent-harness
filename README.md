@@ -49,10 +49,10 @@ The model adapter uses the Anthropic Messages API shape:
 
 ```bash
 pip install -e ".[dev]"
-python -m cli.main run "Fix the failing tests" --repo examples/demo_repo --permission accept_edits
+python -m cli.main run --repo examples/demo_repo --permission accept_edits
 ```
 
-Reports are written to:
+Then type tasks at the `agent:` prompt. Enter `q` or `exit` to stop. Reports are written to:
 
 ```bash
 <repo>/.agent/runs/<run_id>/report.md

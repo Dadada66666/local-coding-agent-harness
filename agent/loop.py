@@ -25,14 +25,37 @@ class AgentLoop:
     config: RunConfig | None = None
 
     def run(self, task: str) -> AgentContext:
-        context = self.create_context(task=task)
-
+        context = self.create_context(task=task, include_initial_message=True)
         self.runtime.hooks.trigger(
             HookEvent.USER_PROMPT_SUBMIT,
             task=task,
             context=context,
         )
+        self.run_until_idle(context)
+        self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+        return context
 
+    def start_interactive(self, task: str = "Interactive coding session") -> AgentContext:
+        context = self.create_context(task=task, include_initial_message=False)
+        self.runtime.hooks.trigger(
+            HookEvent.USER_PROMPT_SUBMIT,
+            task=task,
+            context=context,
+        )
+        return context
+
+    def submit(self, context: AgentContext, prompt: str) -> AgentContext:
+        context.task = prompt
+        context.messages.append({"role": "user", "content": prompt})
+        context.finished = False
+        context.final_text = ""
+        self.run_until_idle(context)
+        return context
+
+    def finish(self, context: AgentContext) -> None:
+        self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+
+    def run_until_idle(self, context: AgentContext) -> None:
         while not context.finished:
             self.runtime.context_manager.prepare_context(context)
 
@@ -66,18 +89,13 @@ class AgentLoop:
                 if context.last_test_result is not None:
                     context.last_test_result["repair_injected"] = True
 
+            context.turn_count += 1
             if context.turn_count >= context.config.max_turns:
                 context.finished = True
                 context.success = False
                 context.final_text = "Stopped: max turns exceeded."
 
-            context.turn_count += 1
-
-        self.runtime.hooks.trigger(HookEvent.STOP, context=context)
-
-        return context
-
-    def create_context(self, task: str) -> AgentContext:
+    def create_context(self, task: str, include_initial_message: bool = True) -> AgentContext:
         repo_path = self.repo_path.resolve()
         run_id = make_run_id()
         run_dir = repo_path / ".agent" / "runs" / run_id
@@ -91,7 +109,7 @@ class AgentLoop:
             task=task,
             repo_path=repo_path,
             run_dir=run_dir,
-            messages=build_initial_messages(task),
+            messages=build_initial_messages(task) if include_initial_message else [],
             system_prompt=SYSTEM_PROMPT,
             config=config,
             permission_mode=config.permission_mode,
@@ -110,4 +128,3 @@ class AgentLoop:
 
 
 AgentRunner = AgentLoop
-
