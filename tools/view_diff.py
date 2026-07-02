@@ -19,14 +19,15 @@ class ViewDiffTool(BaseTool):
             ["git", "diff", "--"],
             cwd=context.repo_path,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
-        content = completed.stdout if completed.returncode == 0 else completed.stderr
+        content = (completed.stdout if completed.returncode == 0 else completed.stderr) or "No diff."
         return ToolResult(
             ok=completed.returncode == 0,
-            content=content or "No diff.",
+            content=content,
             error=None if completed.returncode == 0 else "git diff failed",
             metadata={"returncode": completed.returncode},
         )
-

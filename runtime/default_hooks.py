@@ -8,14 +8,14 @@ def user_prompt_submit_hook(task: str, context) -> None:
         {
             "type": "user_prompt",
             "task": task,
-            "repo_path": str(context.repo_path),
+            "workdir": str(context.repo_path),
             "run_id": context.run_id,
         }
     )
 
     print(f"[run] {context.run_id}")
     print(f"[task] {task}")
-    print(f"[repo] {context.repo_path}")
+    print(f"[workdir] {context.repo_path}")
 
     return None
 

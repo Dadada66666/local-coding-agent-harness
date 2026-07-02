@@ -14,10 +14,11 @@ class DiffManager:
             ["git", "diff", "--"],
             cwd=self.repo_path,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
             check=False,
         )
-        content = completed.stdout if completed.returncode == 0 else completed.stderr
+        content = (completed.stdout if completed.returncode == 0 else completed.stderr) or ""
         self.path.write_text(content, encoding="utf-8")
         return self.path
-
