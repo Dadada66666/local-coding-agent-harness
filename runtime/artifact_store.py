@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from uuid import uuid4
 
 
 class ArtifactStore:
@@ -9,8 +8,15 @@ class ArtifactStore:
         self.artifacts_dir = run_dir / "artifacts"
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    def save_text(self, name_hint: str, content: str) -> Path:
-        path = self.artifacts_dir / f"{uuid4().hex[:8]}-{name_hint}"
+    def persist(self, tool_call_id: str, content: str) -> str:
+        safe_id = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in tool_call_id)
+        path = self.artifacts_dir / f"{safe_id}.txt"
+        suffix = 1
+
+        while path.exists():
+            path = self.artifacts_dir / f"{safe_id}-{suffix}.txt"
+            suffix += 1
+
         path.write_text(content, encoding="utf-8")
-        return path
+        return str(path)
 

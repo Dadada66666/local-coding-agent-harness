@@ -1,50 +1,113 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
-from agent.context import AgentContext
-from agent.messages import ModelResponse
+from agent.context import AgentContext, RunConfig, make_run_id
 from agent.model_client import ModelClient
-from agent.prompts import build_initial_messages
+from agent.prompts import SYSTEM_PROMPT, build_initial_messages
+from runtime.artifact_store import ArtifactStore
 from runtime.bootstrap import RuntimeBundle
+from runtime.cost_tracker import CostTracker
+from runtime.diff_manager import DiffManager
+from runtime.hooks import HookEvent
+from runtime.permission import PermissionGate
+from runtime.report_writer import ReportWriter
+from runtime.trace_logger import TraceLogger
 
 
-@dataclass(slots=True)
-class AgentRunner:
-    context: AgentContext
+@dataclass
+class AgentLoop:
     model_client: ModelClient
     runtime: RuntimeBundle
+    repo_path: Path
+    permission_mode: str = "manual_approval"
+    config: RunConfig | None = None
 
-    def run(self) -> None:
-        self.context.run_dir.mkdir(parents=True, exist_ok=True)
-        self.context.messages = build_initial_messages(self.context.config.task)
-        self.runtime.hooks.emit("UserPromptSubmit", {"task": self.context.config.task})
+    def run(self, task: str) -> AgentContext:
+        context = self.create_context(task=task)
 
-        while not self.context.state.stopped:
-            if self.context.state.iteration >= self.context.config.max_iterations:
-                self.context.state.stopped = True
-                self.context.state.stop_reason = "max_iterations"
-                break
+        self.runtime.hooks.trigger(
+            HookEvent.USER_PROMPT_SUBMIT,
+            task=task,
+            context=context,
+        )
 
-            self.context.state.iteration += 1
-            prepared_messages = self.runtime.context_manager.prepare_context(self.context.messages)
-            response = self.model_client.call(prepared_messages)
-            self.runtime.cost_tracker.add_response(response)
-            self.runtime.trace_logger.model_response(response)
-            self.context.messages.append(response.message)
+        while not context.finished:
+            self.runtime.context_manager.prepare_context(context)
+
+            response = self.model_client.call(
+                system=context.system_prompt,
+                messages=context.messages,
+                tools=self.runtime.tool_registry.schemas(),
+            )
+
+            context.add_assistant_message(response.message)
+            context.trace.log_model_usage(response.usage)
+            context.cost_tracker.add_usage(response.usage)
 
             if not response.tool_calls:
-                self.context.state.stopped = True
-                self.context.state.stop_reason = "assistant_finished"
+                context.final_text = response.text
+                context.finished = True
+                context.success = self.infer_success(context)
                 break
 
             for tool_call in response.tool_calls:
-                result = self.runtime.executor.execute(tool_call)
-                self.runtime.trace_logger.tool_result(tool_call, result)
-                self.context.messages.append(result.to_message(tool_call.id))
+                result = self.runtime.executor.execute(tool_call, context)
+                context.add_tool_result(
+                    tool_call_id=tool_call.id,
+                    content=result.content,
+                )
 
-        self.runtime.hooks.emit("Stop", {"reason": self.context.state.stop_reason})
-        self.runtime.diff_manager.write_diff()
-        self.runtime.cost_tracker.write()
-        self.runtime.report_writer.write(self.context)
+            if self.runtime.recovery_policy.should_inject_retry(context):
+                retry_message = self.runtime.recovery_policy.build_retry_message(context)
+                context.messages.append(retry_message)
+                context.repair_attempts += 1
+                if context.last_test_result is not None:
+                    context.last_test_result["repair_injected"] = True
+
+            if context.turn_count >= context.config.max_turns:
+                context.finished = True
+                context.success = False
+                context.final_text = "Stopped: max turns exceeded."
+
+            context.turn_count += 1
+
+        self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+
+        return context
+
+    def create_context(self, task: str) -> AgentContext:
+        repo_path = self.repo_path.resolve()
+        run_id = make_run_id()
+        run_dir = repo_path / ".agent" / "runs" / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        config = self.config or RunConfig(permission_mode=self.permission_mode)
+        config.permission_mode = self.permission_mode
+
+        return AgentContext(
+            run_id=run_id,
+            task=task,
+            repo_path=repo_path,
+            run_dir=run_dir,
+            messages=build_initial_messages(task),
+            system_prompt=SYSTEM_PROMPT,
+            config=config,
+            permission_mode=config.permission_mode,
+            permission_gate=PermissionGate(),
+            trace=TraceLogger(run_dir),
+            artifacts=ArtifactStore(run_dir),
+            cost_tracker=CostTracker(run_dir),
+            diff_manager=DiffManager(repo_path, run_dir),
+            report_writer=ReportWriter(),
+        )
+
+    def infer_success(self, context: AgentContext) -> bool:
+        if context.last_test_result is not None:
+            return bool(context.last_test_result.get("ok"))
+        return True
+
+
+AgentRunner = AgentLoop
 

@@ -4,18 +4,23 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-@dataclass(slots=True)
+@dataclass
 class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
 
 
-@dataclass(slots=True)
-class ModelResponse:
-    message: dict[str, Any]
-    tool_calls: list[ToolCall] = field(default_factory=list)
+@dataclass
+class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
-    cost_usd: float = 0.0
+
+
+@dataclass
+class ModelResponse:
+    message: dict[str, Any]
+    text: str = ""
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: TokenUsage = field(default_factory=TokenUsage)
 
