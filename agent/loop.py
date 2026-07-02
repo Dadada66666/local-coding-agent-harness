@@ -5,7 +5,7 @@ from pathlib import Path
 
 from agent.context import AgentContext, RunConfig, make_run_id
 from agent.model_client import ModelClient
-from agent.prompts import SYSTEM_PROMPT, build_initial_messages
+from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.artifact_store import ArtifactStore
 from runtime.bootstrap import RuntimeBundle
 from runtime.cost_tracker import CostTracker
@@ -110,7 +110,7 @@ class AgentLoop:
             repo_path=repo_path,
             run_dir=run_dir,
             messages=build_initial_messages(task) if include_initial_message else [],
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(repo_path),
             config=config,
             permission_mode=config.permission_mode,
             permission_gate=PermissionGate(),

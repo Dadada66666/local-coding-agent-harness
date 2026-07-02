@@ -49,10 +49,10 @@ The model adapter uses the Anthropic Messages API shape:
 
 ```bash
 pip install -e ".[dev]"
-python -m cli.main run --repo examples/demo_repo --permission accept_edits
+python -m cli.main
 ```
 
-Then type tasks at the `agent:` prompt. Enter `q` or `exit` to stop. Reports are written to:
+The current terminal directory is used as WORKDIR. Choose a permission mode at startup, then type tasks at the `agent:` prompt. Enter `q` or `exit` to stop. Reports are written to:
 
 ```bash
 <repo>/.agent/runs/<run_id>/report.md
@@ -61,5 +61,5 @@ Then type tasks at the `agent:` prompt. Enter `q` or `exit` to stop. Reports are
 You can read a previous report with:
 
 ```bash
-python -m cli.main report <run_id> --repo examples/demo_repo
+python -m cli.main report <run_id>
 ```
