@@ -11,7 +11,7 @@ DEFAULT_LIMIT = 200
 
 class ReadFileTool(BaseTool):
     name = "read_file"
-    description = "Read a UTF-8 text file under WORKDIR with line numbers."
+    description = "Read a UTF-8 text file under the repository with line numbers and optional offset/limit."
     input_schema = {
         "type": "object",
         "properties": {

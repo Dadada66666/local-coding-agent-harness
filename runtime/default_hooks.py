@@ -47,20 +47,24 @@ def permission_hook(tool_call, tool, context):
     if decision.behavior == "allow":
         return None
 
+    metadata = {
+        "denied": True,
+        "permission_denied": True,
+        "tool": tool_call.name,
+        "blocked_by": "permission_hook",
+        "permission_behavior": decision.behavior,
+        "risk": decision.risk,
+        "proposed_scope": decision.proposed_scope,
+    }
+    metadata.update(decision.metadata)
+
     return ToolResult(
         ok=False,
         content=decision.message,
         error=decision.message,
-        metadata={
-            "denied": True,
-            "permission_denied": True,
-            "tool": tool_call.name,
-            "blocked_by": "permission_hook",
-            "permission_behavior": decision.behavior,
-            "risk": decision.risk,
-            "proposed_scope": decision.proposed_scope,
-        },
+        metadata=metadata,
     )
+
 
 def large_output_hook(tool_call, tool, result, context) -> None:
     if not result.content:
@@ -87,6 +91,27 @@ def large_output_hook(tool_call, tool, result, context) -> None:
 
     result.metadata["persisted"] = True
     result.metadata["original_chars"] = len(full_content)
+
+    return None
+
+
+def record_tool_budget_hook(tool_call, tool, result, context) -> None:
+    budget = context.tool_budget
+    name = tool_call.name
+
+    if name == "read_file":
+        budget.read_file_calls += 1
+    elif name == "grep":
+        budget.grep_calls += 1
+    elif name == "list_dir":
+        budget.list_dir_calls += 1
+    elif name == "bash":
+        budget.bash_calls += 1
+
+    budget.chars_returned += len(result.content or "")
+
+    if result.metadata.get("truncated"):
+        budget.truncated_results += 1
 
     return None
 
@@ -163,4 +188,3 @@ def stop_report_hook(context) -> None:
     print(f"[cost] {cost_path}")
 
     return None
-

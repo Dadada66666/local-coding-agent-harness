@@ -9,7 +9,7 @@ MAX_ENTRIES = 200
 
 class ListDirTool(BaseTool):
     name = "list_dir"
-    description = "List files in a directory under the repository."
+    description = "List visible files and directories under a repository path."
     input_schema = {
         "type": "object",
         "properties": {

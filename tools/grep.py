@@ -7,12 +7,12 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
 SKIP_DIRS = {".agent", ".git", ".venv", "venv", "node_modules", "__pycache__"}
-MAX_MATCHES = 50
+DEFAULT_MAX_MATCHES = 50
 
 
 class GrepTool(BaseTool):
     name = "grep"
-    description = "Search repository text using a keyword or regular expression."
+    description = "Search repository text and return matching file paths, line numbers, and previews."
     input_schema = {
         "type": "object",
         "properties": {
@@ -36,6 +36,7 @@ class GrepTool(BaseTool):
 
     def call(self, args: dict, context) -> ToolResult:
         pattern = re.compile(str(args["pattern"]))
+        max_matches = self._max_matches(context)
         root = context.safe_path(args.get("path", "."))
 
         if not root.exists():
@@ -57,7 +58,7 @@ class GrepTool(BaseTool):
                     rel_path = file_path.relative_to(context.repo_path)
                     preview = line.strip()
                     matches.append(f"{rel_path}:{line_no}: {preview}")
-                    if len(matches) >= MAX_MATCHES:
+                    if len(matches) >= max_matches:
                         return ToolResult(
                             ok=True,
                             content="\n".join(matches),
@@ -65,6 +66,8 @@ class GrepTool(BaseTool):
                                 "match_count": len(matches),
                                 "scanned_files": scanned_files,
                                 "truncated": True,
+                                "max_matches": max_matches,
+                                "hint": "Results truncated. Narrow the path or pattern to inspect more precisely.",
                             },
                         )
 
@@ -74,6 +77,13 @@ class GrepTool(BaseTool):
             content=content,
             metadata={"match_count": len(matches), "scanned_files": scanned_files, "truncated": False},
         )
+
+    def _max_matches(self, context) -> int:
+        try:
+            value = int(getattr(context.config, "grep_max_matches", DEFAULT_MAX_MATCHES))
+        except (TypeError, ValueError):
+            value = DEFAULT_MAX_MATCHES
+        return max(value, 1)
 
     def _iter_files(self, root: Path, context):
         workdir = context.repo_path.resolve()

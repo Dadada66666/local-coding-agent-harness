@@ -38,6 +38,9 @@ class ReportWriter:
             "## Cost",
             cost_summary,
             "",
+            "## Tool Efficiency",
+            *self._tool_efficiency(context),
+            "",
             "## Summary",
             context.final_text or "N/A",
             "",
@@ -62,6 +65,29 @@ class ReportWriter:
             return ["- N/A"]
         return [f"- {path}" for path in sorted(context.changed_files)]
 
+    def _tool_efficiency(self, context: AgentContext) -> list[str]:
+        warnings = self.analyze_tool_efficiency(context)
+        if not warnings:
+            return ["- N/A"]
+        return [f"- {warning}" for warning in warnings]
+
+    def analyze_tool_efficiency(self, context: AgentContext) -> list[str]:
+        budget = context.tool_budget
+        warnings = []
+
+        if budget.read_file_calls >= 8 and budget.grep_calls == 0:
+            warnings.append(
+                "Many files were read without repository search. "
+                "This may indicate inefficient context discovery."
+            )
+
+        if budget.truncated_results >= 3:
+            warnings.append(
+                "Several tool results were truncated. "
+                "Consider narrowing queries or improving pagination."
+            )
+
+        return warnings
     def _cost_summary(self, context: AgentContext) -> str:
         tracker = context.cost_tracker
         return (
