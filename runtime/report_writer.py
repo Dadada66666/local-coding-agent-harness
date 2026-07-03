@@ -27,6 +27,7 @@ class ReportWriter:
             "## Test Result",
             f"Command: {test_result.get('command', 'N/A')}",
             f"Result: {'passed' if test_result.get('ok') else 'failed' if test_result else 'not recorded'}",
+            f"Verification: {self._verification_status(context)}",
             "",
             "## Failure Summary",
             test_result.get("error") or "N/A",
@@ -50,6 +51,11 @@ class ReportWriter:
 
         path.write_text("\n".join(lines), encoding="utf-8")
         return path
+
+    def _verification_status(self, context: AgentContext) -> str:
+        if context.last_test_result is None:
+            return "not recorded"
+        return "passed" if context.last_test_result.get("ok") else "failed"
 
     def _changed_files(self, context: AgentContext) -> list[str]:
         if not context.changed_files:
