@@ -46,6 +46,7 @@ class AgentContext:
     repair_attempts: int = 0
     last_test_result: dict | None = None
     changed_files: set[str] = field(default_factory=set)
+    approved_permission_scopes: set[str] = field(default_factory=set)
 
     def safe_path(self, path: str) -> Path:
         resolved = (self.repo_path / path).resolve()

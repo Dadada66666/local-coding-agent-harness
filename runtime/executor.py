@@ -38,15 +38,9 @@ class ToolExecutor:
         )
 
         if blocked is not None:
-            if isinstance(blocked, ToolResult):
-                return blocked
-
-            return ToolResult(
-                ok=False,
-                content=str(blocked),
-                error=str(blocked),
-                metadata={"blocked_by_hook": True},
-            )
+            result = self._blocked_result(blocked)
+            self._trigger_post_tool_use(tool_call, tool, result, context)
+            return result
 
         try:
             result = tool.call(tool_call.arguments, context)
@@ -58,13 +52,26 @@ class ToolExecutor:
                 metadata={"tool_exception": True},
             )
 
-        self.hooks.trigger(
+        self._trigger_post_tool_use(tool_call, tool, result, context)
+        return result
+
+    def _blocked_result(self, blocked) -> ToolResult:
+        if isinstance(blocked, ToolResult):
+            return blocked
+
+        reason = str(blocked)
+        return ToolResult(
+            ok=False,
+            content=reason,
+            error=reason,
+            metadata={"blocked_by_hook": True},
+        )
+
+    def _trigger_post_tool_use(self, tool_call, tool, result: ToolResult, context) -> None:
+        self.hooks.trigger_all(
             HookEvent.POST_TOOL_USE,
             tool_call=tool_call,
             tool=tool,
             result=result,
             context=context,
         )
-
-        return result
-
