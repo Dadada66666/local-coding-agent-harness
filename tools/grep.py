@@ -6,7 +6,7 @@ from pathlib import Path
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
-SKIP_DIRS = {".git", ".venv", "venv", "node_modules", "__pycache__"}
+SKIP_DIRS = {".agent", ".git", ".venv", "venv", "node_modules", "__pycache__"}
 MAX_MATCHES = 50
 
 
@@ -41,7 +41,7 @@ class GrepTool(BaseTool):
         if not root.exists():
             return ToolResult(ok=False, content=f"Path not found: {args.get('path', '.')}", error="path not found")
 
-        files = [root] if root.is_file() else self._iter_files(root, context)
+        files = [] if self._is_skipped(root, context) else [root] if root.is_file() else self._iter_files(root, context)
         matches: list[str] = []
         scanned_files = 0
 
@@ -78,10 +78,17 @@ class GrepTool(BaseTool):
     def _iter_files(self, root: Path, context):
         workdir = context.repo_path.resolve()
         for path in root.rglob("*"):
-            if any(part in SKIP_DIRS for part in path.parts):
+            if self._is_skipped(path, context):
                 continue
             if not path.is_file():
                 continue
             if not path.resolve().is_relative_to(workdir):
                 continue
             yield path
+
+    def _is_skipped(self, path: Path, context) -> bool:
+        try:
+            parts = path.resolve().relative_to(context.repo_path.resolve()).parts
+        except ValueError:
+            parts = path.parts
+        return any(part in SKIP_DIRS for part in parts)

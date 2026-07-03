@@ -75,7 +75,7 @@ def run_interactive(workdir: Path, permission: str | None) -> None:
 
     while True:
         try:
-            query = typer.prompt("agent")
+            query = input("\033[36msagent >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             typer.echo("")
             break
