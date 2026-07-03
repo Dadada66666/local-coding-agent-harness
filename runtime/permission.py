@@ -186,13 +186,12 @@ class PermissionGate:
     def _check_create_file(self, args: dict, context) -> PermissionDecision:
         path = str(args.get("path", ""))
         target = context.safe_path(path)
-        overwrite = bool(args.get("overwrite", False))
 
-        if target.exists() and not overwrite:
+        if target.exists():
             return PermissionDecision(
                 behavior=PermissionBehavior.DENY,
                 risk="file_exists",
-                message=f"File already exists: {path}. Use edit_file or set overwrite=true.",
+                message=f"File already exists: {path}. Use edit_file for precise edits.",
             )
 
         if context.permission_mode == PermissionMode.ACCEPT_EDITS:
@@ -208,7 +207,6 @@ class PermissionGate:
             message=f"Model requests creating {path} while permission mode is {context.permission_mode}.",
             proposed_scope="create_file",
         )
-
     def _check_edit(self, args: dict, context) -> PermissionDecision:
         path = str(args.get("path", ""))
         target = context.safe_path(path)
@@ -273,7 +271,7 @@ class PermissionGate:
                     "Model requested a shell command that may write files. "
                     "Prefer create_file for new files or edit_file for precise edits."
                 ),
-                proposed_scope="bash:file_write_via_bash",
+                proposed_scope=None,
             )
 
         if risk == BashRisk.NETWORK:
@@ -305,7 +303,10 @@ class PermissionGate:
         print(f"Risk: {decision.risk}")
         print(f"Reason: {decision.message}")
         print(f"Args: {args}")
-        print("Allow? [y] once / [a] this run scope / [N] deny")
+        if decision.proposed_scope:
+            print("Allow? [y] once / [a] this run scope / [N] deny")
+        else:
+            print("Allow? [y] once / [N] deny")
 
         try:
             answer = input("permission> ").strip().lower()

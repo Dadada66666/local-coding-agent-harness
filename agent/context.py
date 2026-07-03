@@ -12,6 +12,14 @@ def make_run_id() -> str:
     return f"{prefix}-{uuid4().hex[:8]}"
 
 
+@dataclass(frozen=True)
+class ReadFileSnapshot:
+    mtime_ns: int
+    size: int
+    sha256: str
+    partial: bool
+
+
 @dataclass
 class RunConfig:
     max_turns: int = 30
@@ -47,6 +55,7 @@ class AgentContext:
     last_test_result: dict | None = None
     changed_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
+    read_file_state: dict[str, ReadFileSnapshot] = field(default_factory=dict)
 
     def safe_path(self, path: str) -> Path:
         resolved = (self.repo_path / path).resolve()
@@ -70,4 +79,3 @@ class AgentContext:
                 ],
             }
         )
-
