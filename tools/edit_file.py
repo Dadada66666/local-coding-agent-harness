@@ -5,13 +5,19 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 class EditFileTool(BaseTool):
     name = "edit_file"
-    description = "Precisely replace old_text with new_text in a UTF-8 text file."
+    description = "Replace exact old_text with exact new_text in a UTF-8 text file."
     input_schema = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to repo root."},
-            "old_text": {"type": "string", "description": "Existing text to replace."},
-            "new_text": {"type": "string", "description": "Replacement text."},
+            "path": {"type": "string", "description": "File path relative to WORKDIR."},
+            "old_text": {
+                "type": "string",
+                "description": "Exact existing text to replace. Do not describe line numbers.",
+            },
+            "new_text": {
+                "type": "string",
+                "description": "Exact replacement text.",
+            },
             "occurrence": {
                 "type": "integer",
                 "description": "Optional 1-based occurrence to replace when old_text appears multiple times.",
@@ -49,10 +55,15 @@ class EditFileTool(BaseTool):
         count = original.count(old_text)
 
         if count == 0:
-            return ToolResult(ok=False, content="text not found", error="text not found")
+            return ToolResult(
+                ok=False,
+                content=f"old_text not found in {requested_path}",
+                error="old_text not found",
+            )
 
-        if "occurrence" in args:
-            occurrence = int(args["occurrence"])
+        occurrence = args.get("occurrence")
+        if occurrence is not None:
+            occurrence = int(occurrence)
             if occurrence > count:
                 return ToolResult(
                     ok=False,
@@ -65,8 +76,8 @@ class EditFileTool(BaseTool):
             if count > 1:
                 return ToolResult(
                     ok=False,
-                    content=f"old_text is not unique; it appears {count} times",
-                    error="old_text is not unique",
+                    content="old_text appears multiple times; provide occurrence.",
+                    error="ambiguous edit",
                     metadata={"occurrences": count},
                 )
             updated = original.replace(old_text, new_text, 1)
@@ -76,7 +87,7 @@ class EditFileTool(BaseTool):
 
         return ToolResult(
             ok=True,
-            content=f"edited {requested_path}",
+            content=f"Edited {requested_path}",
             metadata={"path": str(target), "changed_file": requested_path, "occurrences": count},
         )
 
@@ -89,4 +100,3 @@ class EditFileTool(BaseTool):
 
         end = start + len(old_text)
         return text[:start] + new_text + text[end:]
-

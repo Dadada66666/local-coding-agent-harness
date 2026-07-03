@@ -37,3 +37,6 @@ class HookManager:
                 return result
         return None
 
+    def trigger_all(self, event: str, *args, **kwargs) -> None:
+        for fn in self._hooks.get(event, []):
+            fn(*args, **kwargs)

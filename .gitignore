@@ -9,4 +9,4 @@ venv/
 .agent/runs/*
 !.agent/runs/.gitkeep
 *.egg-info/
-examples/
+examples/*

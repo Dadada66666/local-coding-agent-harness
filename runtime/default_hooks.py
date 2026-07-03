@@ -37,26 +37,30 @@ def pre_tool_trace_hook(tool_call, tool, context) -> None:
 
 
 def permission_hook(tool_call, tool, context):
-    allowed, reason = context.permission_gate.check(
+    decision = context.permission_gate.check(
         tool=tool,
         args=tool_call.arguments,
         context=context,
     )
+    decision = context.permission_gate.resolve(decision, tool, tool_call.arguments, context)
 
-    if allowed:
+    if decision.behavior == "allow":
         return None
 
     return ToolResult(
         ok=False,
-        content=reason or "Permission denied.",
-        error=reason,
+        content=decision.message,
+        error=decision.message,
         metadata={
             "denied": True,
+            "permission_denied": True,
             "tool": tool_call.name,
             "blocked_by": "permission_hook",
+            "permission_behavior": decision.behavior,
+            "risk": decision.risk,
+            "proposed_scope": decision.proposed_scope,
         },
     )
-
 
 def large_output_hook(tool_call, tool, result, context) -> None:
     if not result.content:
@@ -89,6 +93,9 @@ def large_output_hook(tool_call, tool, result, context) -> None:
 
 def test_result_hook(tool_call, tool, result, context) -> None:
     if tool.name != "bash":
+        return None
+
+    if result.metadata.get("denied") or result.metadata.get("blocked_by_hook"):
         return None
 
     command = str(tool_call.arguments.get("command", ""))
