@@ -17,7 +17,7 @@ class GrepTool(BaseTool):
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": "Regex or literal search pattern."},
-            "path": {"type": "string", "description": "Optional path relative to repo root."},
+            "path": {"type": "string", "description": "Optional path relative to WORKDIR."},
         },
         "required": ["pattern"],
     }
@@ -41,7 +41,7 @@ class GrepTool(BaseTool):
         if not root.exists():
             return ToolResult(ok=False, content=f"Path not found: {args.get('path', '.')}", error="path not found")
 
-        files = [root] if root.is_file() else self._iter_files(root)
+        files = [root] if root.is_file() else self._iter_files(root, context)
         matches: list[str] = []
         scanned_files = 0
 
@@ -75,10 +75,13 @@ class GrepTool(BaseTool):
             metadata={"match_count": len(matches), "scanned_files": scanned_files, "truncated": False},
         )
 
-    def _iter_files(self, root: Path):
+    def _iter_files(self, root: Path, context):
+        workdir = context.repo_path.resolve()
         for path in root.rglob("*"):
             if any(part in SKIP_DIRS for part in path.parts):
                 continue
-            if path.is_file():
-                yield path
-
+            if not path.is_file():
+                continue
+            if not path.resolve().is_relative_to(workdir):
+                continue
+            yield path

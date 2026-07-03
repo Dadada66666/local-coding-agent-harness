@@ -17,7 +17,7 @@ class ViewDiffTool(BaseTool):
     def call(self, args: dict, context) -> ToolResult:
         completed = subprocess.run(
             ["git", "diff", "--"],
-            cwd=context.repo_path,
+            cwd=context.safe_path("."),
             text=True,
             encoding="utf-8",
             errors="replace",

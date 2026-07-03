@@ -50,7 +50,7 @@ class AgentContext:
     def safe_path(self, path: str) -> Path:
         resolved = (self.repo_path / path).resolve()
         if not resolved.is_relative_to(self.repo_path.resolve()):
-            raise ValueError(f"Path escapes workspace: {path}")
+            raise ValueError(f"Path escapes WORKDIR: {path}")
         return resolved
 
     def add_assistant_message(self, message: dict) -> None:
