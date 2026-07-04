@@ -20,6 +20,8 @@ class BashTool(BaseTool):
         "properties": {
             "command": {"type": "string", "description": "Command to run from repo root."},
             "timeout": {"type": "integer", "description": "Timeout in seconds."},
+            "input": {"type": "string", "description": "Optional stdin content for non-interactive commands."},
+            "purpose": {"type": "string", "description": "Optional purpose label for trace metadata."},
         },
         "required": ["command"],
     }
@@ -37,8 +39,19 @@ class BashTool(BaseTool):
     def call(self, args: dict, context) -> ToolResult:
         command = str(args["command"])
         timeout = int(args.get("timeout", DEFAULT_TIMEOUT_SECONDS))
+        stdin_content = args.get("input")
+        purpose = args.get("purpose")
         argv = self._build_command_argv(command)
         shell_name = self._shell_name()
+        sandbox_metadata = self._sandbox_metadata(context)
+
+        sandbox = getattr(context, "sandbox", None)
+        if sandbox is not None and sandbox.should_wrap_command(command):
+            argv = sandbox.wrap_argv(argv)
+            sandbox_metadata["wrapped"] = True
+
+        stdin_mode = "provided" if stdin_content is not None else "devnull"
+        stdin_kwargs = {"input": str(stdin_content)} if stdin_content is not None else {"stdin": subprocess.DEVNULL}
 
         try:
             completed = subprocess.run(
@@ -52,6 +65,7 @@ class BashTool(BaseTool):
                 check=False,
                 timeout=timeout,
                 env=self._build_env(),
+                **stdin_kwargs,
             )
         except subprocess.TimeoutExpired as exc:
             output = self._combine_output(exc.stdout, exc.stderr).strip()
@@ -60,12 +74,15 @@ class BashTool(BaseTool):
                 ok=False,
                 content=f"Command timed out after {timeout}s.\n{preview}".strip(),
                 error=f"timeout after {timeout}s",
-                metadata={
-                    "command": command,
-                    "shell": shell_name,
-                    "timeout": timeout,
-                    "timed_out": True,
-                },
+                metadata=self._metadata(
+                    command=command,
+                    shell_name=shell_name,
+                    stdin_mode=stdin_mode,
+                    sandbox=sandbox_metadata,
+                    purpose=purpose,
+                    timeout=timeout,
+                    timed_out=True,
+                ),
             )
 
         output = self._combine_output(completed.stdout, completed.stderr).strip()
@@ -76,13 +93,16 @@ class BashTool(BaseTool):
             ok=completed.returncode == 0,
             content=content,
             error=None if completed.returncode == 0 else f"command exited {completed.returncode}",
-            metadata={
-                "command": command,
-                "shell": shell_name,
-                "returncode": completed.returncode,
-                "truncated": original_chars > len(content),
-                "original_chars": original_chars,
-            },
+            metadata=self._metadata(
+                command=command,
+                shell_name=shell_name,
+                stdin_mode=stdin_mode,
+                sandbox=sandbox_metadata,
+                purpose=purpose,
+                returncode=completed.returncode,
+                truncated=original_chars > len(content),
+                original_chars=original_chars,
+            ),
         )
 
     def _build_command_argv(self, command: str) -> list[str]:
@@ -120,6 +140,34 @@ class BashTool(BaseTool):
 
     def _windows_shell_executable(self) -> str:
         return shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+
+    def _sandbox_metadata(self, context) -> dict:
+        sandbox = getattr(context, "sandbox", None)
+        if sandbox is None:
+            return {
+                "enabled": False,
+                "available": False,
+                "strong_boundary": False,
+                "reason": None,
+                "settings_path": None,
+                "wrapped": False,
+            }
+
+        metadata = sandbox.metadata()
+        metadata["wrapped"] = False
+        return metadata
+
+    def _metadata(self, command: str, shell_name: str, stdin_mode: str, sandbox: dict, purpose=None, **extra) -> dict:
+        metadata = {
+            "command": command,
+            "shell": shell_name,
+            "stdin": stdin_mode,
+            "sandbox": sandbox,
+        }
+        if purpose is not None:
+            metadata["purpose"] = str(purpose)
+        metadata.update(extra)
+        return metadata
 
     def _combine_output(self, stdout, stderr) -> str:
         return self._to_text(stdout) + self._to_text(stderr)

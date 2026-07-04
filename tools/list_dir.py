@@ -22,6 +22,7 @@ class ListDirTool(BaseTool):
     concurrency_safe = True
 
     def call(self, args: dict, context) -> ToolResult:
+        defaulted_path = "path" not in args
         requested_path = args.get("path", ".")
         target = context.safe_path(requested_path)
 
@@ -48,6 +49,11 @@ class ListDirTool(BaseTool):
             content="\n".join(entries),
             metadata={
                 "path": str(target),
+                "requested_path": requested_path,
+                "resolved_path": str(target),
+                "defaulted_path": defaulted_path,
+                "searches_names": True,
+                "searches_content": False,
                 "entry_count": len(entries),
                 "truncated": truncated,
             },

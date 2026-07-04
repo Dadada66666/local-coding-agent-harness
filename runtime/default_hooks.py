@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from tools.base import ToolResult
+from tools.bash import DEFAULT_TIMEOUT_SECONDS
+from tools.read_file import DEFAULT_LIMIT as READ_FILE_DEFAULT_LIMIT
 
 
 def user_prompt_submit_hook(task: str, context) -> None:
@@ -9,7 +11,6 @@ def user_prompt_submit_hook(task: str, context) -> None:
             "type": "user_prompt",
             "task": task,
             "workdir": str(context.repo_path),
-            "run_id": context.run_id,
         }
     )
 
@@ -24,8 +25,11 @@ def pre_tool_trace_hook(tool_call, tool, context) -> None:
     context.trace.log(
         {
             "type": "tool_use",
+            "turn_id": _turn_id(context),
+            "tool_call_id": getattr(tool_call, "id", None),
             "tool": tool_call.name,
             "args": tool_call.arguments,
+            "normalized_args": _normalized_args(tool_call.name, tool_call.arguments, context),
             "read_only": getattr(tool, "read_only", False),
             "dangerous": getattr(tool, "dangerous", False),
         }
@@ -42,9 +46,13 @@ def permission_hook(tool_call, tool, context):
         args=tool_call.arguments,
         context=context,
     )
-    decision = context.permission_gate.resolve(decision, tool, tool_call.arguments, context)
+    _log_permission_decision(tool_call, decision, context, phase="check")
 
-    if decision.behavior == "allow":
+    resolved = context.permission_gate.resolve(decision, tool, tool_call.arguments, context)
+    if _permission_changed(decision, resolved):
+        _log_permission_decision(tool_call, resolved, context, phase="resolved")
+
+    if resolved.behavior == "allow":
         return None
 
     metadata = {
@@ -52,16 +60,16 @@ def permission_hook(tool_call, tool, context):
         "permission_denied": True,
         "tool": tool_call.name,
         "blocked_by": "permission_hook",
-        "permission_behavior": decision.behavior,
-        "risk": decision.risk,
-        "proposed_scope": decision.proposed_scope,
+        "permission_behavior": resolved.behavior,
+        "risk": resolved.risk,
+        "proposed_scope": resolved.proposed_scope,
     }
-    metadata.update(decision.metadata)
+    metadata.update(resolved.metadata)
 
     return ToolResult(
         ok=False,
-        content=decision.message,
-        error=decision.message,
+        content=resolved.message,
+        error=resolved.message,
         metadata=metadata,
     )
 
@@ -141,6 +149,8 @@ def test_result_hook(tool_call, tool, result, context) -> None:
     context.trace.log(
         {
             "type": "test_result",
+            "turn_id": _turn_id(context),
+            "tool_call_id": getattr(tool_call, "id", None),
             "command": command,
             "ok": result.ok,
             "error": result.error,
@@ -154,6 +164,8 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
     context.trace.log(
         {
             "type": "tool_result",
+            "turn_id": _turn_id(context),
+            "tool_call_id": getattr(tool_call, "id", None),
             "tool": tool_call.name,
             "ok": result.ok,
             "error": result.error,
@@ -174,7 +186,6 @@ def stop_report_hook(context) -> None:
     context.trace.log(
         {
             "type": "stop",
-            "run_id": context.run_id,
             "success": context.success,
             "report_path": str(report_path),
             "diff_path": str(diff_path),
@@ -188,3 +199,52 @@ def stop_report_hook(context) -> None:
     print(f"[cost] {cost_path}")
 
     return None
+
+
+def _turn_id(context) -> int:
+    return int(getattr(context, "current_turn_id", context.turn_count + 1))
+
+
+def _normalized_args(tool_name: str, args: dict, context) -> dict:
+    normalized = dict(args or {})
+
+    if tool_name == "list_dir":
+        normalized.setdefault("path", ".")
+    elif tool_name == "grep":
+        normalized.setdefault("path", ".")
+    elif tool_name == "read_file":
+        normalized.setdefault("offset", 0)
+        normalized.setdefault("limit", READ_FILE_DEFAULT_LIMIT)
+    elif tool_name == "bash":
+        normalized.setdefault("timeout", DEFAULT_TIMEOUT_SECONDS)
+        if "input" not in normalized:
+            normalized["stdin"] = "devnull"
+
+    return normalized
+
+
+def _log_permission_decision(tool_call, decision, context, phase: str) -> None:
+    context.trace.log(
+        {
+            "type": "permission_decision",
+            "phase": phase,
+            "turn_id": _turn_id(context),
+            "tool_call_id": getattr(tool_call, "id", None),
+            "tool": tool_call.name,
+            "behavior": decision.behavior,
+            "risk": decision.risk,
+            "message": decision.message,
+            "proposed_scope": decision.proposed_scope,
+            "metadata": decision.metadata,
+        }
+    )
+
+
+def _permission_changed(first, second) -> bool:
+    return (
+        first.behavior != second.behavior
+        or first.risk != second.risk
+        or first.message != second.message
+        or first.proposed_scope != second.proposed_scope
+        or first.metadata != second.metadata
+    )
