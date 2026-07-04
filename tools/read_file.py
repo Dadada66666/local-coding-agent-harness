@@ -68,6 +68,8 @@ class ReadFileTool(BaseTool):
             content="\n".join(rendered),
             metadata={
                 "path": str(target),
+                "requested_path": requested_path,
+                "resolved_path": str(target),
                 "offset": offset,
                 "limit": limit,
                 "total_lines": len(lines),

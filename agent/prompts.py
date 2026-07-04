@@ -9,6 +9,7 @@ BASE_SYSTEM_PROMPT = """You are a local coding agent working inside {workdir}.
 Runtime:
 - OS: {os_name}
 - Command shell: {shell_name}
+- Sandbox: {sandbox_status}
 
 Behavior:
 - Inspect relevant context before making changes.
@@ -16,6 +17,8 @@ Behavior:
 - Make minimal correct changes.
 - After code edits, run the smallest relevant check when available.
 - Report honestly if verification was not possible.
+- For commands that require stdin, use the bash tool input field.
+- When running a command to validate behavior, set bash purpose to "verify".
 
 Safety:
 - Do not attempt destructive operations.
@@ -35,11 +38,12 @@ def detect_shell_name() -> str:
     return "/bin/sh via subprocess shell=False"
 
 
-def build_system_prompt(workdir: Path) -> str:
+def build_system_prompt(workdir: Path, sandbox_status: str = "disabled") -> str:
     return BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
         os_name=platform.system(),
         shell_name=detect_shell_name(),
+        sandbox_status=sandbox_status,
     )
 
 

@@ -38,6 +38,9 @@ class ReportWriter:
             "## Cost",
             cost_summary,
             "",
+            "## Sandbox",
+            *self._sandbox_summary(context),
+            "",
             "## Tool Efficiency",
             *self._tool_efficiency(context),
             "",
@@ -65,6 +68,30 @@ class ReportWriter:
             return ["- N/A"]
         return [f"- {path}" for path in sorted(context.changed_files)]
 
+    def _sandbox_summary(self, context: AgentContext) -> list[str]:
+        sandbox = getattr(context, "sandbox", None)
+        if sandbox is None:
+            return [
+                "- enabled: false",
+                "- available: false",
+                "- strong_boundary: false",
+                "- settings_path: N/A",
+                "- auto_allowed_unknown_bash: 0",
+                "- reason: N/A",
+            ]
+
+        status = sandbox.status
+        settings_path = str(status.settings_path) if status.settings_path else "N/A"
+        reason = status.reason or "N/A"
+        return [
+            f"- enabled: {str(status.enabled).lower()}",
+            f"- available: {str(status.available).lower()}",
+            f"- strong_boundary: {str(status.strong_boundary).lower()}",
+            f"- settings_path: `{settings_path}`",
+            f"- auto_allowed_unknown_bash: {context.sandbox_auto_allowed_unknown_bash_count}",
+            f"- reason: {reason}",
+        ]
+
     def _tool_efficiency(self, context: AgentContext) -> list[str]:
         warnings = self.analyze_tool_efficiency(context)
         if not warnings:
@@ -88,6 +115,7 @@ class ReportWriter:
             )
 
         return warnings
+
     def _cost_summary(self, context: AgentContext) -> str:
         tracker = context.cost_tracker
         return (

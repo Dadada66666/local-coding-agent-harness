@@ -115,6 +115,10 @@ class RiskClassifier:
         "pytest",
         "python -m pytest",
         "py -m pytest",
+        "python -m py_compile",
+        "py -m py_compile",
+        "python -m compileall",
+        "py -m compileall",
         "uv run pytest",
         "poetry run pytest",
         "ruff check",
@@ -301,16 +305,35 @@ class RiskClassifier:
             return None
 
         lowered = stripped.lower()
+
+        if lowered.startswith(("python -c", "python3 -c", "py -c")):
+            return "python -c"
+
+        if lowered.startswith(("python -m", "python3 -m", "py -m")):
+            parts = stripped.split()
+            if len(parts) >= 3:
+                return f"{parts[0]} -m {parts[2]}".lower()
+            return "python -m"
+
+        if lowered.startswith(("python ", "python3 ", "py ")):
+            return "python script"
+
+        if lowered.startswith("powershell"):
+            return "powershell"
+
+        if lowered.startswith("pwsh"):
+            return "pwsh"
+
+        if lowered.startswith("cmd /c"):
+            return "cmd /c"
+
         known_prefixes = sorted(
-            self.SAFE_CHECK_PREFIXES
-            + self.READ_ONLY_PREFIXES
-            + self.PYTHON_INLINE_PREFIXES
-            + ["python -m", "python", "py", "cmd /c", "powershell", "pwsh"],
+            self.SAFE_CHECK_PREFIXES + self.READ_ONLY_PREFIXES,
             key=len,
             reverse=True,
         )
         for prefix in known_prefixes:
-            if lowered.startswith(prefix):
+            if lowered == prefix or lowered.startswith(f"{prefix} "):
                 return prefix
 
         return " ".join(stripped.split()[:2])
@@ -515,12 +538,28 @@ class PermissionGate:
                 metadata=metadata,
             )
 
-        if context.permission_mode == PermissionMode.ACCEPT_EDITS:
+        if risk == BashRisk.UNKNOWN:
+            sandbox = getattr(context, "sandbox", None)
+            if (
+                context.permission_mode == PermissionMode.ACCEPT_EDITS
+                and sandbox is not None
+                and sandbox.can_auto_allow_unknown_bash()
+            ):
+                context.sandbox_auto_allowed_unknown_bash_count = (
+                    getattr(context, "sandbox_auto_allowed_unknown_bash_count", 0) + 1
+                )
+                return PermissionDecision(
+                    behavior=PermissionBehavior.ALLOW,
+                    risk=risk,
+                    message="Allowed unknown bash command because sandbox is enabled and available.",
+                    metadata={**metadata, "sandbox_auto_allowed": True},
+                )
+
             return PermissionDecision(
                 behavior=PermissionBehavior.ASK,
                 risk=risk,
                 message="Model requested an unknown shell command; approval required.",
-                proposed_scope="bash:unknown",
+                proposed_scope=self._bash_approval_scope(risk, bash_decision),
                 metadata=metadata,
             )
 
@@ -528,7 +567,7 @@ class PermissionGate:
             behavior=PermissionBehavior.ASK,
             risk=risk,
             message=f"Model requested a shell command while permission mode is {context.permission_mode}.",
-            proposed_scope=f"bash:{risk}",
+            proposed_scope=self._bash_approval_scope(risk, bash_decision),
             metadata=metadata,
         )
 
@@ -578,6 +617,11 @@ class PermissionGate:
         if existing_targets and all(existing_targets):
             return "edit_file"
         return bash_decision.suggested_tool
+
+    def _bash_approval_scope(self, risk: str, bash_decision: BashRiskDecision) -> str:
+        prefix = bash_decision.command_prefix or "unknown"
+        prefix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", prefix).strip("_") or "unknown"
+        return f"bash:{risk}:{prefix}"
 
     def _ask_user(self, decision: PermissionDecision, tool, args: dict, context) -> PermissionDecision:
         print("\n[permission request]")

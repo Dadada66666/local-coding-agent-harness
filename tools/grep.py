@@ -35,12 +35,14 @@ class GrepTool(BaseTool):
             raise ToolValidationError(f"invalid regex: {exc}") from exc
 
     def call(self, args: dict, context) -> ToolResult:
-        pattern = re.compile(str(args["pattern"]))
+        requested_pattern = str(args["pattern"])
+        requested_path = args.get("path", ".")
+        pattern = re.compile(requested_pattern)
         max_matches = self._max_matches(context)
-        root = context.safe_path(args.get("path", "."))
+        root = context.safe_path(requested_path)
 
         if not root.exists():
-            return ToolResult(ok=False, content=f"Path not found: {args.get('path', '.')}", error="path not found")
+            return ToolResult(ok=False, content=f"Path not found: {requested_path}", error="path not found")
 
         files = [] if self._is_skipped(root, context) else [root] if root.is_file() else self._iter_files(root, context)
         matches: list[str] = []
@@ -63,6 +65,11 @@ class GrepTool(BaseTool):
                             ok=True,
                             content="\n".join(matches),
                             metadata={
+                                "searches_names": False,
+                                "searches_content": True,
+                                "pattern": requested_pattern,
+                                "path": requested_path,
+                                "resolved_path": str(root),
                                 "match_count": len(matches),
                                 "scanned_files": scanned_files,
                                 "truncated": True,
@@ -75,7 +82,16 @@ class GrepTool(BaseTool):
         return ToolResult(
             ok=True,
             content=content,
-            metadata={"match_count": len(matches), "scanned_files": scanned_files, "truncated": False},
+            metadata={
+                "searches_names": False,
+                "searches_content": True,
+                "pattern": requested_pattern,
+                "path": requested_path,
+                "resolved_path": str(root),
+                "match_count": len(matches),
+                "scanned_files": scanned_files,
+                "truncated": False,
+            },
         )
 
     def _max_matches(self, context) -> int:

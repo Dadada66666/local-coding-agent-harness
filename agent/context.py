@@ -38,6 +38,10 @@ class RunConfig:
     grep_max_matches: int = 50
     compact_threshold_chars: int = 120000
     permission_mode: str = "manual_approval"
+    sandbox_enabled: bool = False
+    sandbox_auto_allow_bash: bool = True
+    sandbox_fail_if_unavailable: bool = False
+    sandbox_settings_path: str | None = None
 
 
 @dataclass
@@ -57,17 +61,20 @@ class AgentContext:
     cost_tracker: Any
     diff_manager: Any
     report_writer: Any
+    sandbox: Any | None = None
 
     finished: bool = False
     success: bool = False
     final_text: str = ""
     turn_count: int = 0
+    current_turn_id: int = 0
     repair_attempts: int = 0
     last_test_result: dict | None = None
     changed_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
     read_file_state: dict[str, ReadFileSnapshot] = field(default_factory=dict)
     tool_budget: ToolBudget = field(default_factory=ToolBudget)
+    sandbox_auto_allowed_unknown_bash_count: int = 0
 
     def safe_path(self, path: str) -> Path:
         resolved = (self.repo_path / path).resolve()

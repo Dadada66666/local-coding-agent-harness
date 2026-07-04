@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from runtime.diff_manager import DiffManager
 from runtime.hooks import HookEvent
 from runtime.permission import PermissionGate
 from runtime.report_writer import ReportWriter
+from runtime.sandbox import SandboxRuntime
 from runtime.trace_logger import TraceLogger
 
 
@@ -57,23 +59,75 @@ class AgentLoop:
 
     def run_until_idle(self, context: AgentContext) -> None:
         while not context.finished:
+            turn_id = context.turn_count + 1
+            context.current_turn_id = turn_id
+            turn_started = time.monotonic()
+            context.trace.log(
+                {
+                    "type": "turn_start",
+                    "turn_id": turn_id,
+                    "message_count": len(context.messages),
+                }
+            )
+
             self.runtime.context_manager.prepare_context(context)
 
+            context.trace.log(
+                {
+                    "type": "model_call_start",
+                    "turn_id": turn_id,
+                    "message_count": len(context.messages),
+                    "tool_schema_count": len(self.runtime.tool_registry.schemas()),
+                }
+            )
+            model_started = time.monotonic()
             response = self.model_client.call(
                 system=context.system_prompt,
                 messages=context.messages,
                 tools=self.runtime.tool_registry.schemas(),
             )
+            model_duration_ms = round((time.monotonic() - model_started) * 1000, 3)
 
             context.add_assistant_message(response.message)
-            context.trace.log_model_usage(response.usage)
+            context.trace.log(
+                {
+                    "type": "model_call_end",
+                    "turn_id": turn_id,
+                    "duration_ms": model_duration_ms,
+                    "tool_call_count": len(response.tool_calls),
+                    "tool_names": [tool_call.name for tool_call in response.tool_calls],
+                    "input_tokens": getattr(response.usage, "input_tokens", None),
+                    "output_tokens": getattr(response.usage, "output_tokens", None),
+                }
+            )
+            context.trace.log_model_usage(response.usage, turn_id=turn_id)
             context.cost_tracker.add_usage(response.usage)
 
             if not response.tool_calls:
                 context.final_text = response.text
                 context.finished = True
                 context.success = self.infer_success(context)
+                context.trace.log(
+                    {
+                        "type": "final_response",
+                        "turn_id": turn_id,
+                        "message_count": len(context.messages),
+                        "success": context.success,
+                        "text_preview": context.final_text[:500] if context.final_text else "",
+                    }
+                )
+                self._log_turn_end(context, turn_id, turn_started)
                 break
+
+            context.trace.log(
+                {
+                    "type": "tool_batch_start",
+                    "turn_id": turn_id,
+                    "tool_call_count": len(response.tool_calls),
+                    "tool_names": [tool_call.name for tool_call in response.tool_calls],
+                }
+            )
+            tool_batch_started = time.monotonic()
 
             for tool_call in response.tool_calls:
                 result = self.runtime.executor.execute(tool_call, context)
@@ -81,6 +135,17 @@ class AgentLoop:
                     tool_call_id=tool_call.id,
                     content=result.content,
                 )
+
+            context.trace.log(
+                {
+                    "type": "tool_batch_end",
+                    "turn_id": turn_id,
+                    "duration_ms": round((time.monotonic() - tool_batch_started) * 1000, 3),
+                    "tool_call_count": len(response.tool_calls),
+                    "tool_names": [tool_call.name for tool_call in response.tool_calls],
+                    "message_count": len(context.messages),
+                }
+            )
 
             if self.runtime.recovery_policy.should_inject_retry(context):
                 retry_message = self.runtime.recovery_policy.build_retry_message(context)
@@ -94,6 +159,28 @@ class AgentLoop:
                 context.finished = True
                 context.success = False
                 context.final_text = "Stopped: max turns exceeded."
+                context.trace.log(
+                    {
+                        "type": "max_turns_exceeded",
+                        "turn_id": turn_id,
+                        "max_turns": context.config.max_turns,
+                        "message_count": len(context.messages),
+                    }
+                )
+
+            self._log_turn_end(context, turn_id, turn_started)
+
+    def _log_turn_end(self, context: AgentContext, turn_id: int, started: float) -> None:
+        context.trace.log(
+            {
+                "type": "turn_end",
+                "turn_id": turn_id,
+                "duration_ms": round((time.monotonic() - started) * 1000, 3),
+                "message_count": len(context.messages),
+                "finished": context.finished,
+                "success": context.success,
+            }
+        )
 
     def create_context(self, task: str, include_initial_message: bool = True) -> AgentContext:
         repo_path = self.repo_path.resolve()
@@ -103,6 +190,10 @@ class AgentLoop:
 
         config = self.config or RunConfig(permission_mode=self.permission_mode)
         config.permission_mode = self.permission_mode
+        sandbox = SandboxRuntime(repo_path=repo_path, run_dir=run_dir, config=config)
+
+        if config.sandbox_fail_if_unavailable and sandbox.status.enabled and not sandbox.status.available:
+            raise RuntimeError(f"Sandbox requested but unavailable: {sandbox.status.reason}")
 
         return AgentContext(
             run_id=run_id,
@@ -110,15 +201,16 @@ class AgentLoop:
             repo_path=repo_path,
             run_dir=run_dir,
             messages=build_initial_messages(task) if include_initial_message else [],
-            system_prompt=build_system_prompt(repo_path),
+            system_prompt=build_system_prompt(repo_path, sandbox_status=sandbox.prompt_status()),
             config=config,
             permission_mode=config.permission_mode,
             permission_gate=PermissionGate(),
-            trace=TraceLogger(run_dir),
+            trace=TraceLogger(run_dir, run_id=run_id),
             artifacts=ArtifactStore(run_dir),
             cost_tracker=CostTracker(run_dir),
             diff_manager=DiffManager(repo_path, run_dir),
             report_writer=ReportWriter(),
+            sandbox=sandbox,
         )
 
     def infer_success(self, context: AgentContext) -> bool:
