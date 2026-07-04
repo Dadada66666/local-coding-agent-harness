@@ -75,19 +75,24 @@ class ReportWriter:
                 "- enabled: false",
                 "- available: false",
                 "- strong_boundary: false",
+                "- settings_applied: false",
                 "- settings_path: N/A",
+                "- executable_path: N/A",
                 "- auto_allowed_unknown_bash: 0",
                 "- reason: N/A",
             ]
 
         status = sandbox.status
         settings_path = str(status.settings_path) if status.settings_path else "N/A"
+        executable_path = status.executable_path or "N/A"
         reason = status.reason or "N/A"
         return [
             f"- enabled: {str(status.enabled).lower()}",
             f"- available: {str(status.available).lower()}",
             f"- strong_boundary: {str(status.strong_boundary).lower()}",
+            f"- settings_applied: {str(status.settings_applied).lower()}",
             f"- settings_path: `{settings_path}`",
+            f"- executable_path: `{executable_path}`",
             f"- auto_allowed_unknown_bash: {context.sandbox_auto_allowed_unknown_bash_count}",
             f"- reason: {reason}",
         ]

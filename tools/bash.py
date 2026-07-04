@@ -47,8 +47,9 @@ class BashTool(BaseTool):
 
         sandbox = getattr(context, "sandbox", None)
         if sandbox is not None and sandbox.should_wrap_command(command):
-            argv = sandbox.wrap_argv(argv)
-            sandbox_metadata["wrapped"] = True
+            wrapped_argv = sandbox.wrap_argv(argv)
+            sandbox_metadata["wrapped"] = wrapped_argv != argv
+            argv = wrapped_argv
 
         stdin_mode = "provided" if stdin_content is not None else "devnull"
         stdin_kwargs = {"input": str(stdin_content)} if stdin_content is not None else {"stdin": subprocess.DEVNULL}
@@ -150,6 +151,8 @@ class BashTool(BaseTool):
                 "strong_boundary": False,
                 "reason": None,
                 "settings_path": None,
+                "executable_path": None,
+                "settings_applied": False,
                 "wrapped": False,
             }
 
