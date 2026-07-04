@@ -63,3 +63,47 @@ You can read a previous report with:
 ```bash
 python -m cli.main report <run_id>
 ```
+
+## Sandbox Runtime
+
+Bash commands can be wrapped with Anthropic Sandbox Runtime (`srt`) for an
+extra local execution boundary:
+
+```bash
+npm install -g @anthropic-ai/sandbox-runtime
+srt --version
+```
+
+Run the harness with sandbox wrapping enabled:
+
+```bash
+python -m cli.main run --sandbox
+```
+
+Useful options:
+
+- `--sandbox-fail-if-unavailable`: stop startup if `srt` cannot actually run.
+- `--sandbox-settings <path>`: use a custom `srt-settings.json`.
+- `--sandbox-auto-allow/--no-sandbox-auto-allow`: control whether unknown bash
+  commands may be auto-allowed when a strong sandbox is available.
+
+The runtime does not trust package presence alone. On startup it resolves the
+real `srt` executable and runs a small probe command. On Linux/macOS the probe
+and wrapped BashTool commands use `--settings <srt-settings.json>`. On Windows
+they intentionally run without `--settings` to avoid current srt-win ACL stamp
+instability. If the probe fails, sandbox metadata is still written to
+trace/report, but BashTool falls back to normal execution and permission checks
+stay active.
+
+On Windows, complete the one-time SRT provisioning step before expecting `srt`
+to run commands:
+
+```bash
+srt windows-install
+```
+
+This step may require UAC/admin rights. Windows support in SRT is still treated
+as a weak boundary by this project, so unknown bash commands are not
+auto-approved on Windows even when `srt` is installed. Destructive commands,
+network commands, and file writes through shell remain controlled by
+`PermissionGate`.
