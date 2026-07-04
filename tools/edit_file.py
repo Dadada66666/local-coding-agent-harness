@@ -49,6 +49,21 @@ class EditFileTool(BaseTool):
         if not target.is_file():
             return ToolResult(ok=False, content=f"Not a file: {requested_path}", error="not a file")
 
+        snapshot = context.read_file_state.get(str(target))
+        if snapshot is None:
+            return ToolResult(
+                ok=False,
+                content=f"File has not been read yet: {requested_path}. Use read_file first.",
+                error="file not read",
+            )
+
+        if target.stat().st_mtime_ns != snapshot.mtime_ns:
+            return ToolResult(
+                ok=False,
+                content=f"File changed since last read: {requested_path}. Read it again before editing.",
+                error="stale file",
+            )
+
         old_text = str(args["old_text"])
         new_text = str(args["new_text"])
         original = target.read_text(encoding="utf-8")

@@ -7,6 +7,7 @@ from runtime.default_hooks import (
     large_output_hook,
     permission_hook,
     post_tool_trace_hook,
+    record_tool_budget_hook,
     pre_tool_trace_hook,
     stop_report_hook,
     test_result_hook,
@@ -55,6 +56,7 @@ def build_hooks() -> HookManager:
     hooks.register(HookEvent.PRE_TOOL_USE, permission_hook)
 
     hooks.register(HookEvent.POST_TOOL_USE, large_output_hook)
+    hooks.register(HookEvent.POST_TOOL_USE, record_tool_budget_hook)
     hooks.register(HookEvent.POST_TOOL_USE, test_result_hook)
     hooks.register(HookEvent.POST_TOOL_USE, post_tool_trace_hook)
 

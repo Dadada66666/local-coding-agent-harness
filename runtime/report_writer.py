@@ -27,6 +27,7 @@ class ReportWriter:
             "## Test Result",
             f"Command: {test_result.get('command', 'N/A')}",
             f"Result: {'passed' if test_result.get('ok') else 'failed' if test_result else 'not recorded'}",
+            f"Verification: {self._verification_status(context)}",
             "",
             "## Failure Summary",
             test_result.get("error") or "N/A",
@@ -36,6 +37,9 @@ class ReportWriter:
             "",
             "## Cost",
             cost_summary,
+            "",
+            "## Tool Efficiency",
+            *self._tool_efficiency(context),
             "",
             "## Summary",
             context.final_text or "N/A",
@@ -51,11 +55,39 @@ class ReportWriter:
         path.write_text("\n".join(lines), encoding="utf-8")
         return path
 
+    def _verification_status(self, context: AgentContext) -> str:
+        if context.last_test_result is None:
+            return "not recorded"
+        return "passed" if context.last_test_result.get("ok") else "failed"
+
     def _changed_files(self, context: AgentContext) -> list[str]:
         if not context.changed_files:
             return ["- N/A"]
         return [f"- {path}" for path in sorted(context.changed_files)]
 
+    def _tool_efficiency(self, context: AgentContext) -> list[str]:
+        warnings = self.analyze_tool_efficiency(context)
+        if not warnings:
+            return ["- N/A"]
+        return [f"- {warning}" for warning in warnings]
+
+    def analyze_tool_efficiency(self, context: AgentContext) -> list[str]:
+        budget = context.tool_budget
+        warnings = []
+
+        if budget.read_file_calls >= 8 and budget.grep_calls == 0:
+            warnings.append(
+                "Many files were read without repository search. "
+                "This may indicate inefficient context discovery."
+            )
+
+        if budget.truncated_results >= 3:
+            warnings.append(
+                "Several tool results were truncated. "
+                "Consider narrowing queries or improving pagination."
+            )
+
+        return warnings
     def _cost_summary(self, context: AgentContext) -> str:
         tracker = context.cost_tracker
         return (

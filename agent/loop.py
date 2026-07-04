@@ -122,9 +122,11 @@ class AgentLoop:
         )
 
     def infer_success(self, context: AgentContext) -> bool:
+        if context.changed_files and context.last_test_result is None:
+            return False
         if context.last_test_result is not None:
             return bool(context.last_test_result.get("ok"))
-        return True
+        return bool(context.final_text)
 
 
 AgentRunner = AgentLoop

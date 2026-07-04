@@ -12,11 +12,30 @@ def make_run_id() -> str:
     return f"{prefix}-{uuid4().hex[:8]}"
 
 
+@dataclass(frozen=True)
+class ReadFileSnapshot:
+    mtime_ns: int
+    size: int
+    sha256: str
+    partial: bool
+
+
+@dataclass
+class ToolBudget:
+    read_file_calls: int = 0
+    grep_calls: int = 0
+    list_dir_calls: int = 0
+    bash_calls: int = 0
+    chars_returned: int = 0
+    truncated_results: int = 0
+
+
 @dataclass
 class RunConfig:
     max_turns: int = 30
     max_repair_attempts: int = 3
     max_tool_result_chars: int = 8000
+    grep_max_matches: int = 50
     compact_threshold_chars: int = 120000
     permission_mode: str = "manual_approval"
 
@@ -47,6 +66,8 @@ class AgentContext:
     last_test_result: dict | None = None
     changed_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
+    read_file_state: dict[str, ReadFileSnapshot] = field(default_factory=dict)
+    tool_budget: ToolBudget = field(default_factory=ToolBudget)
 
     def safe_path(self, path: str) -> Path:
         resolved = (self.repo_path / path).resolve()
@@ -70,4 +91,3 @@ class AgentContext:
                 ],
             }
         )
-
