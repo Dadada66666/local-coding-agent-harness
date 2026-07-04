@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import platform
 from pathlib import Path
 
@@ -32,8 +31,8 @@ Final answer:
 
 def detect_shell_name() -> str:
     if platform.system() == "Windows":
-        return "cmd.exe via subprocess shell=True"
-    return os.environ.get("SHELL", "/bin/sh")
+        return "PowerShell, preferring pwsh then powershell.exe, via subprocess shell=False"
+    return "/bin/sh via subprocess shell=False"
 
 
 def build_system_prompt(workdir: Path) -> str:

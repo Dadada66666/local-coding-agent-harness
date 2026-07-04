@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -50,6 +51,7 @@ class BashTool(BaseTool):
                 capture_output=True,
                 check=False,
                 timeout=timeout,
+                env=self._build_env(),
             )
         except subprocess.TimeoutExpired as exc:
             output = self._combine_output(exc.stdout, exc.stderr).strip()
@@ -88,6 +90,8 @@ class BashTool(BaseTool):
             wrapped_command = (
                 "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                 "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+                "$env:PYTHONIOENCODING = 'utf-8'; "
+                "$env:PYTHONUTF8 = '1'; "
                 f"{command}"
             )
             return [
@@ -102,6 +106,12 @@ class BashTool(BaseTool):
             ]
 
         return ["/bin/sh", "-lc", command]
+
+    def _build_env(self) -> dict[str, str]:
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        env["PYTHONUTF8"] = "1"
+        return env
 
     def _shell_name(self) -> str:
         if platform.system() == "Windows":
