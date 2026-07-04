@@ -9,7 +9,7 @@ BASE_SYSTEM_PROMPT = """You are a local coding agent working inside {workdir}.
 
 Runtime:
 - OS: {os_name}
-- Shell for bash tool: {shell_name}
+- Command shell: {shell_name}
 
 Behavior:
 - Inspect relevant context before making changes.
