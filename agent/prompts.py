@@ -9,7 +9,6 @@ BASE_SYSTEM_PROMPT = """You are a local coding agent working inside {workdir}.
 Runtime:
 - OS: {os_name}
 - Command shell: {shell_name}
-- Sandbox: {sandbox_status}
 
 Behavior:
 - Inspect relevant context before making changes.
@@ -38,12 +37,11 @@ def detect_shell_name() -> str:
     return "/bin/sh via subprocess shell=False"
 
 
-def build_system_prompt(workdir: Path, sandbox_status: str = "disabled") -> str:
+def build_system_prompt(workdir: Path) -> str:
     return BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
         os_name=platform.system(),
         shell_name=detect_shell_name(),
-        sandbox_status=sandbox_status,
     )
 
 
@@ -52,3 +50,4 @@ SYSTEM_PROMPT = build_system_prompt(Path.cwd())
 
 def build_initial_messages(task: str) -> list[dict]:
     return [{"role": "user", "content": task}]
+

@@ -201,7 +201,7 @@ class AgentLoop:
             repo_path=repo_path,
             run_dir=run_dir,
             messages=build_initial_messages(task) if include_initial_message else [],
-            system_prompt=build_system_prompt(repo_path, sandbox_status=sandbox.prompt_status()),
+            system_prompt=build_system_prompt(repo_path),
             config=config,
             permission_mode=config.permission_mode,
             permission_gate=PermissionGate(),

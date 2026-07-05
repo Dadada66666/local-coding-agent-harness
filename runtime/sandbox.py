@@ -120,13 +120,19 @@ class SandboxRuntime:
             "allowLocalBinding": False,
         }
 
+        deny_write = [".env", ".mcp.json", ".git/config", ".git/hooks"]
+
+        for relative_path in [".claude/commands", ".claude/agents", ".claude/skills"]:
+            if (self.repo_path / relative_path).exists():
+                deny_write.append(relative_path)
+
         data = {
             "network": network,
             "filesystem": {
                 "denyRead": ["~/.ssh"],
                 "allowRead": [],
                 "allowWrite": [str(self.repo_path), "/tmp"],
-                "denyWrite": [".env", ".git/hooks", ".git/config", ".claude", ".mcp.json"],
+                "denyWrite": deny_write,
             },
         }
 
