@@ -18,6 +18,7 @@ class TraceLogger:
     def log(self, event: dict) -> None:
         try:
             self.step += 1
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             now = time.time()
             common = {
                 "event_id": uuid4().hex,

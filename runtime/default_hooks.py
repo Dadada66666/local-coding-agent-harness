@@ -191,29 +191,79 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
 
 
 def stop_report_hook(context) -> None:
-    readable_trace_path = ReadableTraceWriter().write(context)
-    report_path = context.report_writer.write(context)
-    diff_path = context.diff_manager.write_patch(context)
-    cost_path = context.cost_tracker.write(context)
+    artifact_errors = []
+    try:
+        context.run_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        artifact_errors.append({"artifact": "run_dir", "error": str(exc)})
+
+    readable_trace_path, error = _write_stop_artifact(
+        context,
+        "readable_trace",
+        lambda: ReadableTraceWriter().write(context),
+    )
+    if error:
+        artifact_errors.append(error)
+
+    report_path, error = _write_stop_artifact(
+        context,
+        "report",
+        lambda: context.report_writer.write(context),
+    )
+    if error:
+        artifact_errors.append(error)
+
+    diff_path, error = _write_stop_artifact(
+        context,
+        "diff",
+        lambda: context.diff_manager.write_patch(context),
+    )
+    if error:
+        artifact_errors.append(error)
+
+    cost_path, error = _write_stop_artifact(
+        context,
+        "cost",
+        lambda: context.cost_tracker.write(context),
+    )
+    if error:
+        artifact_errors.append(error)
 
     context.trace.log(
         {
             "type": "stop",
             "success": context.success,
-            "report_path": str(report_path),
-            "diff_path": str(diff_path),
-            "cost_path": str(cost_path),
-            "readable_trace_path": str(readable_trace_path),
+            "report_path": str(report_path) if report_path else None,
+            "diff_path": str(diff_path) if diff_path else None,
+            "cost_path": str(cost_path) if cost_path else None,
+            "readable_trace_path": str(readable_trace_path) if readable_trace_path else None,
+            "artifact_errors": artifact_errors,
             "repair_attempts": context.repair_attempts,
         }
     )
 
-    print(f"[report] {report_path}")
-    print(f"[readable-trace] {readable_trace_path}")
-    print(f"[diff] {diff_path}")
-    print(f"[cost] {cost_path}")
+    _print_artifact_path("report", report_path)
+    _print_artifact_path("readable-trace", readable_trace_path)
+    _print_artifact_path("diff", diff_path)
+    _print_artifact_path("cost", cost_path)
+    for error in artifact_errors:
+        print(f"[artifact-error] {error['artifact']}: {error['error']}")
 
     return None
+
+
+def _write_stop_artifact(context, name: str, writer):
+    try:
+        return writer(), None
+    except Exception as exc:
+        error = {"artifact": name, "error": str(exc), "exception_type": exc.__class__.__name__}
+        context.trace.log({"type": "stop_artifact_error", **error})
+        return None, error
+
+
+def _print_artifact_path(label: str, path) -> None:
+    if path is not None:
+        print(f"[{label}] {path}")
 
 
 def _turn_id(context) -> int:

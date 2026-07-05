@@ -69,7 +69,17 @@ class AgentLoop:
         if context.stop_recorded:
             return
         context.stop_recorded = True
-        self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+        try:
+            self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+        except Exception as exc:
+            context.trace.log(
+                {
+                    "type": "stop_hook_error",
+                    "exception_type": exc.__class__.__name__,
+                    "exception": self._preview_error(str(exc)),
+                }
+            )
+            print(f"[stop-error] {exc.__class__.__name__}: {self._preview_error(str(exc))}")
 
     def abort(self, context: AgentContext, reason: str, message: str, exc: BaseException | None = None) -> None:
         context.finished = True

@@ -10,6 +10,7 @@ class ReadableTraceWriter:
 
     def write(self, context) -> Path:
         path = context.run_dir / "readable_trace.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
         lines = [
             "# Readable Trace",
             "",

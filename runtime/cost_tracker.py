@@ -20,6 +20,7 @@ class CostTracker:
         self.output_tokens += getattr(usage, "output_tokens", 0) or 0
 
     def write(self, context=None) -> Path:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(
                 {
@@ -34,4 +35,3 @@ class CostTracker:
             encoding="utf-8",
         )
         return self.path
-

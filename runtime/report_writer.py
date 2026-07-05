@@ -8,6 +8,7 @@ from agent.context import AgentContext
 class ReportWriter:
     def write(self, context: AgentContext) -> Path:
         path = context.run_dir / "report.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
         test_result = context.last_test_result or {}
         cost_path = context.run_dir / "cost.json"
         cost_summary = self._cost_summary(context)
