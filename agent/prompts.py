@@ -13,7 +13,7 @@ Runtime:
 Behavior:
 - Inspect relevant context before making changes.
 - Use the available tools according to their purpose.
-- Make minimal correct changes.
+- Use the least context sufficient to make a correct next action
 - After code edits, run the smallest relevant check when available.
 - Report honestly if verification was not possible.
 - For commands that require stdin, use the bash tool input field.

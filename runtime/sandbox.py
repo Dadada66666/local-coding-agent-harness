@@ -4,6 +4,7 @@ import json
 import platform
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -106,13 +107,22 @@ class SandboxRuntime:
         custom = getattr(self.config, "sandbox_settings_path", None)
         if custom:
             return Path(custom).expanduser().resolve()
-        return self.run_dir / "srt-settings.json"
+        return (
+            Path(tempfile.gettempdir())
+            / "local-coding-agent-harness"
+            / "srt-settings"
+            / f"{self.run_dir.name}.json"
+        )
 
     def _write_settings(self, path: Path | None) -> None:
         if path is None:
             return
 
         path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.parent.chmod(0o700)
+        except OSError:
+            pass
 
         network = {
             "allowedDomains": [],

@@ -10,6 +10,7 @@ class DiffManager:
         self.path = run_dir / "diff.patch"
 
     def write_patch(self, context=None) -> Path:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         completed = subprocess.run(
             ["git", "diff", "--"],
             cwd=self.repo_path,
