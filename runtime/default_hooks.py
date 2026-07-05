@@ -132,9 +132,10 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         return None
 
     command = str(tool_call.arguments.get("command", ""))
-    is_test_command = "pytest" in command or "unittest" in command or "npm test" in command
+    is_test_command = _is_test_command(command)
+    is_verification_command = _is_verification_command(tool_call, result)
 
-    if not is_test_command:
+    if not is_test_command and not is_verification_command:
         return None
 
     context.last_test_result = {
@@ -145,7 +146,9 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         "metadata": result.metadata,
     }
 
-    result.metadata["test_command"] = True
+    result.metadata["verification_command"] = True
+    if is_test_command:
+        result.metadata["test_command"] = True
     context.trace.log(
         {
             "type": "test_result",
@@ -154,6 +157,7 @@ def test_result_hook(tool_call, tool, result, context) -> None:
             "command": command,
             "ok": result.ok,
             "error": result.error,
+            "purpose": _verification_purpose(tool_call, result),
         }
     )
 
@@ -203,6 +207,29 @@ def stop_report_hook(context) -> None:
 
 def _turn_id(context) -> int:
     return int(getattr(context, "current_turn_id", context.turn_count + 1))
+
+
+def _is_test_command(command: str) -> bool:
+    normalized = command.lower()
+    return "pytest" in normalized or "unittest" in normalized or "npm test" in normalized
+
+
+def _is_verification_command(tool_call, result) -> bool:
+    return _verification_purpose(tool_call, result) == "verify"
+
+
+def _verification_purpose(tool_call, result) -> str | None:
+    values = [
+        getattr(tool_call, "arguments", {}).get("purpose"),
+        result.metadata.get("purpose"),
+    ]
+    for value in values:
+        if value is None:
+            continue
+        purpose = str(value).strip().lower()
+        if purpose:
+            return purpose
+    return None
 
 
 def _normalized_args(tool_name: str, args: dict, context) -> dict:

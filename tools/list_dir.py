@@ -3,7 +3,7 @@ from __future__ import annotations
 from tools.base import BaseTool, ToolResult
 
 
-SKIP_NAMES = {".git", ".venv", "venv", "node_modules", "__pycache__"}
+SKIP_NAMES = {".agent", ".git", ".venv", "venv", "node_modules", "__pycache__"}
 MAX_ENTRIES = 200
 
 
@@ -58,4 +58,3 @@ class ListDirTool(BaseTool):
                 "truncated": truncated,
             },
         )
-
