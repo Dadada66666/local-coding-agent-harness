@@ -70,6 +70,8 @@ class AgentContext:
     finished: bool = False
     success: bool = False
     final_text: str = ""
+    abort_reason: str | None = None
+    stop_recorded: bool = False
     turn_count: int = 0
     current_turn_id: int = 0
     repair_attempts: int = 0

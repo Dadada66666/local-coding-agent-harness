@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from functools import lru_cache
 import json
 from pathlib import Path
+import sys
 
 import typer
 
@@ -14,6 +16,11 @@ app = typer.Typer(
     invoke_without_command=True,
     no_args_is_help=False,
 )
+
+PROMPT_CYAN = "\033[36m"
+PROMPT_RESET = "\033[0m"
+READLINE_IGNORE_START = "\001"
+READLINE_IGNORE_END = "\002"
 
 
 @app.callback()
@@ -202,25 +209,52 @@ def run_interactive(
     typer.echo(f"Sandbox: {context.sandbox.prompt_status() if context.sandbox else 'disabled'}")
     typer.echo("Enter a task and press Enter. Type q or exit to quit.")
 
-    while True:
-        try:
-            query = input("\033[36ms01 >> \033[0m")
-        except (EOFError, KeyboardInterrupt):
-            typer.echo("")
-            break
+    try:
+        while True:
+            try:
+                query = input(interactive_prompt())
+            except (EOFError, KeyboardInterrupt):
+                typer.echo("")
+                break
 
-        query = query.strip()
-        if query.lower() in {"q", "quit", "exit"}:
-            break
-        if not query:
-            continue
+            query = query.strip()
+            if query.lower() in {"q", "quit", "exit"}:
+                break
+            if not query:
+                continue
 
-        runner.submit(context, query)
-        if context.final_text:
-            typer.echo(context.final_text)
+            runner.submit(context, query)
+            if context.final_text:
+                typer.echo(context.final_text)
+            if context.abort_reason:
+                break
+    finally:
+        runner.finish(context)
 
-    runner.finish(context)
     typer.echo(f"Report saved to: {context.run_dir / 'report.md'}")
+
+
+def interactive_prompt() -> str:
+    return f"{_prompt_control(PROMPT_CYAN)}s01 >> {_prompt_control(PROMPT_RESET)}"
+
+
+def _prompt_control(sequence: str) -> str:
+    if not _readline_prompt_markers_supported():
+        return sequence
+    return f"{READLINE_IGNORE_START}{sequence}{READLINE_IGNORE_END}"
+
+
+@lru_cache(maxsize=1)
+def _readline_prompt_markers_supported() -> bool:
+    if sys.platform == "win32":
+        return False
+
+    try:
+        import readline  # noqa: F401
+    except ImportError:
+        return False
+
+    return True
 
 
 def build_run_config(

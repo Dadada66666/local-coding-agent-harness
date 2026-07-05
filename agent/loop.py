@@ -18,6 +18,9 @@ from runtime.sandbox import SandboxRuntime
 from runtime.trace_logger import TraceLogger
 
 
+MAX_ERROR_CHARS = 1000
+
+
 @dataclass
 class AgentLoop:
     model_client: ModelClient
@@ -28,13 +31,17 @@ class AgentLoop:
 
     def run(self, task: str) -> AgentContext:
         context = self.create_context(task=task, include_initial_message=True)
-        self.runtime.hooks.trigger(
-            HookEvent.USER_PROMPT_SUBMIT,
-            task=task,
-            context=context,
-        )
-        self.run_until_idle(context)
-        self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+        try:
+            self.runtime.hooks.trigger(
+                HookEvent.USER_PROMPT_SUBMIT,
+                task=task,
+                context=context,
+            )
+            self.run_until_idle(context)
+        except KeyboardInterrupt as exc:
+            self.abort(context, reason="interrupted", message="Stopped: interrupted by user (Ctrl+C).", exc=exc)
+        finally:
+            self.finish(context)
         return context
 
     def start_interactive(self, task: str = "Interactive coding session") -> AgentContext:
@@ -51,11 +58,34 @@ class AgentLoop:
         context.add_user_message({"role": "user", "content": prompt})
         context.finished = False
         context.final_text = ""
-        self.run_until_idle(context)
+        context.abort_reason = None
+        try:
+            self.run_until_idle(context)
+        except KeyboardInterrupt as exc:
+            self.abort(context, reason="interrupted", message="Stopped: interrupted by user (Ctrl+C).", exc=exc)
         return context
 
     def finish(self, context: AgentContext) -> None:
+        if context.stop_recorded:
+            return
+        context.stop_recorded = True
         self.runtime.hooks.trigger(HookEvent.STOP, context=context)
+
+    def abort(self, context: AgentContext, reason: str, message: str, exc: BaseException | None = None) -> None:
+        context.finished = True
+        context.success = False
+        context.abort_reason = reason
+        context.final_text = message
+        context.trace.log(
+            {
+                "type": "run_aborted",
+                "turn_id": context.current_turn_id or None,
+                "reason": reason,
+                "message": message,
+                "exception_type": exc.__class__.__name__ if exc else None,
+                "exception": self._preview_error(str(exc)) if exc else None,
+            }
+        )
 
     def run_until_idle(self, context: AgentContext) -> None:
         while not context.finished:
@@ -81,11 +111,24 @@ class AgentLoop:
                 }
             )
             model_started = time.monotonic()
-            response = self.model_client.call(
-                system=context.system_prompt,
-                messages=context.messages,
-                tools=self.runtime.tool_registry.schemas(),
-            )
+            try:
+                response = self.model_client.call(
+                    system=context.system_prompt,
+                    messages=context.messages,
+                    tools=self.runtime.tool_registry.schemas(),
+                )
+            except KeyboardInterrupt:
+                context.trace.log(
+                    {
+                        "type": "model_call_interrupted",
+                        "turn_id": turn_id,
+                        "duration_ms": round((time.monotonic() - model_started) * 1000, 3),
+                    }
+                )
+                raise
+            except Exception as exc:
+                self._fail_model_call(context, turn_id, turn_started, model_started, exc)
+                break
             model_duration_ms = round((time.monotonic() - model_started) * 1000, 3)
 
             context.add_assistant_message(response.message)
@@ -172,6 +215,30 @@ class AgentLoop:
 
             self._log_turn_end(context, turn_id, turn_started)
 
+    def _fail_model_call(
+        self,
+        context: AgentContext,
+        turn_id: int,
+        turn_started: float,
+        model_started: float,
+        exc: Exception,
+    ) -> None:
+        message = f"Stopped: model call failed: {exc.__class__.__name__}: {self._preview_error(str(exc))}"
+        context.finished = True
+        context.success = False
+        context.abort_reason = "model_call_failed"
+        context.final_text = message
+        context.trace.log(
+            {
+                "type": "model_call_error",
+                "turn_id": turn_id,
+                "duration_ms": round((time.monotonic() - model_started) * 1000, 3),
+                "exception_type": exc.__class__.__name__,
+                "exception": self._preview_error(str(exc)),
+            }
+        )
+        self._log_turn_end(context, turn_id, turn_started)
+
     def _log_turn_end(self, context: AgentContext, turn_id: int, started: float) -> None:
         context.trace.log(
             {
@@ -183,6 +250,12 @@ class AgentLoop:
                 "success": context.success,
             }
         )
+
+    def _preview_error(self, text: str) -> str:
+        if len(text) <= MAX_ERROR_CHARS:
+            return text
+        omitted = len(text) - MAX_ERROR_CHARS
+        return f"{text[:MAX_ERROR_CHARS]}... {omitted} chars omitted"
 
     def create_context(self, task: str, include_initial_message: bool = True) -> AgentContext:
         repo_path = self.repo_path.resolve()
