@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 
 from agent.context import ReadFileSnapshot
+from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -25,6 +26,17 @@ class ReadFileTool(BaseTool):
     read_only = True
     dangerous = False
     concurrency_safe = True
+
+    def classify_operation(self, args: dict, context) -> Operation:
+        requested_path = args.get("path", "")
+        return Operation(
+            kind="fs.read",
+            action="read",
+            subject=str(requested_path),
+            paths=[str(requested_path)] if requested_path else [],
+            scope_key=f"read:file:{requested_path}",
+            is_read_only=True,
+        )
 
     def validate(self, args: dict, context) -> None:
         if not args.get("path"):

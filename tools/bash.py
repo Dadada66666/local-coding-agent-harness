@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 
+from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -29,6 +30,18 @@ class BashTool(BaseTool):
     read_only = False
     dangerous = True
     concurrency_safe = False
+
+    def classify_operation(self, args: dict, context) -> Operation:
+        command = str(args.get("command", ""))
+        return Operation(
+            kind="process.exec",
+            action="bash",
+            subject=self._command_subject(command),
+            command=command,
+            scope_key=None,
+            is_read_only=False,
+            is_destructive=True,
+        )
 
     def validate(self, args: dict, context) -> None:
         if not args.get("command"):
@@ -141,6 +154,12 @@ class BashTool(BaseTool):
 
     def _windows_shell_executable(self) -> str:
         return shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+
+    def _command_subject(self, command: str) -> str:
+        parts = command.strip().split()
+        if not parts:
+            return "bash"
+        return " ".join(parts[:2])
 
     def _sandbox_metadata(self, context) -> dict:
         sandbox = getattr(context, "sandbox", None)

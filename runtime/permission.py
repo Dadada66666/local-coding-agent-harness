@@ -4,6 +4,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from runtime.operation import Operation
+from runtime.permission_rules import PermissionRule, PermissionRuleValue
+
 
 class PermissionMode:
     READ_ONLY = "read_only"
@@ -53,6 +56,9 @@ class PermissionDecision:
     message: str
     proposed_scope: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    operation: Operation | None = None
+    terminal_on_deny: bool = False
+    decision_reason: str | None = None
 
 
 class RiskClassifier:
@@ -66,6 +72,12 @@ class RiskClassifier:
     )
     SHELL_REDIRECT_RE = re.compile(
         r"""(?<![<>])>>?\s*(?P<path>\"[^\"]+\"|'[^']+'|[^\s&|;]+)""",
+        re.IGNORECASE,
+    )
+    HEREDOC_START_RE = re.compile(
+        r"""<<-?\s*(?P<quote>['"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*) (?P=quote)""".replace(
+            " ", ""
+        ),
         re.IGNORECASE,
     )
 
@@ -176,6 +188,16 @@ class RiskClassifier:
                 confidence="high" if python_paths else "medium",
             )
 
+        if self._is_apply_patch_heredoc(command):
+            return BashRiskDecision(
+                risk=BashRisk.FILE_WRITE_VIA_BASH,
+                reason="apply_patch through shell heredoc can write files.",
+                target_paths=[],
+                command_prefix=command_prefix,
+                suggested_tool="edit_file",
+                confidence="high",
+            )
+
         if not self._is_python_inline(command_prefix):
             redirect_paths = self._redirection_targets(command)
             if redirect_paths:
@@ -242,6 +264,9 @@ class RiskClassifier:
             confidence="low",
         )
 
+    def _is_apply_patch_heredoc(self, command: str) -> bool:
+        return bool(re.search(r"\bapply_patch\b[^\n\r]*<<", command, re.IGNORECASE))
+
     def _python_write_details(self, command: str) -> tuple[list[str], str | None, str | None]:
         paths: list[str] = []
         modes: list[str] = []
@@ -273,12 +298,34 @@ class RiskClassifier:
         return self._unique(paths), kind, suggested_tool
 
     def _redirection_targets(self, command: str) -> list[str]:
+        command = self._strip_heredoc_bodies(command)
         paths: list[str] = []
         for match in self.SHELL_REDIRECT_RE.finditer(command):
             path = self._clean_target_path(match.group("path"))
             if path and path not in {"&1", "&2"}:
                 paths.append(path)
         return self._unique(paths)
+
+    def _strip_heredoc_bodies(self, command: str) -> str:
+        lines = command.splitlines()
+        if not lines:
+            return command
+
+        kept: list[str] = []
+        active_tag: str | None = None
+
+        for line in lines:
+            if active_tag is not None:
+                if line.strip() == active_tag:
+                    active_tag = None
+                continue
+
+            kept.append(line)
+            match = self.HEREDOC_START_RE.search(line)
+            if match:
+                active_tag = match.group("tag")
+
+        return "\n".join(kept)
 
     def _matched_file_write_pattern(self, normalized: str) -> tuple[str, str, str] | None:
         for pattern, details in self.FILE_WRITE_PATTERNS.items():
@@ -366,228 +413,175 @@ class PermissionGate:
         self.risk_classifier = risk_classifier or RiskClassifier()
 
     def check(self, tool, args: dict, context) -> PermissionDecision:
-        path = args.get("path")
-        if path is not None:
+        operation = self._classify_operation(tool, args, context)
+        self._log_operation_classified(tool, args, operation, context)
+
+        for path in operation.paths:
             try:
                 context.safe_path(path)
             except Exception:
-                return PermissionDecision(
+                return self._decision(
                     behavior=PermissionBehavior.DENY,
                     risk="path_escape",
                     message=f"Permission denied: path escapes WORKDIR: {path}",
+                    operation=operation,
+                    terminal_on_deny=operation.terminal_on_deny,
+                    decision_reason="path_escape",
                 )
 
-        if tool.name == "create_file":
-            return self._check_create_file(args, context)
-
-        if tool.name == "edit_file":
-            return self._check_edit(args, context)
-
-        if tool.name == "bash":
-            return self._check_bash(args, context)
-
-        if getattr(tool, "read_only", False):
-            return PermissionDecision(
-                behavior=PermissionBehavior.ALLOW,
-                risk="read_only_tool",
-                message="Allowed read-only tool.",
+        if operation.scope_key and operation.scope_key in context.denied_permission_scopes:
+            return self._decision(
+                behavior=PermissionBehavior.DENY,
+                risk="previously_denied_scope",
+                message=f"User already denied this operation: {operation.scope_key}",
+                operation=operation,
+                terminal_on_deny=operation.terminal_on_deny,
+                decision_reason="previously_denied_scope",
             )
+
+        policy_decision = self._check_access_policy(operation, context)
+        if policy_decision is not None:
+            return policy_decision
+
+        deny_rule = context.permission_rules.match("deny", tool.name, operation.scope_key)
+        if deny_rule:
+            return self._decision(
+                behavior=PermissionBehavior.DENY,
+                risk="permission_rule",
+                message=f"Denied by permission rule: {operation.scope_key or tool.name}",
+                operation=operation,
+                terminal_on_deny=operation.terminal_on_deny,
+                decision_reason="deny_rule",
+            )
+
+        ask_rule = context.permission_rules.match("ask", tool.name, operation.scope_key)
+        if ask_rule:
+            return self._decision(
+                behavior=PermissionBehavior.ASK,
+                risk="permission_rule",
+                message=f"Permission rule requires approval: {operation.scope_key or tool.name}",
+                operation=operation,
+                terminal_on_deny=operation.terminal_on_deny,
+                decision_reason="ask_rule",
+            )
+
+        bash_decision = self._check_bash_operation(operation, context)
+        if bash_decision is not None:
+            return bash_decision
+
+        tool_decision = tool.check_permissions(args, context, operation)
+        if tool_decision is not None and tool_decision.behavior in {
+            PermissionBehavior.DENY,
+            PermissionBehavior.ASK,
+        }:
+            return self._with_operation(tool_decision, operation)
+
+        if context.permission_mode == PermissionMode.ACCEPT_EDITS:
+            if operation.is_read_only or operation.kind == "fs.read":
+                return self._decision(
+                    behavior=PermissionBehavior.ALLOW,
+                    risk="read_only_operation",
+                    message="Allowed read-only operation.",
+                    operation=operation,
+                    decision_reason="accept_edits_read",
+                )
+            if operation.kind == "fs.write" and not operation.is_sensitive:
+                return self._decision(
+                    behavior=PermissionBehavior.ALLOW,
+                    risk="file_write",
+                    message=f"Allowed file write for {operation.subject}.",
+                    operation=operation,
+                    decision_reason="accept_edits_write",
+                )
 
         if context.permission_mode == PermissionMode.READ_ONLY:
-            return PermissionDecision(
-                behavior=PermissionBehavior.ASK,
-                risk="write_tool_in_read_only",
-                message=f"Model requested {tool.name} while permission mode is read_only.",
-                proposed_scope=tool.name,
+            if operation.kind == "fs.write":
+                return self._decision(
+                    behavior=PermissionBehavior.ASK,
+                    risk="write_tool_in_read_only",
+                    message=(
+                        f"Model requested write operation {operation.scope_key} "
+                        "while permission mode is read_only."
+                    ),
+                    operation=operation,
+                    terminal_on_deny=True,
+                    decision_reason="read_only_escalation",
+                )
+            if operation.is_read_only or operation.kind == "fs.read":
+                return self._decision(
+                    behavior=PermissionBehavior.ALLOW,
+                    risk="read_only_operation",
+                    message="Allowed read-only operation.",
+                    operation=operation,
+                    decision_reason="read_only_allow",
+                )
+
+        if context.permission_mode == PermissionMode.MANUAL_APPROVAL:
+            if operation.kind in {"fs.write", "process.exec"}:
+                return self._decision(
+                    behavior=PermissionBehavior.ASK,
+                    risk="manual_approval",
+                    message=f"Model requested {operation.scope_key or operation.subject}.",
+                    operation=operation,
+                    terminal_on_deny=operation.terminal_on_deny,
+                    decision_reason="manual_approval",
+                )
+            if operation.is_read_only or operation.kind == "fs.read":
+                return self._decision(
+                    behavior=PermissionBehavior.ALLOW,
+                    risk="read_only_operation",
+                    message="Allowed read-only operation.",
+                    operation=operation,
+                    decision_reason="manual_read",
+                )
+
+        allow_rule = context.permission_rules.match("allow", tool.name, operation.scope_key)
+        if allow_rule:
+            return self._decision(
+                behavior=PermissionBehavior.ALLOW,
+                risk="permission_rule",
+                message=f"Allowed by permission rule: {operation.scope_key or tool.name}",
+                operation=operation,
+                decision_reason="allow_rule",
             )
 
-        if context.permission_mode == PermissionMode.MANUAL_APPROVAL or getattr(tool, "dangerous", False):
-            return PermissionDecision(
-                behavior=PermissionBehavior.ASK,
-                risk="dangerous_tool",
-                message=f"Model requested {tool.name}.",
-                proposed_scope=tool.name,
+        if operation.is_read_only or operation.kind == "fs.read":
+            return self._decision(
+                behavior=PermissionBehavior.ALLOW,
+                risk="read_only_operation",
+                message="Allowed read-only operation.",
+                operation=operation,
+                decision_reason="fallback_read",
             )
 
-        return PermissionDecision(
-            behavior=PermissionBehavior.ALLOW,
-            risk="accepted_tool",
-            message="Allowed by permission mode.",
+        return self._decision(
+            behavior=PermissionBehavior.ASK,
+            risk="unknown_operation",
+            message=f"Model requested {operation.scope_key or operation.subject}; approval required.",
+            operation=operation,
+            terminal_on_deny=operation.terminal_on_deny,
+            decision_reason="fallback_ask",
         )
 
     def resolve(self, decision: PermissionDecision, tool, args: dict, context) -> PermissionDecision:
         if decision.behavior != PermissionBehavior.ASK:
             return decision
 
-        if decision.proposed_scope and decision.proposed_scope in context.approved_permission_scopes:
-            return PermissionDecision(
+        scope = self._decision_scope(decision)
+        allow_rule = context.permission_rules.match("allow", tool.name, scope)
+        if scope and (scope in context.approved_permission_scopes or allow_rule):
+            return self._decision(
                 behavior=PermissionBehavior.ALLOW,
                 risk=decision.risk,
-                message=f"Allowed by prior approval for scope: {decision.proposed_scope}",
-                proposed_scope=decision.proposed_scope,
+                message=f"Allowed by prior approval for scope: {scope}",
+                operation=decision.operation,
+                proposed_scope=scope,
                 metadata=decision.metadata,
+                terminal_on_deny=decision.terminal_on_deny,
+                decision_reason="approved_scope",
             )
 
         return self._ask_user(decision, tool, args, context)
-
-    def _check_create_file(self, args: dict, context) -> PermissionDecision:
-        path = str(args.get("path", ""))
-        target = context.safe_path(path)
-
-        if target.exists():
-            return PermissionDecision(
-                behavior=PermissionBehavior.DENY,
-                risk="file_exists",
-                message=f"File already exists: {path}. Use edit_file for precise edits.",
-            )
-
-        if context.permission_mode == PermissionMode.ACCEPT_EDITS:
-            return PermissionDecision(
-                behavior=PermissionBehavior.ALLOW,
-                risk="file_create",
-                message=f"Allowed create_file for {path}.",
-            )
-
-        return PermissionDecision(
-            behavior=PermissionBehavior.ASK,
-            risk="file_create",
-            message=f"Model requests creating {path} while permission mode is {context.permission_mode}.",
-            proposed_scope="create_file",
-        )
-
-    def _check_edit(self, args: dict, context) -> PermissionDecision:
-        path = str(args.get("path", ""))
-        target = context.safe_path(path)
-        old_text = args.get("old_text")
-
-        if target.exists() and target.is_file() and old_text is not None:
-            text = target.read_text(encoding="utf-8")
-            count = text.count(str(old_text))
-            if count == 0:
-                return PermissionDecision(
-                    behavior=PermissionBehavior.DENY,
-                    risk="invalid_edit",
-                    message=f"old_text not found in {path}",
-                )
-            if count > 1 and args.get("occurrence") is None:
-                return PermissionDecision(
-                    behavior=PermissionBehavior.DENY,
-                    risk="ambiguous_edit",
-                    message="old_text appears multiple times; provide occurrence.",
-                )
-
-        if context.permission_mode == PermissionMode.ACCEPT_EDITS:
-            return PermissionDecision(
-                behavior=PermissionBehavior.ALLOW,
-                risk="file_edit",
-                message=f"Allowed edit_file for {path}.",
-            )
-
-        return PermissionDecision(
-            behavior=PermissionBehavior.ASK,
-            risk="file_edit",
-            message=f"Model requests modifying {path} while permission mode is {context.permission_mode}.",
-            proposed_scope="edit_file",
-        )
-
-    def _check_bash(self, args: dict, context) -> PermissionDecision:
-        command = str(args.get("command", ""))
-        bash_decision = self.risk_classifier.classify_bash(command)
-        risk = bash_decision.risk
-        metadata = {"bash_risk": bash_decision.to_metadata()}
-
-        path_escape = self._check_bash_target_paths(bash_decision, context, metadata)
-        if path_escape is not None:
-            return path_escape
-
-        if risk == BashRisk.DESTRUCTIVE:
-            return PermissionDecision(
-                behavior=PermissionBehavior.DENY,
-                risk=risk,
-                message=(
-                    "Permission denied: this operation intent is cancelled. "
-                    f"Reason: {bash_decision.reason} "
-                    "Do not retry with alternative destructive commands."
-                ),
-                metadata=metadata,
-            )
-
-        if risk in {BashRisk.SAFE_CHECK, BashRisk.READ_ONLY_COMMAND}:
-            return PermissionDecision(
-                behavior=PermissionBehavior.ALLOW,
-                risk=risk,
-                message=bash_decision.reason,
-                metadata=metadata,
-            )
-
-        if risk == BashRisk.FILE_WRITE_VIA_BASH:
-            return PermissionDecision(
-                behavior=PermissionBehavior.ASK,
-                risk=risk,
-                message=self._bash_file_write_message(bash_decision, context),
-                proposed_scope=None,
-                metadata=metadata,
-            )
-
-        if risk == BashRisk.NETWORK:
-            return PermissionDecision(
-                behavior=PermissionBehavior.ASK,
-                risk=risk,
-                message=bash_decision.reason,
-                proposed_scope="bash:network",
-                metadata=metadata,
-            )
-
-        if risk == BashRisk.UNKNOWN:
-            sandbox = getattr(context, "sandbox", None)
-            if (
-                context.permission_mode == PermissionMode.ACCEPT_EDITS
-                and sandbox is not None
-                and sandbox.can_auto_allow_unknown_bash()
-            ):
-                context.sandbox_auto_allowed_unknown_bash_count = (
-                    getattr(context, "sandbox_auto_allowed_unknown_bash_count", 0) + 1
-                )
-                return PermissionDecision(
-                    behavior=PermissionBehavior.ALLOW,
-                    risk=risk,
-                    message="Allowed unknown bash command because sandbox is enabled and available.",
-                    metadata={**metadata, "sandbox_auto_allowed": True},
-                )
-
-            return PermissionDecision(
-                behavior=PermissionBehavior.ASK,
-                risk=risk,
-                message="Model requested an unknown shell command; approval required.",
-                proposed_scope=self._bash_approval_scope(risk, bash_decision),
-                metadata=metadata,
-            )
-
-        return PermissionDecision(
-            behavior=PermissionBehavior.ASK,
-            risk=risk,
-            message=f"Model requested a shell command while permission mode is {context.permission_mode}.",
-            proposed_scope=self._bash_approval_scope(risk, bash_decision),
-            metadata=metadata,
-        )
-
-    def _check_bash_target_paths(
-        self,
-        bash_decision: BashRiskDecision,
-        context,
-        metadata: dict[str, Any],
-    ) -> PermissionDecision | None:
-        for path in bash_decision.target_paths:
-            try:
-                context.safe_path(path)
-            except Exception:
-                return PermissionDecision(
-                    behavior=PermissionBehavior.DENY,
-                    risk="path_escape",
-                    message=f"Permission denied: Bash command targets path outside WORKDIR: {path}",
-                    metadata=metadata,
-                )
-        return None
 
     def _bash_file_write_message(self, bash_decision: BashRiskDecision, context) -> str:
         parts = [bash_decision.reason]
@@ -630,7 +624,8 @@ class PermissionGate:
         print(f"Reason: {decision.message}")
         self._print_decision_metadata(decision)
         print(f"Args: {args}")
-        if decision.proposed_scope:
+        scope = self._decision_scope(decision)
+        if scope:
             print("Allow? [y] once / [a] this run scope / [N] deny")
         else:
             print("Allow? [y] once / [N] deny")
@@ -641,40 +636,341 @@ class PermissionGate:
             answer = ""
 
         if answer in {"y", "yes", "once"}:
-            return PermissionDecision(
+            self._log_user_response(context, tool, decision, "allow_once")
+            return self._decision(
                 behavior=PermissionBehavior.ALLOW,
                 risk=decision.risk,
                 message="Allowed once by user approval.",
-                proposed_scope=decision.proposed_scope,
+                proposed_scope=scope,
+                operation=decision.operation,
                 metadata=decision.metadata,
+                terminal_on_deny=decision.terminal_on_deny,
+                decision_reason="user_allow_once",
             )
 
-        if answer in {"a", "all", "run"} and decision.proposed_scope:
-            context.approved_permission_scopes.add(decision.proposed_scope)
-            return PermissionDecision(
+        if answer in {"a", "all", "run"} and scope:
+            context.approved_permission_scopes.add(scope)
+            context.permission_rules.add(
+                PermissionRule(
+                    source="session",
+                    behavior="allow",
+                    value=PermissionRuleValue(tool_name=tool.name, operation_scope=scope),
+                )
+            )
+            self._log_user_response(context, tool, decision, "allow_scope")
+            self._log_scope_event(context, tool, decision, "permission_scope_approved", scope)
+            return self._decision(
                 behavior=PermissionBehavior.ALLOW,
                 risk=decision.risk,
-                message=f"Allowed for this run scope: {decision.proposed_scope}",
-                proposed_scope=decision.proposed_scope,
+                message=f"Allowed for this run scope: {scope}",
+                proposed_scope=scope,
+                operation=decision.operation,
                 metadata=decision.metadata,
+                terminal_on_deny=decision.terminal_on_deny,
+                decision_reason="user_allow_scope",
             )
 
-        return PermissionDecision(
+        if decision.terminal_on_deny and scope:
+            context.denied_permission_scopes.add(scope)
+            context.permission_rules.add(
+                PermissionRule(
+                    source="session",
+                    behavior="deny",
+                    value=PermissionRuleValue(tool_name=tool.name, operation_scope=scope),
+                )
+            )
+            self._log_scope_event(context, tool, decision, "permission_scope_denied", scope)
+
+        self._log_user_response(context, tool, decision, "deny")
+        return self._decision(
             behavior=PermissionBehavior.DENY,
             risk=decision.risk,
             message="Permission denied by user approval policy.",
-            proposed_scope=decision.proposed_scope,
+            proposed_scope=scope,
+            operation=decision.operation,
             metadata=decision.metadata,
+            terminal_on_deny=decision.terminal_on_deny,
+            decision_reason="user_deny",
         )
 
     def _print_decision_metadata(self, decision: PermissionDecision) -> None:
         bash_risk = decision.metadata.get("bash_risk")
+        operation = decision.operation
+
+        if operation is not None:
+            print(f"Operation: {operation.scope_key or operation.subject}")
+            if operation.paths:
+                print(f"Paths: {operation.paths}")
+
         if not isinstance(bash_risk, dict):
             return
-
         if bash_risk.get("target_paths"):
             print(f"Target paths: {bash_risk['target_paths']}")
         if bash_risk.get("suggested_tool"):
             print(f"Suggested tool: {bash_risk['suggested_tool']}")
         if bash_risk.get("confidence"):
             print(f"Confidence: {bash_risk['confidence']}")
+
+    def _classify_operation(self, tool, args: dict, context) -> Operation:
+        operation = tool.classify_operation(args, context)
+        if operation.kind == "process.exec" and operation.action == "bash":
+            return self._classify_bash_operation(operation)
+        return operation
+
+    def _classify_bash_operation(self, operation: Operation) -> Operation:
+        command = operation.command or ""
+        bash_decision = self.risk_classifier.classify_bash(command)
+        risk = bash_decision.risk
+        metadata = {"bash_risk": bash_decision.to_metadata()}
+
+        if risk == BashRisk.FILE_WRITE_VIA_BASH:
+            paths = bash_decision.target_paths
+            if paths:
+                subject = ", ".join(paths)
+                scope = f"write:bash:{paths[0]}" if len(paths) == 1 else self._bash_approval_scope(risk, bash_decision)
+            else:
+                subject = operation.subject
+                scope = self._bash_approval_scope(risk, bash_decision)
+            return Operation(
+                kind="fs.write",
+                action="bash",
+                subject=subject,
+                paths=paths,
+                command=command,
+                scope_key=scope,
+                terminal_on_deny=True,
+                is_sensitive=True,
+                metadata=metadata,
+            )
+
+        is_read_only = risk in {BashRisk.SAFE_CHECK, BashRisk.READ_ONLY_COMMAND}
+        is_destructive = risk == BashRisk.DESTRUCTIVE
+        return Operation(
+            kind="process.exec",
+            action=risk,
+            subject=bash_decision.command_prefix or operation.subject,
+            paths=bash_decision.target_paths,
+            command=command,
+            scope_key=self._bash_approval_scope(risk, bash_decision),
+            terminal_on_deny=is_destructive,
+            is_read_only=is_read_only,
+            is_destructive=is_destructive,
+            is_sensitive=risk in {BashRisk.NETWORK, BashRisk.UNKNOWN, BashRisk.DESTRUCTIVE},
+            metadata=metadata,
+        )
+
+    def _check_access_policy(self, operation: Operation, context) -> PermissionDecision | None:
+        if operation.kind == "fs.read":
+            for path in operation.paths:
+                if context.access_policy.is_protected_read(path):
+                    return self._decision(
+                        behavior=PermissionBehavior.DENY,
+                        risk="protected_read",
+                        message=f"Permission denied: protected read path: {path}",
+                        operation=operation,
+                        decision_reason="access_policy_read",
+                    )
+
+        if operation.kind == "fs.write":
+            for path in operation.paths:
+                if context.access_policy.is_protected_write(path):
+                    return self._decision(
+                        behavior=PermissionBehavior.DENY,
+                        risk="protected_write",
+                        message=f"Permission denied: protected write path: {path}",
+                        operation=operation,
+                        terminal_on_deny=True,
+                        decision_reason="access_policy_write",
+                    )
+
+        return None
+
+    def _check_bash_operation(self, operation: Operation, context) -> PermissionDecision | None:
+        bash_risk = operation.metadata.get("bash_risk")
+        if not isinstance(bash_risk, dict):
+            return None
+
+        risk = str(bash_risk.get("risk"))
+        if risk == BashRisk.DESTRUCTIVE:
+            return self._decision(
+                behavior=PermissionBehavior.DENY,
+                risk=risk,
+                message=(
+                    "Permission denied: this operation intent is cancelled. "
+                    f"Reason: {bash_risk.get('reason')} "
+                    "Do not retry with alternative destructive commands."
+                ),
+                operation=operation,
+                terminal_on_deny=True,
+                decision_reason="bash_destructive",
+            )
+
+        if risk == BashRisk.FILE_WRITE_VIA_BASH:
+            return self._decision(
+                behavior=PermissionBehavior.ASK,
+                risk=risk,
+                message=self._bash_file_write_message_from_metadata(bash_risk, context),
+                operation=operation,
+                terminal_on_deny=True,
+                decision_reason="bash_file_write",
+            )
+
+        if risk == BashRisk.NETWORK:
+            return self._decision(
+                behavior=PermissionBehavior.ASK,
+                risk=risk,
+                message=str(bash_risk.get("reason") or "Network command requires approval."),
+                operation=operation,
+                decision_reason="bash_network",
+            )
+
+        if risk == BashRisk.UNKNOWN:
+            sandbox = getattr(context, "sandbox", None)
+            if (
+                context.permission_mode == PermissionMode.ACCEPT_EDITS
+                and sandbox is not None
+                and sandbox.can_auto_allow_unknown_bash()
+            ):
+                context.sandbox_auto_allowed_unknown_bash_count = (
+                    getattr(context, "sandbox_auto_allowed_unknown_bash_count", 0) + 1
+                )
+                return self._decision(
+                    behavior=PermissionBehavior.ALLOW,
+                    risk=risk,
+                    message="Allowed unknown bash command because sandbox is enabled and available.",
+                    operation=operation,
+                    metadata={"sandbox_auto_allowed": True},
+                    decision_reason="sandbox_auto_allow",
+                )
+            return self._decision(
+                behavior=PermissionBehavior.ASK,
+                risk=risk,
+                message="Model requested an unknown shell command; approval required.",
+                operation=operation,
+                decision_reason="bash_unknown",
+            )
+
+        return None
+
+    def _bash_file_write_message_from_metadata(self, bash_risk: dict, context) -> str:
+        parts = [str(bash_risk.get("reason") or "Shell command writes files.")]
+        target_paths = bash_risk.get("target_paths") or []
+        if target_paths:
+            parts.append(f"Target paths: {', '.join(target_paths)}.")
+        suggested_tool = bash_risk.get("suggested_tool")
+        if suggested_tool:
+            parts.append(f"Use {suggested_tool} instead of Bash for this file operation.")
+        else:
+            parts.append("Prefer create_file for new files or edit_file for precise edits.")
+        return " ".join(parts)
+
+    def _decision(
+        self,
+        behavior: str,
+        risk: str,
+        message: str,
+        operation: Operation | None = None,
+        proposed_scope: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        terminal_on_deny: bool | None = None,
+        decision_reason: str | None = None,
+    ) -> PermissionDecision:
+        enriched_metadata = dict(metadata or {})
+        if operation is not None:
+            enriched_metadata.setdefault("operation", operation.to_metadata())
+        scope = proposed_scope or (operation.scope_key if operation else None)
+        if terminal_on_deny is None:
+            terminal = bool(operation.terminal_on_deny) if operation else False
+        else:
+            terminal = bool(terminal_on_deny)
+        return PermissionDecision(
+            behavior=behavior,
+            risk=risk,
+            message=message,
+            proposed_scope=scope,
+            metadata=enriched_metadata,
+            operation=operation,
+            terminal_on_deny=terminal,
+            decision_reason=decision_reason,
+        )
+
+    def _with_operation(self, decision: PermissionDecision, operation: Operation) -> PermissionDecision:
+        if decision.operation is not None and "operation" in decision.metadata:
+            return decision
+        metadata = dict(decision.metadata)
+        metadata.setdefault("operation", operation.to_metadata())
+        return PermissionDecision(
+            behavior=decision.behavior,
+            risk=decision.risk,
+            message=decision.message,
+            proposed_scope=decision.proposed_scope or operation.scope_key,
+            metadata=metadata,
+            operation=decision.operation or operation,
+            terminal_on_deny=decision.terminal_on_deny or operation.terminal_on_deny,
+            decision_reason=decision.decision_reason,
+        )
+
+    def _decision_scope(self, decision: PermissionDecision) -> str | None:
+        if decision.proposed_scope:
+            return decision.proposed_scope
+        if decision.operation is not None:
+            return decision.operation.scope_key
+        return None
+
+    def _log_operation_classified(self, tool, args: dict, operation: Operation, context) -> None:
+        trace = getattr(context, "trace", None)
+        if trace is None:
+            return
+        trace.log(
+            {
+                "type": "operation_classified",
+                "tool": tool.name,
+                "args_preview": str(args)[:500],
+                "operation": operation.to_metadata(),
+            }
+        )
+
+    def _log_user_response(self, context, tool, decision: PermissionDecision, response: str) -> None:
+        trace = getattr(context, "trace", None)
+        if trace is None:
+            return
+        trace.log(
+            {
+                "type": "permission_user_response",
+                "tool": tool.name,
+                "response": response,
+                "operation": decision.operation.to_metadata() if decision.operation else None,
+                "decision": self._decision_metadata(decision),
+            }
+        )
+
+    def _log_scope_event(
+        self,
+        context,
+        tool,
+        decision: PermissionDecision,
+        event_type: str,
+        scope: str,
+    ) -> None:
+        trace = getattr(context, "trace", None)
+        if trace is None:
+            return
+        trace.log(
+            {
+                "type": event_type,
+                "tool": tool.name,
+                "scope": scope,
+                "operation": decision.operation.to_metadata() if decision.operation else None,
+                "decision": self._decision_metadata(decision),
+            }
+        )
+
+    def _decision_metadata(self, decision: PermissionDecision) -> dict:
+        return {
+            "behavior": decision.behavior,
+            "risk": decision.risk,
+            "message": decision.message,
+            "proposed_scope": decision.proposed_scope,
+            "terminal_on_deny": decision.terminal_on_deny,
+            "decision_reason": decision.decision_reason,
+        }

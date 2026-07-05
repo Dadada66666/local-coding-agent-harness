@@ -30,7 +30,7 @@ class ReportWriter:
             f"Verification: {self._verification_status(context)}",
             "",
             "## Failure Summary",
-            test_result.get("error") or "N/A",
+            self._failure_summary(context, test_result),
             "",
             "## Repair Attempts",
             str(context.repair_attempts),
@@ -49,6 +49,7 @@ class ReportWriter:
             "",
             "## Artifacts",
             f"- trace: `{context.trace.path}`",
+            f"- readable_trace: `{context.run_dir / 'readable_trace.md'}`",
             f"- diff: `{context.run_dir / 'diff.patch'}`",
             f"- cost: `{cost_path}`",
             f"- artifacts: `{context.run_dir / 'artifacts'}`",
@@ -62,6 +63,13 @@ class ReportWriter:
         if context.last_test_result is None:
             return "not recorded"
         return "passed" if context.last_test_result.get("ok") else "failed"
+
+    def _failure_summary(self, context: AgentContext, test_result: dict) -> str:
+        if test_result.get("error"):
+            return test_result["error"]
+        if context.success is False and context.final_text:
+            return context.final_text
+        return "N/A"
 
     def _changed_files(self, context: AgentContext) -> list[str]:
         if not context.changed_files:

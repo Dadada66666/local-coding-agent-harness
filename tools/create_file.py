@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -24,6 +25,35 @@ class CreateFileTool(BaseTool):
     read_only = False
     dangerous = True
     concurrency_safe = False
+
+    def classify_operation(self, args: dict, context) -> Operation:
+        requested_path = args.get("path", "")
+        return Operation(
+            kind="fs.write",
+            action="create",
+            subject=str(requested_path),
+            paths=[str(requested_path)] if requested_path else [],
+            scope_key=f"write:create:{requested_path}",
+            terminal_on_deny=True,
+        )
+
+    def check_permissions(self, args: dict, context, operation: Operation):
+        requested_path = str(args.get("path", ""))
+        if not requested_path:
+            return None
+
+        target = context.safe_path(requested_path)
+        if target.exists():
+            from runtime.permission import PermissionBehavior, PermissionDecision
+
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                risk="file_exists",
+                message=f"File already exists: {requested_path}. Use edit_file for precise edits.",
+                operation=operation,
+                decision_reason="tool_permission",
+            )
+        return None
 
     def validate(self, args: dict, context) -> None:
         if not args.get("path"):

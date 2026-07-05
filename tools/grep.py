@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -25,6 +26,18 @@ class GrepTool(BaseTool):
     read_only = True
     dangerous = False
     concurrency_safe = True
+
+    def classify_operation(self, args: dict, context) -> Operation:
+        requested_path = args.get("path", ".")
+        return Operation(
+            kind="fs.read",
+            action="search",
+            subject=str(requested_path),
+            paths=[str(requested_path)],
+            scope_key=f"read:grep:{requested_path}",
+            is_read_only=True,
+            metadata={"pattern": str(args.get("pattern", ""))},
+        )
 
     def validate(self, args: dict, context) -> None:
         if not args.get("pattern"):

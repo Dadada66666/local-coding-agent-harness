@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from runtime.readable_trace_writer import ReadableTraceWriter
 from tools.base import ToolResult
 from tools.bash import DEFAULT_TIMEOUT_SECONDS
 from tools.read_file import DEFAULT_LIMIT as READ_FILE_DEFAULT_LIMIT
@@ -55,6 +56,9 @@ def permission_hook(tool_call, tool, context):
     if resolved.behavior == "allow":
         return None
 
+    if resolved.behavior == "deny" and resolved.terminal_on_deny:
+        _cancel_task_for_terminal_deny(tool_call, resolved, context)
+
     metadata = {
         "denied": True,
         "permission_denied": True,
@@ -63,7 +67,11 @@ def permission_hook(tool_call, tool, context):
         "permission_behavior": resolved.behavior,
         "risk": resolved.risk,
         "proposed_scope": resolved.proposed_scope,
+        "terminal_on_deny": resolved.terminal_on_deny,
+        "decision_reason": resolved.decision_reason,
     }
+    if resolved.operation is not None:
+        metadata["operation"] = resolved.operation.to_metadata()
     metadata.update(resolved.metadata)
 
     return ToolResult(
@@ -183,6 +191,7 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
 
 
 def stop_report_hook(context) -> None:
+    readable_trace_path = ReadableTraceWriter().write(context)
     report_path = context.report_writer.write(context)
     diff_path = context.diff_manager.write_patch(context)
     cost_path = context.cost_tracker.write(context)
@@ -194,11 +203,13 @@ def stop_report_hook(context) -> None:
             "report_path": str(report_path),
             "diff_path": str(diff_path),
             "cost_path": str(cost_path),
+            "readable_trace_path": str(readable_trace_path),
             "repair_attempts": context.repair_attempts,
         }
     )
 
     print(f"[report] {report_path}")
+    print(f"[readable-trace] {readable_trace_path}")
     print(f"[diff] {diff_path}")
     print(f"[cost] {cost_path}")
 
@@ -207,6 +218,53 @@ def stop_report_hook(context) -> None:
 
 def _turn_id(context) -> int:
     return int(getattr(context, "current_turn_id", context.turn_count + 1))
+
+
+def _cancel_task_for_terminal_deny(tool_call, decision, context) -> None:
+    scope = decision.proposed_scope or (
+        decision.operation.scope_key if decision.operation is not None else None
+    )
+    if scope:
+        context.denied_permission_scopes.add(scope)
+
+    context.finished = True
+    context.success = False
+    context.final_text = _permission_cancelled_summary(decision)
+    context.trace.log(
+        {
+            "type": "task_cancelled",
+            "turn_id": _turn_id(context),
+            "tool_call_id": getattr(tool_call, "id", None),
+            "tool": tool_call.name,
+            "scope": scope,
+            "operation": decision.operation.to_metadata() if decision.operation else None,
+            "decision": {
+                "behavior": decision.behavior,
+                "risk": decision.risk,
+                "message": decision.message,
+                "proposed_scope": decision.proposed_scope,
+                "terminal_on_deny": decision.terminal_on_deny,
+                "decision_reason": decision.decision_reason,
+            },
+        }
+    )
+
+
+def _permission_cancelled_summary(decision) -> str:
+    scope = decision.proposed_scope or (
+        decision.operation.scope_key if decision.operation is not None else "permission request"
+    )
+    return (
+        "Summary\n"
+        f"- Permission denied for `{scope}`; this operation was cancelled.\n"
+        "- No files were created or modified by the denied operation.\n\n"
+        "Changed files\n"
+        "- None\n\n"
+        "Checks run\n"
+        "- Not run. Reason: permission was denied before the operation executed.\n\n"
+        "Risks\n"
+        "- No file changes were made for the denied operation."
+    )
 
 
 def _is_test_command(command: str) -> bool:
@@ -262,6 +320,9 @@ def _log_permission_decision(tool_call, decision, context, phase: str) -> None:
             "risk": decision.risk,
             "message": decision.message,
             "proposed_scope": decision.proposed_scope,
+            "terminal_on_deny": decision.terminal_on_deny,
+            "decision_reason": decision.decision_reason,
+            "operation": decision.operation.to_metadata() if decision.operation else None,
             "metadata": decision.metadata,
         }
     )
@@ -274,4 +335,6 @@ def _permission_changed(first, second) -> bool:
         or first.message != second.message
         or first.proposed_scope != second.proposed_scope
         or first.metadata != second.metadata
+        or first.terminal_on_deny != second.terminal_on_deny
+        or first.decision_reason != second.decision_reason
     )
