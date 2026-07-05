@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from runtime.operation import Operation
+
+if TYPE_CHECKING:
+    from runtime.permission import PermissionDecision
 
 
 @dataclass
@@ -37,6 +42,24 @@ class BaseTool(ABC):
     def validate(self, args: dict, context) -> None:
         return None
 
+    def classify_operation(self, args: dict, context) -> Operation:
+        return Operation(
+            kind="tool",
+            action=self.name,
+            subject=self.name,
+            scope_key=f"tool:{self.name}",
+            is_read_only=self.read_only,
+            is_destructive=self.dangerous,
+        )
+
+    def check_permissions(
+        self,
+        args: dict,
+        context,
+        operation: Operation,
+    ) -> PermissionDecision | None:
+        return None
+
     @abstractmethod
     def call(self, args: dict, context) -> ToolResult:
         raise NotImplementedError
@@ -45,4 +68,3 @@ class BaseTool(ABC):
         if result.ok:
             return result.content
         return f"Error: {result.error or result.content}"
-

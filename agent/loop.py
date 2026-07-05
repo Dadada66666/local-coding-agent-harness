@@ -48,7 +48,7 @@ class AgentLoop:
 
     def submit(self, context: AgentContext, prompt: str) -> AgentContext:
         context.task = prompt
-        context.messages.append({"role": "user", "content": prompt})
+        context.add_user_message({"role": "user", "content": prompt})
         context.finished = False
         context.final_text = ""
         self.run_until_idle(context)
@@ -135,6 +135,8 @@ class AgentLoop:
                     tool_call_id=tool_call.id,
                     content=result.content,
                 )
+                if context.finished:
+                    break
 
             context.trace.log(
                 {
@@ -195,14 +197,16 @@ class AgentLoop:
         if config.sandbox_fail_if_unavailable and sandbox.status.enabled and not sandbox.status.available:
             raise RuntimeError(f"Sandbox requested but unavailable: {sandbox.status.reason}")
 
+        initial_messages = build_initial_messages(task) if include_initial_message else []
         return AgentContext(
             run_id=run_id,
             task=task,
             repo_path=repo_path,
             run_dir=run_dir,
-            messages=build_initial_messages(task) if include_initial_message else [],
+            messages=list(initial_messages),
             system_prompt=build_system_prompt(repo_path),
             config=config,
+            conversation_messages=list(initial_messages),
             permission_mode=config.permission_mode,
             permission_gate=PermissionGate(),
             trace=TraceLogger(run_dir, run_id=run_id),

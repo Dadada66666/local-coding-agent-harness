@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult
 
 
@@ -20,6 +21,17 @@ class ListDirTool(BaseTool):
     read_only = True
     dangerous = False
     concurrency_safe = True
+
+    def classify_operation(self, args: dict, context) -> Operation:
+        requested_path = args.get("path", ".")
+        return Operation(
+            kind="fs.read",
+            action="list",
+            subject=str(requested_path),
+            paths=[str(requested_path)],
+            scope_key=f"read:list:{requested_path}",
+            is_read_only=True,
+        )
 
     def call(self, args: dict, context) -> ToolResult:
         defaulted_path = "path" not in args
