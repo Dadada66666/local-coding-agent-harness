@@ -33,6 +33,6 @@ line-length = 100
 target-version = "py311"
 
 [tool.pytest.ini_options]
-testpaths = ["examples/demo_repo/tests"]
-pythonpath = ["examples/demo_repo"]
+testpaths = ["tests", "examples/demo_repo/tests"]
+pythonpath = [".", "examples/demo_repo"]
 
