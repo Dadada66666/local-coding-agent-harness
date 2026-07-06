@@ -77,7 +77,9 @@ class AgentContext:
     current_turn_id: int = 0
     repair_attempts: int = 0
     last_test_result: dict | None = None
+    task_test_result: dict | None = None
     changed_files: set[str] = field(default_factory=set)
+    task_changed_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
     denied_permission_scopes: set[str] = field(default_factory=set)
     access_policy: AccessPolicy = field(default_factory=AccessPolicy)
@@ -106,6 +108,15 @@ class AgentContext:
         )
         self.read_file_state[str(target)] = snapshot
         return snapshot
+
+    def record_changed_file(self, path: str) -> None:
+        self.changed_files.add(path)
+        self.task_changed_files.add(path)
+
+    def reset_task_state(self) -> None:
+        self.task_test_result = None
+        self.repair_attempts = 0
+        self.task_changed_files.clear()
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)

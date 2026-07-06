@@ -55,7 +55,15 @@ class ReadFileTool(BaseTool):
             return ToolResult(ok=False, content=f"Not a file: {requested_path}", error="not a file")
 
         raw = target.read_bytes()
-        lines = raw.decode("utf-8").splitlines()
+        try:
+            lines = raw.decode("utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            return ToolResult(
+                ok=False,
+                content=f"File is not valid UTF-8: {requested_path}",
+                error="decode error",
+                metadata={"encoding": "utf-8", "reason": str(exc)},
+            )
         selected = lines[offset : offset + limit]
         rendered = [f"{offset + index + 1:>4} | {line}" for index, line in enumerate(selected)]
 

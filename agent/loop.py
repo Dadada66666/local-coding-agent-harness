@@ -55,10 +55,12 @@ class AgentLoop:
 
     def submit(self, context: AgentContext, prompt: str) -> AgentContext:
         context.task = prompt
+        context.reset_task_state()
         context.add_user_message({"role": "user", "content": prompt})
         context.finished = False
         context.final_text = ""
         context.abort_reason = None
+        context.success = False
         try:
             self.run_until_idle(context)
         except KeyboardInterrupt as exc:
@@ -214,8 +216,9 @@ class AgentLoop:
                 retry_message = self.runtime.recovery_policy.build_retry_message(context)
                 context.messages.append(retry_message)
                 context.repair_attempts += 1
-                if context.last_test_result is not None:
-                    context.last_test_result["repair_injected"] = True
+                test_result = getattr(context, "task_test_result", context.last_test_result)
+                if test_result is not None:
+                    test_result["repair_injected"] = True
 
             context.turn_count += 1
             if context.turn_count >= context.config.max_turns:
@@ -309,9 +312,13 @@ class AgentLoop:
         )
 
     def infer_success(self, context: AgentContext) -> bool:
-        if context.last_test_result is not None:
+        if hasattr(context, "task_test_result"):
+            if context.task_test_result is not None:
+                return bool(context.task_test_result.get("ok"))
+        elif context.last_test_result is not None:
             return bool(context.last_test_result.get("ok"))
-        if context.changed_files:
+        changed_files = getattr(context, "task_changed_files", context.changed_files)
+        if changed_files:
             return False
         return bool(context.final_text)
 

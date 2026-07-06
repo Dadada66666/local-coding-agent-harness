@@ -160,13 +160,15 @@ def test_result_hook(tool_call, tool, result, context) -> None:
     if not is_test_command and not is_verification_command:
         return None
 
-    context.last_test_result = {
+    test_result = {
         "command": command,
         "ok": result.ok,
         "error": result.error,
         "output_preview": result.content[:2000],
         "metadata": result.metadata,
     }
+    context.last_test_result = test_result
+    context.task_test_result = test_result
 
     result.metadata["verification_command"] = True
     if is_test_command:

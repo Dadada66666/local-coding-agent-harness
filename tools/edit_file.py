@@ -24,6 +24,10 @@ class EditFileTool(BaseTool):
                 "type": "integer",
                 "description": "Optional 1-based occurrence to replace when old_text appears multiple times.",
             },
+            "replace_all": {
+                "type": "boolean",
+                "description": "Replace every occurrence of old_text in the file.",
+            },
             "edits": {
                 "type": "array",
                 "description": "Optional batch of exact replacements for the same file.",
@@ -41,6 +45,10 @@ class EditFileTool(BaseTool):
                         "occurrence": {
                             "type": "integer",
                             "description": "Optional 1-based occurrence for this replacement.",
+                        },
+                        "replace_all": {
+                            "type": "boolean",
+                            "description": "Replace every occurrence of old_text for this replacement.",
                         },
                     },
                     "required": ["old_text", "new_text"],
@@ -106,9 +114,23 @@ class EditFileTool(BaseTool):
             updated, count = result
             applied.append({"index": index, "occurrences": count})
 
+        if updated == original:
+            return ToolResult(
+                ok=True,
+                content=f"No changes needed for {requested_path}",
+                metadata={
+                    "path": str(target),
+                    "changed_file": requested_path,
+                    "edit_count": len(applied),
+                    "edits": applied,
+                    "changed": False,
+                    "snapshot_updated": False,
+                },
+            )
+
         target.write_text(updated, encoding="utf-8")
         context.record_file_snapshot(target, target.read_bytes(), partial=False)
-        context.changed_files.add(str(target.relative_to(context.repo_path)))
+        context.record_changed_file(str(target.relative_to(context.repo_path)))
 
         return ToolResult(
             ok=True,
@@ -118,6 +140,7 @@ class EditFileTool(BaseTool):
                 "changed_file": requested_path,
                 "edit_count": len(applied),
                 "edits": applied,
+                "changed": True,
                 "snapshot_updated": True,
             },
         )
@@ -153,6 +176,9 @@ class EditFileTool(BaseTool):
             raise ToolValidationError(f"edit {index} old_text must not be empty")
 
         occurrence = edit.get("occurrence")
+        replace_all = bool(edit.get("replace_all", False))
+        if occurrence is not None and replace_all:
+            raise ToolValidationError(f"edit {index} cannot combine occurrence and replace_all")
         if occurrence is not None:
             try:
                 occurrence = int(occurrence)
@@ -165,6 +191,7 @@ class EditFileTool(BaseTool):
             "old_text": old_text,
             "new_text": new_text,
             "occurrence": occurrence,
+            "replace_all": replace_all,
         }
 
     def _apply_edit(self, text: str, edit: dict, index: int, requested_path: str) -> tuple[str, int] | ToolResult:
@@ -181,6 +208,9 @@ class EditFileTool(BaseTool):
             )
 
         occurrence = edit.get("occurrence")
+        if edit.get("replace_all"):
+            return text.replace(old_text, new_text), count
+
         if occurrence is not None:
             if occurrence > count:
                 return ToolResult(

@@ -56,7 +56,8 @@ class CreateFileTool(BaseTool):
 
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(str(args["content"]), encoding="utf-8")
-        context.changed_files.add(str(target.relative_to(context.repo_path)))
+        context.record_file_snapshot(target, target.read_bytes(), partial=False)
+        context.record_changed_file(str(target.relative_to(context.repo_path)))
 
         return ToolResult(
             ok=True,
@@ -64,5 +65,6 @@ class CreateFileTool(BaseTool):
             metadata={
                 "changed_file": requested_path,
                 "operation": "create_file",
+                "snapshot_updated": True,
             },
         )
