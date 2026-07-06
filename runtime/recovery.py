@@ -23,12 +23,10 @@ class RecoveryPolicy:
         return {
             "role": "user",
             "content": (
-                "The previous test run failed. Analyze the failure and fix the code.\n\n"
+                "The previous test run failed. Analyze the preceding tool result and fix the code.\n\n"
                 "<test_failure>\n"
                 f"Command: {test.get('command')}\n"
                 f"Error: {test.get('error')}\n\n"
-                f"{test.get('output_preview', '')[:8000]}\n"
                 "</test_failure>"
             ),
         }
-
