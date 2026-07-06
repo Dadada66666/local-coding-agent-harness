@@ -6,25 +6,48 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 class EditFileTool(BaseTool):
     name = "edit_file"
-    description = "Replace exact old_text with exact new_text in a UTF-8 text file."
+    description = "Replace one or more exact text snippets in a UTF-8 text file."
     input_schema = {
         "type": "object",
+        "description": "Provide old_text/new_text for one replacement, or edits for multiple replacements.",
         "properties": {
             "path": {"type": "string", "description": "File path relative to WORKDIR."},
             "old_text": {
                 "type": "string",
-                "description": "Exact existing text to replace. Do not describe line numbers.",
+                "description": "Exact existing text to replace for a single edit. Do not describe line numbers.",
             },
             "new_text": {
                 "type": "string",
-                "description": "Exact replacement text.",
+                "description": "Exact replacement text for a single edit.",
             },
             "occurrence": {
                 "type": "integer",
                 "description": "Optional 1-based occurrence to replace when old_text appears multiple times.",
             },
+            "edits": {
+                "type": "array",
+                "description": "Optional batch of exact replacements for the same file.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "old_text": {
+                            "type": "string",
+                            "description": "Exact existing text to replace.",
+                        },
+                        "new_text": {
+                            "type": "string",
+                            "description": "Exact replacement text.",
+                        },
+                        "occurrence": {
+                            "type": "integer",
+                            "description": "Optional 1-based occurrence for this replacement.",
+                        },
+                    },
+                    "required": ["old_text", "new_text"],
+                },
+            },
         },
-        "required": ["path", "old_text", "new_text"],
+        "required": ["path"],
     }
 
     read_only = False
@@ -45,12 +68,7 @@ class EditFileTool(BaseTool):
     def validate(self, args: dict, context) -> None:
         if not args.get("path"):
             raise ToolValidationError("edit_file requires path")
-        if "old_text" not in args or "new_text" not in args:
-            raise ToolValidationError("edit_file requires old_text and new_text")
-        if args["old_text"] == "":
-            raise ToolValidationError("old_text must not be empty")
-        if "occurrence" in args and int(args["occurrence"]) <= 0:
-            raise ToolValidationError("occurrence must be a 1-based positive integer")
+        self._edits_from_args(args)
 
     def call(self, args: dict, context) -> ToolResult:
         requested_path = args["path"]
@@ -76,47 +94,112 @@ class EditFileTool(BaseTool):
                 error="stale file",
             )
 
-        old_text = str(args["old_text"])
-        new_text = str(args["new_text"])
         original = target.read_text(encoding="utf-8")
-        count = original.count(old_text)
+        edits = self._edits_from_args(args)
+        updated = original
+        applied = []
 
-        if count == 0:
-            return ToolResult(
-                ok=False,
-                content=f"old_text not found in {requested_path}",
-                error="old_text not found",
-            )
-
-        occurrence = args.get("occurrence")
-        if occurrence is not None:
-            occurrence = int(occurrence)
-            if occurrence > count:
-                return ToolResult(
-                    ok=False,
-                    content=f"occurrence {occurrence} not found; old_text appears {count} times",
-                    error="occurrence not found",
-                    metadata={"occurrences": count},
-                )
-            updated = self._replace_occurrence(original, old_text, new_text, occurrence)
-        else:
-            if count > 1:
-                return ToolResult(
-                    ok=False,
-                    content="old_text appears multiple times; provide occurrence.",
-                    error="ambiguous edit",
-                    metadata={"occurrences": count},
-                )
-            updated = original.replace(old_text, new_text, 1)
+        for index, edit in enumerate(edits, start=1):
+            result = self._apply_edit(updated, edit, index, requested_path)
+            if isinstance(result, ToolResult):
+                return result
+            updated, count = result
+            applied.append({"index": index, "occurrences": count})
 
         target.write_text(updated, encoding="utf-8")
+        context.record_file_snapshot(target, target.read_bytes(), partial=False)
         context.changed_files.add(str(target.relative_to(context.repo_path)))
 
         return ToolResult(
             ok=True,
-            content=f"Edited {requested_path}",
-            metadata={"path": str(target), "changed_file": requested_path, "occurrences": count},
+            content=f"Edited {requested_path} ({len(applied)} replacement{'s' if len(applied) != 1 else ''})",
+            metadata={
+                "path": str(target),
+                "changed_file": requested_path,
+                "edit_count": len(applied),
+                "edits": applied,
+                "snapshot_updated": True,
+            },
         )
+
+    def _edits_from_args(self, args: dict) -> list[dict]:
+        has_batch = "edits" in args
+        has_single = "old_text" in args or "new_text" in args
+
+        if has_batch and has_single:
+            raise ToolValidationError("use either edits or old_text/new_text, not both")
+
+        if has_batch:
+            edits = args["edits"]
+            if not isinstance(edits, list) or not edits:
+                raise ToolValidationError("edits must be a non-empty list")
+            normalized = []
+            for index, edit in enumerate(edits, start=1):
+                if not isinstance(edit, dict):
+                    raise ToolValidationError(f"edit {index} must be an object")
+                normalized.append(self._normalize_edit(edit, index))
+            return normalized
+
+        if "old_text" not in args or "new_text" not in args:
+            raise ToolValidationError("edit_file requires old_text/new_text or edits")
+        return [self._normalize_edit(args, 1)]
+
+    def _normalize_edit(self, edit: dict, index: int) -> dict:
+        if "old_text" not in edit or "new_text" not in edit:
+            raise ToolValidationError(f"edit {index} requires old_text and new_text")
+        old_text = str(edit["old_text"])
+        new_text = str(edit["new_text"])
+        if old_text == "":
+            raise ToolValidationError(f"edit {index} old_text must not be empty")
+
+        occurrence = edit.get("occurrence")
+        if occurrence is not None:
+            try:
+                occurrence = int(occurrence)
+            except (TypeError, ValueError) as exc:
+                raise ToolValidationError(f"edit {index} occurrence must be an integer") from exc
+            if occurrence <= 0:
+                raise ToolValidationError(f"edit {index} occurrence must be a 1-based positive integer")
+
+        return {
+            "old_text": old_text,
+            "new_text": new_text,
+            "occurrence": occurrence,
+        }
+
+    def _apply_edit(self, text: str, edit: dict, index: int, requested_path: str) -> tuple[str, int] | ToolResult:
+        old_text = edit["old_text"]
+        new_text = edit["new_text"]
+        count = text.count(old_text)
+
+        if count == 0:
+            return ToolResult(
+                ok=False,
+                content=f"edit {index}: old_text not found in {requested_path}",
+                error="old_text not found",
+                metadata={"failed_edit": index},
+            )
+
+        occurrence = edit.get("occurrence")
+        if occurrence is not None:
+            if occurrence > count:
+                return ToolResult(
+                    ok=False,
+                    content=f"edit {index}: occurrence {occurrence} not found; old_text appears {count} times",
+                    error="occurrence not found",
+                    metadata={"failed_edit": index, "occurrences": count},
+                )
+            return self._replace_occurrence(text, old_text, new_text, occurrence), count
+
+        if count > 1:
+            return ToolResult(
+                ok=False,
+                content=f"edit {index}: old_text appears multiple times; provide occurrence.",
+                error="ambiguous edit",
+                metadata={"failed_edit": index, "occurrences": count},
+            )
+
+        return text.replace(old_text, new_text, 1), count
 
     def _replace_occurrence(self, text: str, old_text: str, new_text: str, occurrence: int) -> str:
         start = -1
