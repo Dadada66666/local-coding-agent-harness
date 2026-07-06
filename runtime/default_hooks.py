@@ -143,6 +143,20 @@ def test_result_hook(tool_call, tool, result, context) -> None:
     is_test_command = _is_test_command(command)
     is_verification_command = _is_verification_command(tool_call, result)
 
+    if is_verification_command and _is_discovery_command(command):
+        result.metadata["verification_ignored"] = True
+        context.trace.log(
+            {
+                "type": "verification_ignored",
+                "turn_id": _turn_id(context),
+                "tool_call_id": getattr(tool_call, "id", None),
+                "command": command,
+                "reason": "read_only_discovery_command",
+                "purpose": _verification_purpose(tool_call, result),
+            }
+        )
+        return None
+
     if not is_test_command and not is_verification_command:
         return None
 
@@ -267,14 +281,17 @@ def _print_artifact_path(label: str, path) -> None:
 
 
 def _turn_id(context) -> int:
-    return int(getattr(context, "current_turn_id", context.turn_count + 1))
+    current_turn_id = getattr(context, "current_turn_id", None)
+    if current_turn_id is not None:
+        return int(current_turn_id)
+    return int(getattr(context, "turn_count", 0) + 1)
 
 
 def _cancel_task_for_terminal_deny(tool_call, decision, context) -> None:
     scope = decision.proposed_scope or (
         decision.operation.scope_key if decision.operation is not None else None
     )
-    if scope:
+    if scope and _should_cache_denied_scope(decision):
         context.denied_permission_scopes.add(scope)
 
     context.finished = True
@@ -300,6 +317,24 @@ def _cancel_task_for_terminal_deny(tool_call, decision, context) -> None:
     )
 
 
+def _should_cache_denied_scope(decision) -> bool:
+    if decision.decision_reason in {
+        "user_deny",
+        "deny_rule",
+        "path_escape",
+        "access_policy_read",
+        "access_policy_write",
+        "bash_destructive",
+    }:
+        return True
+
+    return decision.risk in {
+        "protected_read",
+        "protected_write",
+        "destructive",
+    }
+
+
 def _permission_cancelled_summary(decision) -> str:
     scope = decision.proposed_scope or (
         decision.operation.scope_key if decision.operation is not None else "permission request"
@@ -320,6 +355,23 @@ def _permission_cancelled_summary(decision) -> str:
 def _is_test_command(command: str) -> bool:
     normalized = command.lower()
     return "pytest" in normalized or "unittest" in normalized or "npm test" in normalized
+
+
+def _is_discovery_command(command: str) -> bool:
+    stripped = command.strip().lower()
+    discovery_prefixes = (
+        "find ",
+        "git status",
+        "git diff",
+        "git log",
+        "ls",
+        "dir",
+        "tree",
+        "pwd",
+        "rg ",
+        "grep ",
+    )
+    return any(stripped == prefix.strip() or stripped.startswith(prefix) for prefix in discovery_prefixes)
 
 
 def _is_verification_command(tool_call, result) -> bool:

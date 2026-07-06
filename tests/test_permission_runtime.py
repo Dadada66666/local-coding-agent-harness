@@ -9,6 +9,7 @@ from runtime.bootstrap import build_runtime
 from runtime.permission import BashRisk, PermissionBehavior, PermissionMode, RiskClassifier
 from tools.bash import BashTool
 from tools.create_file import CreateFileTool
+from tools.edit_file import EditFileTool
 from tools.list_dir import ListDirTool
 from tools.read_file import ReadFileTool
 
@@ -175,6 +176,43 @@ def test_accept_edits_allows_normal_create_file(tmp_path: Path) -> None:
     )
 
     assert decision.behavior == PermissionBehavior.ALLOW
+
+
+def test_existing_file_is_tool_failure_not_permission_denial(tmp_path: Path) -> None:
+    (tmp_path / "normal.py").write_text("x = 1\n", encoding="utf-8")
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("create file", include_initial_message=True)
+    args = {"path": "normal.py", "content": "x = 2\n"}
+
+    decision = context.permission_gate.check(CreateFileTool(), args, context)
+    result = CreateFileTool().call(args, context)
+
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert result.ok is False
+    assert result.error == "file exists"
+    assert context.denied_permission_scopes == set()
+
+
+def test_invalid_edit_is_tool_failure_and_can_be_retried(tmp_path: Path) -> None:
+    path = tmp_path / "normal.py"
+    path.write_text("x = 1\n", encoding="utf-8")
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("edit file", include_initial_message=True)
+    ReadFileTool().call({"path": "normal.py"}, context)
+
+    wrong_args = {"path": "normal.py", "old_text": "missing", "new_text": "x = 2"}
+    decision = context.permission_gate.check(EditFileTool(), wrong_args, context)
+    failed = EditFileTool().call(wrong_args, context)
+
+    assert decision.behavior == PermissionBehavior.ALLOW
+    assert failed.ok is False
+    assert failed.error == "old_text not found"
+    assert context.denied_permission_scopes == set()
+
+    fixed = EditFileTool().call({"path": "normal.py", "old_text": "x = 1\n", "new_text": "x = 2\n"}, context)
+
+    assert fixed.ok is True
+    assert path.read_text(encoding="utf-8") == "x = 2\n"
 
 
 def test_accept_edits_denies_sensitive_write(tmp_path: Path) -> None:

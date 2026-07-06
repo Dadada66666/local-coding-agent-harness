@@ -66,6 +66,18 @@ def test_verify_purpose_can_come_from_metadata() -> None:
     assert result.metadata["verification_command"] is True
 
 
+def test_read_only_discovery_command_is_not_recorded_as_verification() -> None:
+    context, result = run_test_result_hook(
+        arguments={"command": "find . -maxdepth 3 -type f -print", "purpose": "verify"},
+        metadata={"purpose": "verify"},
+        ok=True,
+    )
+
+    assert context.last_test_result is None
+    assert result.metadata["verification_ignored"] is True
+    assert any(event["type"] == "verification_ignored" for event in context.trace.events)
+
+
 def test_test_command_is_still_recorded_without_verify_purpose() -> None:
     context, result = run_test_result_hook(
         arguments={"command": "PYTEST examples/demo_repo/tests"},
