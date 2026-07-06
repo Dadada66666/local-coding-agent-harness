@@ -6,18 +6,12 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 class CreateFileTool(BaseTool):
     name = "create_file"
-    description = "Create a new UTF-8 text file inside WORKDIR. Fails if the file already exists."
+    description = "Create a new UTF-8 text file. Fails if it already exists."
     input_schema = {
         "type": "object",
         "properties": {
-            "path": {
-                "type": "string",
-                "description": "File path relative to WORKDIR.",
-            },
-            "content": {
-                "type": "string",
-                "description": "Complete file content.",
-            },
+            "path": {"type": "string"},
+            "content": {"type": "string"},
         },
         "required": ["path", "content"],
     }

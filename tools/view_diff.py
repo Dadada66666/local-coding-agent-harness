@@ -7,7 +7,7 @@ from tools.base import BaseTool, ToolResult
 
 class ViewDiffTool(BaseTool):
     name = "view_diff"
-    description = "View the current git diff for repository changes."
+    description = "View the current git diff."
     input_schema = {"type": "object", "properties": {}}
 
     read_only = True

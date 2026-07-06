@@ -13,12 +13,12 @@ DEFAULT_MAX_MATCHES = 50
 
 class GrepTool(BaseTool):
     name = "grep"
-    description = "Search repository text and return matching file paths, line numbers, and previews."
+    description = "Search repository text with a regex pattern."
     input_schema = {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Regex or literal search pattern."},
-            "path": {"type": "string", "description": "Optional path relative to WORKDIR."},
+            "pattern": {"type": "string"},
+            "path": {"type": "string"},
         },
         "required": ["pattern"],
     }
