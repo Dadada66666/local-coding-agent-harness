@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,6 +95,17 @@ class AgentContext:
         if not resolved.is_relative_to(self.repo_path.resolve()):
             raise ValueError(f"Path escapes WORKDIR: {path}")
         return resolved
+
+    def record_file_snapshot(self, target: Path, raw: bytes, *, partial: bool) -> ReadFileSnapshot:
+        stat = target.stat()
+        snapshot = ReadFileSnapshot(
+            mtime_ns=stat.st_mtime_ns,
+            size=stat.st_size,
+            sha256=hashlib.sha256(raw).hexdigest(),
+            partial=partial,
+        )
+        self.read_file_state[str(target)] = snapshot
+        return snapshot
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)

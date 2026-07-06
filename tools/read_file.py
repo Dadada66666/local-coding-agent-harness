@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-
-from agent.context import ReadFileSnapshot
 from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
@@ -66,14 +63,8 @@ class ReadFileTool(BaseTool):
         if remaining:
             rendered.append(f"... {remaining} remaining lines")
 
-        stat = target.stat()
         partial = offset != 0 or remaining > 0
-        context.read_file_state[str(target)] = ReadFileSnapshot(
-            mtime_ns=stat.st_mtime_ns,
-            size=stat.st_size,
-            sha256=hashlib.sha256(raw).hexdigest(),
-            partial=partial,
-        )
+        context.record_file_snapshot(target, raw, partial=partial)
 
         return ToolResult(
             ok=True,
