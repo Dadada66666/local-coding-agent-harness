@@ -45,6 +45,7 @@ def main(
     ),
     sandbox_settings: Path | None = typer.Option(None, "--sandbox-settings", help="Optional srt settings path."),
 ) -> None:
+    configure_stdio()
     if ctx.invoked_subcommand is not None:
         return
 
@@ -80,6 +81,7 @@ def run(
     ),
     sandbox_settings: Path | None = typer.Option(None, "--sandbox-settings", help="Optional srt settings path."),
 ) -> None:
+    configure_stdio()
     workdir = Path.cwd()
     if task:
         mode = resolve_permission(permission)
@@ -101,14 +103,30 @@ def run(
 
 @app.command()
 def report(run_id: str = typer.Argument(..., help="Run id to read from the current WORKDIR.")) -> None:
+    configure_stdio()
     path = Path.cwd() / ".agent" / "runs" / run_id / "report.md"
     typer.echo(path.read_text(encoding="utf-8"))
 
 
 @app.command()
 def replay(run_id: str = typer.Argument(..., help="Run id to replay from the current WORKDIR.")) -> None:
+    configure_stdio()
     path = Path.cwd() / ".agent" / "runs" / run_id / "trace.jsonl"
     typer.echo(render_replay(path))
+
+
+def configure_stdio() -> None:
+    if sys.platform == "win32":
+        return
+
+    for stream_name in ("stdin", "stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
 
 
 def render_replay(path: Path) -> str:

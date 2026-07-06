@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 from agent.context import RunConfig
 from agent.loop import AgentLoop
-from runtime.default_hooks import stop_report_hook
+from runtime.default_hooks import _cancel_task_for_terminal_deny, stop_report_hook
 from runtime.hooks import HookEvent
+from runtime.operation import Operation
+from runtime.permission import PermissionBehavior, PermissionDecision
 
 
 class RaisingModelClient:
@@ -143,6 +145,41 @@ def test_stop_report_hook_continues_after_artifact_failure(monkeypatch) -> None:
     assert calls == ["report", "diff", "cost"]
     assert _has_trace_type(context, "stop_artifact_error")
     assert _has_trace_type(context, "stop")
+
+
+def test_terminal_tool_error_does_not_cache_denied_scope() -> None:
+    context = SimpleNamespace(
+        denied_permission_scopes=set(),
+        trace=FakeTrace(),
+        current_turn_id=1,
+        finished=False,
+        success=True,
+        final_text="",
+    )
+    operation = Operation(
+        kind="fs.write",
+        action="edit",
+        subject="demo.py",
+        paths=["demo.py"],
+        scope_key="write:edit:demo.py",
+        terminal_on_deny=True,
+    )
+    decision = PermissionDecision(
+        behavior=PermissionBehavior.DENY,
+        risk="invalid_edit",
+        message="old_text not found",
+        proposed_scope="write:edit:demo.py",
+        operation=operation,
+        terminal_on_deny=True,
+        decision_reason="tool_permission",
+    )
+    tool_call = SimpleNamespace(id="call_1", name="edit_file")
+
+    _cancel_task_for_terminal_deny(tool_call, decision, context)
+
+    assert context.finished is True
+    assert context.success is False
+    assert context.denied_permission_scopes == set()
 
 
 def _has_trace_type(context, event_type: str) -> bool:

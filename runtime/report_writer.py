@@ -17,7 +17,7 @@ class ReportWriter:
             "# Agent Run Report",
             "",
             "## Task",
-            context.task,
+            self._task_summary(context),
             "",
             "## Status",
             f"Success: {str(context.success).lower()}",
@@ -71,6 +71,22 @@ class ReportWriter:
         if context.success is False and context.final_text:
             return context.final_text
         return "N/A"
+
+    def _task_summary(self, context: AgentContext) -> str:
+        user_messages = [
+            message.get("content")
+            for message in getattr(context, "conversation_messages", [])
+            if message.get("role") == "user" and isinstance(message.get("content"), str)
+        ]
+        if not user_messages:
+            return context.task
+
+        first = user_messages[0]
+        latest = user_messages[-1]
+        if first == latest:
+            return first
+
+        return f"Initial request:\n{first}\n\nLatest request:\n{latest}"
 
     def _changed_files(self, context: AgentContext) -> list[str]:
         if not context.changed_files:
