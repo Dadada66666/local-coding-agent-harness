@@ -6,50 +6,28 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 class EditFileTool(BaseTool):
     name = "edit_file"
-    description = "Replace one or more exact text snippets in a UTF-8 text file."
+    description = (
+        "Replace exact text in one UTF-8 file. Use old_text/new_text or edits[]; "
+        "old_text must match exactly, new_text is the full replacement, "
+        "occurrence selects the Nth match, replace_all replaces all matches."
+    )
     input_schema = {
         "type": "object",
-        "description": "Provide old_text/new_text for one replacement, or edits for multiple replacements.",
         "properties": {
-            "path": {"type": "string", "description": "File path relative to WORKDIR."},
-            "old_text": {
-                "type": "string",
-                "description": "Exact existing text to replace for a single edit. Do not describe line numbers.",
-            },
-            "new_text": {
-                "type": "string",
-                "description": "Exact replacement text for a single edit.",
-            },
-            "occurrence": {
-                "type": "integer",
-                "description": "Optional 1-based occurrence to replace when old_text appears multiple times.",
-            },
-            "replace_all": {
-                "type": "boolean",
-                "description": "Replace every occurrence of old_text in the file.",
-            },
+            "path": {"type": "string"},
+            "old_text": {"type": "string"},
+            "new_text": {"type": "string"},
+            "occurrence": {"type": "integer"},
+            "replace_all": {"type": "boolean"},
             "edits": {
                 "type": "array",
-                "description": "Optional batch of exact replacements for the same file.",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "old_text": {
-                            "type": "string",
-                            "description": "Exact existing text to replace.",
-                        },
-                        "new_text": {
-                            "type": "string",
-                            "description": "Exact replacement text.",
-                        },
-                        "occurrence": {
-                            "type": "integer",
-                            "description": "Optional 1-based occurrence for this replacement.",
-                        },
-                        "replace_all": {
-                            "type": "boolean",
-                            "description": "Replace every occurrence of old_text for this replacement.",
-                        },
+                        "old_text": {"type": "string"},
+                        "new_text": {"type": "string"},
+                        "occurrence": {"type": "integer"},
+                        "replace_all": {"type": "boolean"},
                     },
                     "required": ["old_text", "new_text"],
                 },

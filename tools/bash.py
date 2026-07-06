@@ -15,14 +15,14 @@ MAX_OUTPUT_CHARS = 12000
 
 class BashTool(BaseTool):
     name = "bash"
-    description = "Run a shell command in the repository, typically tests or linters."
+    description = 'Run a shell command from WORKDIR; purpose can be "verify" for validation.'
     input_schema = {
         "type": "object",
         "properties": {
-            "command": {"type": "string", "description": "Command to run from repo root."},
-            "timeout": {"type": "integer", "description": "Timeout in seconds."},
-            "input": {"type": "string", "description": "Optional stdin content for non-interactive commands."},
-            "purpose": {"type": "string", "description": "Optional purpose label for trace metadata."},
+            "command": {"type": "string"},
+            "timeout": {"type": "integer"},
+            "input": {"type": "string"},
+            "purpose": {"type": "string"},
         },
         "required": ["command"],
     }
