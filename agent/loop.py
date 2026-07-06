@@ -111,13 +111,14 @@ class AgentLoop:
             )
 
             self.runtime.context_manager.prepare_context(context)
+            tool_schemas = self.runtime.tool_registry.schemas()
 
             context.trace.log(
                 {
                     "type": "model_call_start",
                     "turn_id": turn_id,
                     "message_count": len(context.messages),
-                    "tool_schema_count": len(self.runtime.tool_registry.schemas()),
+                    "tool_schema_count": len(tool_schemas),
                 }
             )
             model_started = time.monotonic()
@@ -125,7 +126,7 @@ class AgentLoop:
                 response = self.model_client.call(
                     system=context.system_prompt,
                     messages=context.messages,
-                    tools=self.runtime.tool_registry.schemas(),
+                    tools=tool_schemas,
                 )
             except KeyboardInterrupt:
                 context.trace.log(
@@ -141,7 +142,6 @@ class AgentLoop:
                 break
             model_duration_ms = round((time.monotonic() - model_started) * 1000, 3)
 
-            context.add_assistant_message(response.message)
             context.trace.log(
                 {
                     "type": "model_call_end",
@@ -154,7 +154,15 @@ class AgentLoop:
                 }
             )
             context.trace.log_model_usage(response.usage, turn_id=turn_id)
-            context.cost_tracker.add_usage(response.usage)
+            context.cost_tracker.record_model_call(
+                turn_id=turn_id,
+                system=context.system_prompt,
+                messages=context.messages,
+                tools=tool_schemas,
+                response_message=response.message,
+                usage=response.usage,
+            )
+            context.add_assistant_message(response.message)
 
             if not response.tool_calls:
                 context.final_text = response.text
