@@ -1,5 +1,7 @@
 # Local Coding Agent Harness
 
+[English](README.md) | [中文](README.zh-CN.md)
+
 Local Coding Agent Harness is a local runtime for coding agents that work on a
 real repository through controlled tools instead of direct filesystem access.
 
