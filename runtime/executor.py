@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from runtime.hooks import HookEvent
 from tools.base import ToolResult
 
@@ -13,22 +15,26 @@ class ToolExecutor:
         tool = self.registry.get(tool_call.name)
 
         if not tool:
-            return ToolResult(
+            result = ToolResult(
                 ok=False,
                 content=f"Unknown tool: {tool_call.name}",
                 error=f"Unknown tool: {tool_call.name}",
                 metadata={"unknown_tool": True},
             )
+            self._trigger_post_tool_use(tool_call, self._unknown_tool(tool_call), result, context)
+            return result
 
         try:
             tool.validate(tool_call.arguments, context)
         except Exception as exc:
-            return ToolResult(
+            result = ToolResult(
                 ok=False,
                 content=f"Invalid tool arguments: {exc}",
                 error=str(exc),
                 metadata={"validation_error": True},
             )
+            self._trigger_post_tool_use(tool_call, tool, result, context)
+            return result
 
         blocked = self.hooks.trigger(
             HookEvent.PRE_TOOL_USE,
@@ -74,4 +80,11 @@ class ToolExecutor:
             tool=tool,
             result=result,
             context=context,
+        )
+
+    def _unknown_tool(self, tool_call):
+        return SimpleNamespace(
+            name=tool_call.name,
+            read_only=False,
+            dangerous=True,
         )

@@ -130,7 +130,7 @@ class EditFileTool(BaseTool):
 
         target.write_text(updated, encoding="utf-8")
         context.record_file_snapshot(target, target.read_bytes(), partial=False)
-        context.changed_files.add(str(target.relative_to(context.repo_path)))
+        context.record_changed_file(str(target.relative_to(context.repo_path)))
 
         return ToolResult(
             ok=True,

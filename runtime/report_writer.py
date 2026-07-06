@@ -66,6 +66,8 @@ class ReportWriter:
         return "passed" if context.last_test_result.get("ok") else "failed"
 
     def _failure_summary(self, context: AgentContext, test_result: dict) -> str:
+        if context.success is True:
+            return "N/A"
         if test_result.get("error"):
             return test_result["error"]
         if context.success is False and context.final_text:

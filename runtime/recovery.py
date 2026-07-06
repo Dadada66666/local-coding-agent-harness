@@ -3,13 +3,14 @@ from __future__ import annotations
 
 class RecoveryPolicy:
     def should_inject_retry(self, context) -> bool:
-        if not context.last_test_result:
+        test_result = self._test_result(context)
+        if not test_result:
             return False
 
-        if context.last_test_result.get("ok"):
+        if test_result.get("ok"):
             return False
 
-        if context.last_test_result.get("repair_injected"):
+        if test_result.get("repair_injected"):
             return False
 
         if context.repair_attempts >= context.config.max_repair_attempts:
@@ -18,7 +19,7 @@ class RecoveryPolicy:
         return True
 
     def build_retry_message(self, context) -> dict:
-        test = context.last_test_result or {}
+        test = self._test_result(context) or {}
 
         return {
             "role": "user",
@@ -30,3 +31,8 @@ class RecoveryPolicy:
                 "</test_failure>"
             ),
         }
+
+    def _test_result(self, context) -> dict | None:
+        if hasattr(context, "task_test_result"):
+            return context.task_test_result
+        return context.last_test_result
