@@ -22,6 +22,7 @@ def make_context():
         trace=DummyTrace(),
         current_turn_id=1,
         turn_count=0,
+        mutation_version=0,
     )
 
 
@@ -139,3 +140,20 @@ def test_infer_success_requires_verification_after_changes() -> None:
         )
         is False
     )
+
+
+def test_verification_becomes_stale_after_a_later_mutation() -> None:
+    context, _ = run_test_result_hook(
+        arguments={"command": "python -m pytest", "purpose": "verify"},
+        metadata={"purpose": "verify"},
+        ok=True,
+    )
+    context.task_changed_files = {"app.py"}
+    loop = AgentLoop(model_client=None, runtime=None, repo_path=Path("."))
+
+    assert context.task_verification_version == 0
+    assert loop.infer_success(context) is True
+
+    context.mutation_version += 1
+
+    assert loop.infer_success(context) is False

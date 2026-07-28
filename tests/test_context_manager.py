@@ -28,6 +28,16 @@ def tool_result_message(call_id: str) -> dict:
     }
 
 
+def batch_tool_result_message(*call_ids: str) -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": call_id, "content": "result"}
+            for call_id in call_ids
+        ],
+    }
+
+
 def test_context_compaction_drops_leading_orphan_tool_result() -> None:
     messages = [{"role": "user", "content": "start"}]
     for index in range(6):
@@ -47,6 +57,27 @@ def test_context_compaction_drops_leading_orphan_tool_result() -> None:
     assert context.messages[0]["content"].startswith("[Compacted history]")
     assert not _is_tool_result_message(context.messages[1])
     assert any(event["type"] == "context_compact" for event in context.trace.events)
+
+
+def test_context_compaction_recognizes_batched_tool_results() -> None:
+    old_messages = [{"role": "user", "content": f"old {index}"} for index in range(4)]
+    recent_messages = [
+        batch_tool_result_message("call_1", "call_2"),
+        *[
+            {"role": "assistant", "content": [{"type": "text", "text": f"recent {index}"}]}
+            for index in range(7)
+        ],
+    ]
+    context = SimpleNamespace(
+        messages=[*old_messages, *recent_messages],
+        config=RunConfig(compact_threshold_chars=1),
+        trace=DummyTrace(),
+    )
+    manager = ContextManager()
+
+    manager.prepare_context(context)
+
+    assert not manager._is_tool_result_message(context.messages[1])
 
 
 def _is_tool_result_message(message: dict) -> bool:

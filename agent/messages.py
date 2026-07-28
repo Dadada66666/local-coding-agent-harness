@@ -23,4 +23,4 @@ class ModelResponse:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
-
+    stop_reason: str | None = None

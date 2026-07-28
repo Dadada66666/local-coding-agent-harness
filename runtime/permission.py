@@ -100,14 +100,14 @@ class RiskClassifier:
         "erase ",
     ]
     FILE_WRITE_PATTERNS = {
-        "set-content": ("PowerShell Set-Content writes file content.", "create_file"),
-        "out-file": ("PowerShell Out-File writes command output to a file.", "create_file"),
+        "set-content": ("PowerShell Set-Content writes file content.", "write_file"),
+        "out-file": ("PowerShell Out-File writes command output to a file.", "write_file"),
         "add-content": ("PowerShell Add-Content appends file content.", "edit_file"),
         "sed -i": ("sed -i edits a file in place through shell.", "edit_file"),
-        "tee ": ("tee can write command output to a file.", "create_file"),
-        "tee-object": ("PowerShell Tee-Object can write command output to a file.", "create_file"),
-        "new-item": ("PowerShell New-Item can create files or directories.", "create_file"),
-        "copy-item": ("PowerShell Copy-Item writes a destination path.", "create_file"),
+        "tee ": ("tee can write command output to a file.", "write_file"),
+        "tee-object": ("PowerShell Tee-Object can write command output to a file.", "write_file"),
+        "new-item": ("PowerShell New-Item can create files or directories.", "write_file"),
+        "copy-item": ("PowerShell Copy-Item writes a destination path.", "write_file"),
         "move-item": ("PowerShell Move-Item mutates filesystem paths.", "edit_file"),
     }
     NETWORK_PATTERNS = [
@@ -206,7 +206,7 @@ class RiskClassifier:
                     reason="Shell redirection writes command output to a file.",
                     target_paths=redirect_paths,
                     command_prefix=command_prefix,
-                    suggested_tool="create_file",
+                    suggested_tool="write_file",
                     confidence="high",
                 )
 
@@ -294,7 +294,7 @@ class RiskClassifier:
         else:
             kind = "Path.write_text/write_bytes API"
 
-        suggested_tool = "edit_file" if any(mode.startswith("a") for mode in modes) else "create_file"
+        suggested_tool = "edit_file" if any(mode.startswith("a") for mode in modes) else "write_file"
         return self._unique(paths), kind, suggested_tool
 
     def _redirection_targets(self, command: str) -> list[str]:
@@ -593,7 +593,7 @@ class PermissionGate:
         if suggested_tool:
             parts.append(f"Use {suggested_tool} instead of Bash for this file operation.")
         else:
-            parts.append("Prefer create_file for new files or edit_file for precise edits.")
+            parts.append("Prefer write_file for new files or edit_file for precise edits.")
 
         return " ".join(parts)
 
@@ -762,7 +762,8 @@ class PermissionGate:
     def _check_access_policy(self, operation: Operation, context) -> PermissionDecision | None:
         if operation.kind == "fs.read":
             for path in operation.paths:
-                if context.access_policy.is_protected_read(path):
+                target = context.safe_path(path)
+                if context.access_policy.is_protected_resolved_read(context.repo_path, target):
                     return self._decision(
                         behavior=PermissionBehavior.DENY,
                         risk="protected_read",
@@ -773,7 +774,8 @@ class PermissionGate:
 
         if operation.kind == "fs.write":
             for path in operation.paths:
-                if context.access_policy.is_protected_write(path):
+                target = context.safe_path(path)
+                if context.access_policy.is_protected_resolved_write(context.repo_path, target):
                     return self._decision(
                         behavior=PermissionBehavior.DENY,
                         risk="protected_write",
@@ -861,7 +863,7 @@ class PermissionGate:
         if suggested_tool:
             parts.append(f"Use {suggested_tool} instead of Bash for this file operation.")
         else:
-            parts.append("Prefer create_file for new files or edit_file for precise edits.")
+            parts.append("Prefer write_file for new files or edit_file for precise edits.")
         return " ".join(parts)
 
     def _decision(

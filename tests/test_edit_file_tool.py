@@ -7,9 +7,9 @@ from agent.context import RunConfig
 from agent.loop import AgentLoop
 from agent.messages import ModelResponse, TokenUsage, ToolCall
 from runtime.bootstrap import build_runtime
-from tools.create_file import CreateFileTool
 from tools.edit_file import EditFileTool
 from tools.read_file import ReadFileTool
+from tools.write_file import WriteFileTool
 
 
 class FakeModelClient:
@@ -124,14 +124,14 @@ def test_edit_file_success_updates_snapshot_for_next_edit(tmp_path: Path) -> Non
     assert path.read_text(encoding="utf-8") == "a = 10\nb = 20\n"
 
 
-def test_create_file_success_updates_snapshot_for_followup_edit(tmp_path: Path) -> None:
+def test_write_file_success_updates_snapshot_for_followup_edit(tmp_path: Path) -> None:
     path = tmp_path / "demo.py"
     context = make_context(tmp_path)
 
-    created = CreateFileTool().call({"path": "demo.py", "content": "a = 1\nb = 2\n"}, context)
+    written = WriteFileTool().call({"path": "demo.py", "content": "a = 1\nb = 2\n"}, context)
     edited = EditFileTool().call({"path": "demo.py", "old_text": "b = 2", "new_text": "b = 20"}, context)
 
-    assert created.ok is True
+    assert written.ok is True
     assert edited.ok is True
     assert path.read_text(encoding="utf-8") == "a = 1\nb = 20\n"
 
@@ -215,12 +215,12 @@ def test_agent_loop_can_run_multiple_edit_file_calls_without_reread(tmp_path: Pa
     assert path.read_text(encoding="utf-8") == "a = 10\nb = 20\n"
 
 
-def test_agent_loop_can_create_then_edit_file_without_reread(tmp_path: Path) -> None:
+def test_agent_loop_can_write_then_edit_file_without_reread(tmp_path: Path) -> None:
     path = tmp_path / "demo.py"
     model = FakeModelClient(
         [
             tool_response(
-                ToolCall("create", "create_file", {"path": "demo.py", "content": "a = 1\nb = 2\n"}),
+                ToolCall("write", "write_file", {"path": "demo.py", "content": "a = 1\nb = 2\n"}),
                 ToolCall("edit", "edit_file", {"path": "demo.py", "old_text": "b = 2", "new_text": "b = 20"}),
             ),
             final_response(),
@@ -233,7 +233,7 @@ def test_agent_loop_can_create_then_edit_file_without_reread(tmp_path: Path) -> 
         permission_mode="accept_edits",
         config=RunConfig(permission_mode="accept_edits"),
     )
-    context = runner.create_context("create then edit", include_initial_message=True)
+    context = runner.create_context("write then edit", include_initial_message=True)
 
     runner.run_until_idle(context)
 

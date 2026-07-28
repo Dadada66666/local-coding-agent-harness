@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from runtime.context_manager import ContextManager
 from runtime.default_hooks import (
     large_output_hook,
+    mutation_result_hook,
     permission_hook,
     post_tool_trace_hook,
     record_tool_budget_hook,
@@ -17,13 +18,13 @@ from runtime.executor import ToolExecutor
 from runtime.hooks import HookEvent, HookManager
 from runtime.recovery import RecoveryPolicy
 from tools.bash import BashTool
-from tools.create_file import CreateFileTool
 from tools.edit_file import EditFileTool
 from tools.grep import GrepTool
 from tools.list_dir import ListDirTool
 from tools.read_file import ReadFileTool
 from tools.registry import ToolRegistry
 from tools.view_diff import ViewDiffTool
+from tools.write_file import WriteFileTool
 
 
 @dataclass
@@ -40,7 +41,7 @@ def build_tool_registry() -> ToolRegistry:
     registry.register(ListDirTool())
     registry.register(GrepTool())
     registry.register(ReadFileTool())
-    registry.register(CreateFileTool())
+    registry.register(WriteFileTool())
     registry.register(EditFileTool())
     registry.register(BashTool())
     registry.register(ViewDiffTool())
@@ -57,6 +58,7 @@ def build_hooks() -> HookManager:
 
     hooks.register(HookEvent.POST_TOOL_USE, large_output_hook)
     hooks.register(HookEvent.POST_TOOL_USE, record_tool_budget_hook)
+    hooks.register(HookEvent.POST_TOOL_USE, mutation_result_hook)
     hooks.register(HookEvent.POST_TOOL_USE, test_result_hook)
     hooks.register(HookEvent.POST_TOOL_USE, post_tool_trace_hook)
 
@@ -75,4 +77,3 @@ def build_runtime() -> RuntimeBundle:
         hooks=hooks,
         recovery_policy=RecoveryPolicy(),
     )
-

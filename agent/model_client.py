@@ -60,6 +60,7 @@ class ModelClient:
             text=text,
             tool_calls=tool_calls,
             usage=usage,
+            stop_reason=getattr(response, "stop_reason", None),
         )
 
     def _block_to_dict(self, block) -> dict:
@@ -70,4 +71,3 @@ class ModelClient:
         if hasattr(block, "to_dict"):
             return block.to_dict()
         return dict(vars(block))
-

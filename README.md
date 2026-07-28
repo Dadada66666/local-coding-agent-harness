@@ -109,8 +109,9 @@ Available tools:
 - `read_file`: read UTF-8 text with line numbers and record a file snapshot.
   Non-UTF-8 files return a normal tool failure instead of an unhandled decode
   exception.
-- `create_file`: create a new UTF-8 file. Existing files fail as tool semantics,
-  not as permission denials. Successful creates update the file snapshot.
+- `write_file`: write a new UTF-8 file. Existing files fail as tool semantics,
+  not as permission denials; use `edit_file` for existing files. Successful
+  writes update the file snapshot.
 - `edit_file`: replace exact text in a previously known file snapshot. It
   supports one replacement with `old_text` / `new_text`, or multiple
   replacements with `edits`. Repeated matches remain ambiguous by default;
@@ -129,7 +130,7 @@ cannot escape `WORKDIR`.
 
 Important runtime properties:
 
-- File edits require a known snapshot from `read_file`, `create_file`, or a
+- File edits require a known snapshot from `read_file`, `write_file`, or a
   successful prior `edit_file`.
 - Successful edits refresh the snapshot, so multiple edits to the same file do
   not require unnecessary rereads.
@@ -137,6 +138,18 @@ Important runtime properties:
 - Interactive sessions separate whole-run state from current-task state. A
   previous prompt's failed verification or changed files cannot poison the next
   prompt's success inference.
+- `max_turns` limits model calls per task, while trace turn IDs remain unique
+  across an interactive run.
+- Model `stop_reason` is recorded and validated. Truncated, refused, or
+  protocol-invalid responses cannot be reported as successful completion;
+  providers that omit `stop_reason` retain content-based compatibility.
+- Parallel tool calls return one user message containing all matching
+  `tool_result` blocks. Calls skipped after a terminal denial receive explicit
+  cancelled results so the message history remains valid.
+- Successful verification is tied to the current mutation version. A later
+  file change makes that evidence stale until another verification runs.
+- Directory listing and recursive search filter protected paths after canonical path
+  resolution, including aliases that resolve to protected files.
 - Context compaction avoids leaving orphan `tool_result` messages without their
   corresponding `tool_use`.
 - Unknown tools and validation failures are traced as normal tool results, which

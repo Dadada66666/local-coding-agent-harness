@@ -75,9 +75,14 @@ class AgentContext:
     stop_recorded: bool = False
     turn_count: int = 0
     current_turn_id: int = 0
+    task_model_calls: int = 0
+    task_tool_rounds: int = 0
     repair_attempts: int = 0
     last_test_result: dict | None = None
     task_test_result: dict | None = None
+    mutation_version: int = 0
+    task_start_mutation_version: int = 0
+    task_verification_version: int | None = None
     changed_files: set[str] = field(default_factory=set)
     task_changed_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
@@ -112,9 +117,20 @@ class AgentContext:
     def record_changed_file(self, path: str) -> None:
         self.changed_files.add(path)
         self.task_changed_files.add(path)
+        self.record_mutation()
+
+    def record_mutation(self) -> None:
+        self.mutation_version += 1
+
+    def has_task_mutations(self) -> bool:
+        return self.mutation_version != self.task_start_mutation_version
 
     def reset_task_state(self) -> None:
         self.task_test_result = None
+        self.task_verification_version = None
+        self.task_start_mutation_version = self.mutation_version
+        self.task_model_calls = 0
+        self.task_tool_rounds = 0
         self.repair_attempts = 0
         self.task_changed_files.clear()
 
@@ -123,6 +139,11 @@ class AgentContext:
         self.conversation_messages.append(message)
 
     def add_tool_result(self, tool_call_id: str, content: str) -> None:
+        self.add_tool_results([(tool_call_id, content, False)])
+
+    def add_tool_results(self, results: list[tuple[str, str, bool]]) -> None:
+        if not results:
+            return
         self.messages.append(
             {
                 "role": "user",
@@ -131,7 +152,9 @@ class AgentContext:
                         "type": "tool_result",
                         "tool_use_id": tool_call_id,
                         "content": content,
+                        **({"is_error": True} if is_error else {}),
                     }
+                    for tool_call_id, content, is_error in results
                 ],
             }
         )
