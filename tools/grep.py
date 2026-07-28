@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -54,6 +55,13 @@ class GrepTool(BaseTool):
         max_matches = self._max_matches(context)
         root = context.safe_path(requested_path)
 
+        if context.access_policy.is_protected_resolved_read(context.repo_path, root):
+            return ToolResult(
+                ok=False,
+                content="Permission denied: protected read path.",
+                error="protected read",
+                metadata={"protected_read": True},
+            )
         if not root.exists():
             return ToolResult(ok=False, content=f"Path not found: {requested_path}", error="path not found")
 
@@ -65,7 +73,7 @@ class GrepTool(BaseTool):
             scanned_files += 1
             try:
                 lines = file_path.read_text(encoding="utf-8").splitlines()
-            except UnicodeDecodeError:
+            except (OSError, UnicodeDecodeError):
                 continue
 
             for line_no, line in enumerate(lines, start=1):
@@ -116,16 +124,30 @@ class GrepTool(BaseTool):
 
     def _iter_files(self, root: Path, context):
         workdir = context.repo_path.resolve()
-        for path in root.rglob("*"):
-            if self._is_skipped(path, context):
-                continue
-            if not path.is_file():
-                continue
-            if not path.resolve().is_relative_to(workdir):
-                continue
-            yield path
+        for current_root, dir_names, file_names in os.walk(
+            root,
+            topdown=True,
+            onerror=lambda _error: None,
+            followlinks=False,
+        ):
+            current_path = Path(current_root)
+            dir_names[:] = [
+                name for name in dir_names if not self._is_skipped(current_path / name, context)
+            ]
+            for name in file_names:
+                path = current_path / name
+                if self._is_skipped(path, context):
+                    continue
+                try:
+                    if not path.resolve().is_relative_to(workdir) or not path.is_file():
+                        continue
+                except OSError:
+                    continue
+                yield path
 
     def _is_skipped(self, path: Path, context) -> bool:
+        if context.access_policy.is_protected_resolved_read(context.repo_path, path):
+            return True
         try:
             parts = path.resolve().relative_to(context.repo_path.resolve()).parts
         except ValueError:

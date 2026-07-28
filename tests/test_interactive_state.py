@@ -62,6 +62,8 @@ def test_report_failure_summary_follows_latest_success(tmp_path: Path) -> None:
 
     assert "Success: true" in report
     assert "## Failure Summary\nN/A" in report
+    assert "Result: not recorded" in report
+    assert "Verification: not recorded" in report
 
 
 def test_submit_success_ignores_changed_files_from_previous_prompt(tmp_path: Path) -> None:
@@ -74,3 +76,27 @@ def test_submit_success_ignores_changed_files_from_previous_prompt(tmp_path: Pat
 
     assert context.success is True
     assert context.changed_files == {"old_task.py"}
+
+
+def test_each_interactive_task_gets_an_independent_model_call_budget(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response("first"), final_response("second")])
+    runner = AgentLoop(
+        model_client=model,
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits", max_turns=1),
+    )
+    context = runner.start_interactive()
+
+    runner.submit(context, "first task")
+    assert context.success is True
+    assert context.task_model_calls == 1
+
+    runner.submit(context, "second task")
+
+    assert context.success is True
+    assert context.final_text == "second"
+    assert context.task_model_calls == 1
+    assert context.turn_count == 2
+    assert model.calls == 2

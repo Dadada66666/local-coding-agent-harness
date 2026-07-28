@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from runtime.permission import BashRisk
 from runtime.readable_trace_writer import ReadableTraceWriter
 from tools.base import ToolResult
 from tools.bash import DEFAULT_TIMEOUT_SECONDS
@@ -132,6 +133,37 @@ def record_tool_budget_hook(tool_call, tool, result, context) -> None:
     return None
 
 
+def mutation_result_hook(tool_call, tool, result, context) -> None:
+    if tool.name != "bash":
+        return None
+    if result.metadata.get("denied") or result.metadata.get("blocked_by_hook"):
+        return None
+
+    command = str(tool_call.arguments.get("command", ""))
+    decision = context.permission_gate.risk_classifier.classify_bash(command)
+    if decision.risk != BashRisk.FILE_WRITE_VIA_BASH:
+        return None
+
+    recorded_paths = []
+    for requested_path in decision.target_paths:
+        try:
+            target = context.safe_path(requested_path)
+            relative = target.relative_to(context.repo_path)
+        except (OSError, ValueError):
+            continue
+        normalized_path = relative.as_posix()
+        context.record_changed_file(normalized_path)
+        recorded_paths.append(normalized_path)
+
+    if not recorded_paths:
+        context.record_mutation()
+
+    result.metadata["mutation_recorded"] = True
+    result.metadata["mutation_paths"] = recorded_paths
+    result.metadata["mutation_version"] = context.mutation_version
+    return None
+
+
 def test_result_hook(tool_call, tool, result, context) -> None:
     if tool.name != "bash":
         return None
@@ -166,9 +198,11 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         "error": result.error,
         "output_preview": result.content[:2000],
         "metadata": result.metadata,
+        "mutation_version": getattr(context, "mutation_version", 0),
     }
     context.last_test_result = test_result
     context.task_test_result = test_result
+    context.task_verification_version = test_result["mutation_version"]
 
     result.metadata["verification_command"] = True
     if is_test_command:
@@ -182,6 +216,7 @@ def test_result_hook(tool_call, tool, result, context) -> None:
             "ok": result.ok,
             "error": result.error,
             "purpose": _verification_purpose(tool_call, result),
+            "mutation_version": test_result["mutation_version"],
         }
     )
 

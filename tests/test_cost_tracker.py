@@ -29,7 +29,7 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
                     {
                         "type": "tool_use",
                         "id": "tool_1",
-                        "name": "create_file",
+                        "name": "write_file",
                         "input": {"path": "demo.py", "content": "print('hello')\n"},
                     }
                 ],
@@ -47,7 +47,7 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
         ],
         tools=[
             {
-                "name": "create_file",
+                "name": "write_file",
                 "input_schema": {
                     "type": "object",
                     "properties": {"path": {"type": "string"}},

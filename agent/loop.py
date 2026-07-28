@@ -19,6 +19,8 @@ from runtime.trace_logger import TraceLogger
 
 
 MAX_ERROR_CHARS = 1000
+COMPLETE_STOP_REASONS = {"end_turn", "stop_sequence"}
+INCOMPLETE_STOP_REASONS = {"max_tokens", "model_context_window_exceeded"}
 
 
 @dataclass
@@ -101,13 +103,20 @@ class AgentLoop:
 
     def run_until_idle(self, context: AgentContext) -> None:
         while not context.finished:
-            turn_id = context.turn_count + 1
+            if getattr(context, "task_model_calls", 0) >= context.config.max_turns:
+                self._stop_for_model_call_limit(context)
+                break
+
+            context.turn_count += 1
+            context.task_model_calls = getattr(context, "task_model_calls", 0) + 1
+            turn_id = context.turn_count
             context.current_turn_id = turn_id
             turn_started = time.monotonic()
             context.trace.log(
                 {
                     "type": "turn_start",
                     "turn_id": turn_id,
+                    "task_model_call": context.task_model_calls,
                     "message_count": len(context.messages),
                 }
             )
@@ -153,6 +162,7 @@ class AgentLoop:
                     "tool_names": [tool_call.name for tool_call in response.tool_calls],
                     "input_tokens": getattr(response.usage, "input_tokens", None),
                     "output_tokens": getattr(response.usage, "output_tokens", None),
+                    "stop_reason": response.stop_reason,
                 }
             )
             context.trace.log_model_usage(response.usage, turn_id=turn_id)
@@ -166,7 +176,8 @@ class AgentLoop:
             )
             context.add_assistant_message(response.message)
 
-            if not response.tool_calls:
+            response_action = self._response_action(response)
+            if response_action == "final":
                 context.final_text = response.text
                 context.finished = True
                 context.success = self.infer_success(context)
@@ -182,6 +193,22 @@ class AgentLoop:
                 self._log_turn_end(context, turn_id, turn_started)
                 break
 
+            if response_action != "tools":
+                if response.tool_calls:
+                    cancelled = [
+                        self._cancelled_tool_result(
+                            context,
+                            tool_call,
+                            turn_id,
+                            reason=f"model_response_{response_action}",
+                        )
+                        for tool_call in response.tool_calls
+                    ]
+                    context.add_tool_results(cancelled)
+                self._stop_for_model_response(context, response, response_action, turn_id)
+                self._log_turn_end(context, turn_id, turn_started)
+                break
+
             context.trace.log(
                 {
                     "type": "tool_batch_start",
@@ -192,14 +219,26 @@ class AgentLoop:
             )
             tool_batch_started = time.monotonic()
 
+            tool_results: list[tuple[str, str, bool]] = []
+            cancelled_count = 0
             for tool_call in response.tool_calls:
-                result = self.runtime.executor.execute(tool_call, context)
-                context.add_tool_result(
-                    tool_call_id=tool_call.id,
-                    content=result.content,
-                )
                 if context.finished:
-                    break
+                    tool_results.append(
+                        self._cancelled_tool_result(
+                            context,
+                            tool_call,
+                            turn_id,
+                            reason="earlier_tool_call_ended_task",
+                        )
+                    )
+                    cancelled_count += 1
+                    continue
+
+                result = self.runtime.executor.execute(tool_call, context)
+                tool_results.append((tool_call.id, result.content, not result.ok))
+
+            context.add_tool_results(tool_results)
+            context.task_tool_rounds = getattr(context, "task_tool_rounds", 0) + 1
 
             context.trace.log(
                 {
@@ -208,11 +247,12 @@ class AgentLoop:
                     "duration_ms": round((time.monotonic() - tool_batch_started) * 1000, 3),
                     "tool_call_count": len(response.tool_calls),
                     "tool_names": [tool_call.name for tool_call in response.tool_calls],
+                    "cancelled_count": cancelled_count,
                     "message_count": len(context.messages),
                 }
             )
 
-            if self.runtime.recovery_policy.should_inject_retry(context):
+            if not context.finished and self.runtime.recovery_policy.should_inject_retry(context):
                 retry_message = self.runtime.recovery_policy.build_retry_message(context)
                 context.messages.append(retry_message)
                 context.repair_attempts += 1
@@ -220,21 +260,83 @@ class AgentLoop:
                 if test_result is not None:
                     test_result["repair_injected"] = True
 
-            context.turn_count += 1
-            if context.turn_count >= context.config.max_turns:
-                context.finished = True
-                context.success = False
-                context.final_text = "Stopped: max turns exceeded."
-                context.trace.log(
-                    {
-                        "type": "max_turns_exceeded",
-                        "turn_id": turn_id,
-                        "max_turns": context.config.max_turns,
-                        "message_count": len(context.messages),
-                    }
-                )
-
             self._log_turn_end(context, turn_id, turn_started)
+
+    def _cancelled_tool_result(
+        self,
+        context,
+        tool_call,
+        turn_id: int,
+        *,
+        reason: str,
+    ) -> tuple[str, str, bool]:
+        content = "Cancelled because the current task cannot safely execute this tool call."
+        context.trace.log(
+            {
+                "type": "tool_result",
+                "turn_id": turn_id,
+                "tool_call_id": tool_call.id,
+                "tool": tool_call.name,
+                "ok": False,
+                "error": "cancelled",
+                "output_preview": content,
+                "artifact_path": None,
+                "metadata": {"cancelled": True, "reason": reason},
+            }
+        )
+        return tool_call.id, content, True
+
+    def _response_action(self, response) -> str:
+        stop_reason = response.stop_reason
+        has_tool_calls = bool(response.tool_calls)
+
+        if stop_reason is None:
+            return "tools" if has_tool_calls else "final"
+        if stop_reason == "tool_use":
+            return "tools" if has_tool_calls else "protocol_error"
+        if stop_reason in COMPLETE_STOP_REASONS:
+            return "protocol_error" if has_tool_calls else "final"
+        if stop_reason in INCOMPLETE_STOP_REASONS:
+            return "incomplete"
+        if stop_reason == "refusal":
+            return "refusal"
+        return "protocol_error"
+
+    def _stop_for_model_response(self, context, response, action: str, turn_id: int) -> None:
+        stop_reason = response.stop_reason or "missing"
+        messages = {
+            "incomplete": f"Stopped: model response was incomplete ({stop_reason}).",
+            "refusal": "Stopped: model refused the request.",
+            "protocol_error": f"Stopped: invalid model response protocol ({stop_reason}).",
+        }
+        context.finished = True
+        context.success = False
+        context.abort_reason = f"model_{action}"
+        context.final_text = messages[action]
+        context.trace.log(
+            {
+                "type": f"model_response_{action}",
+                "turn_id": turn_id,
+                "stop_reason": response.stop_reason,
+                "tool_call_count": len(response.tool_calls),
+                "text_preview": response.text[:500] if response.text else "",
+            }
+        )
+
+    def _stop_for_model_call_limit(self, context) -> None:
+        context.finished = True
+        context.success = False
+        context.abort_reason = "max_model_calls_exceeded"
+        context.final_text = "Stopped: max model calls per task exceeded."
+        context.trace.log(
+            {
+                "type": "max_turns_exceeded",
+                "turn_id": context.current_turn_id or None,
+                "max_turns": context.config.max_turns,
+                "task_model_calls": getattr(context, "task_model_calls", 0),
+                "message_count": len(context.messages),
+            }
+        )
 
     def _fail_model_call(
         self,
@@ -312,13 +414,25 @@ class AgentLoop:
         )
 
     def infer_success(self, context: AgentContext) -> bool:
+        changed_files = getattr(context, "task_changed_files", None)
+        if changed_files is None:
+            changed_files = getattr(context, "changed_files", set())
+        has_task_mutations = getattr(context, "has_task_mutations", None)
+        task_mutated = (
+            bool(has_task_mutations())
+            if callable(has_task_mutations)
+            else bool(changed_files)
+        )
         if hasattr(context, "task_test_result"):
             if context.task_test_result is not None:
-                return bool(context.task_test_result.get("ok"))
+                if not context.task_test_result.get("ok"):
+                    return False
+                if task_mutated and hasattr(context, "task_verification_version"):
+                    return context.task_verification_version == context.mutation_version
+                return True
         elif context.last_test_result is not None:
             return bool(context.last_test_result.get("ok"))
-        changed_files = getattr(context, "task_changed_files", context.changed_files)
-        if changed_files:
+        if task_mutated:
             return False
         return bool(context.final_text)
 

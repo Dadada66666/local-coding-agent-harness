@@ -63,7 +63,6 @@ class ContextManager:
         content = message.get("content")
         return (
             isinstance(content, list)
-            and len(content) == 1
-            and isinstance(content[0], dict)
-            and content[0].get("type") == "tool_result"
+            and bool(content)
+            and all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
         )

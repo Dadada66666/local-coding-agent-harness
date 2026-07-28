@@ -93,7 +93,7 @@ agent replay <run_id>
 - `list_dir`：列出可见文件和目录，跳过 `.agent`、`.git`、`.venv`、`node_modules`、`__pycache__` 等 runtime/cache 目录。
 - `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
 - `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
-- `create_file`：创建新的 UTF-8 文件。文件已存在属于工具语义失败，不是权限拒绝。成功创建会更新文件 snapshot。
+- `write_file`：写入新的 UTF-8 文件。文件已存在属于工具语义失败，不是权限拒绝；已有文件应使用 `edit_file`。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
 - `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。
 - `view_diff`：在 git 仓库中查看 diff；非 git 目录会返回干净的 "diff unavailable" 结果。
@@ -104,10 +104,15 @@ agent replay <run_id>
 
 关键 runtime 属性：
 
-- 文件编辑需要来自 `read_file`、`create_file` 或成功 `edit_file` 的已知 snapshot。
+- 文件编辑需要来自 `read_file`、`write_file` 或成功 `edit_file` 的已知 snapshot。
 - 成功编辑会刷新 snapshot，所以同一文件多次编辑不需要无意义地重新读取。
 - no-op edit 会成功返回，但不会标记文件已变更。
 - 交互会话会区分 whole-run 状态和 current-task 状态。上一轮 prompt 的失败验证或 changed files 不会污染下一轮 prompt 的 success inference。
+- `max_turns` 限制每个任务的模型调用次数；交互运行中的 trace turn ID 仍保持全局唯一。
+- runtime 会记录并校验模型 `stop_reason`。截断、拒绝或协议不一致的响应不能被报告为成功；未提供 `stop_reason` 的兼容 provider 仍使用内容块判断。
+- 并行工具调用会在一个 user message 中返回全部匹配的 `tool_result`。terminal deny 后未执行的调用会得到显式 cancelled result，保持消息历史合法。
+- 成功验证会绑定当前 mutation version。验证后的文件修改会让证据变为 stale，直到重新运行验证。
+- 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
 - 上下文压缩会避免留下没有对应 `tool_use` 的孤儿 `tool_result`。
 - unknown tool 和参数校验失败会作为正常 tool result 进入 trace，方便排障。
 - recovery prompt 不会重复塞入已经存在于前一个 tool result 中的大段失败输出。

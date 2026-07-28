@@ -49,6 +49,13 @@ class ReadFileTool(BaseTool):
         offset = int(args.get("offset", 0))
         limit = int(args.get("limit", DEFAULT_LIMIT))
 
+        if context.access_policy.is_protected_resolved_read(context.repo_path, target):
+            return ToolResult(
+                ok=False,
+                content="Permission denied: protected read path.",
+                error="protected read",
+                metadata={"protected_read": True},
+            )
         if not target.exists():
             return ToolResult(ok=False, content=f"File not found: {requested_path}", error="file not found")
         if not target.is_file():

@@ -9,7 +9,7 @@ class ReportWriter:
     def write(self, context: AgentContext) -> Path:
         path = context.run_dir / "report.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        test_result = context.last_test_result or {}
+        test_result = self._task_test_result(context)
         cost_path = context.run_dir / "cost.json"
         cost_summary = self._cost_summary(context)
 
@@ -61,9 +61,33 @@ class ReportWriter:
         return path
 
     def _verification_status(self, context: AgentContext) -> str:
-        if context.last_test_result is None:
+        test_result = self._task_test_result(context)
+        if not test_result:
             return "not recorded"
-        return "passed" if context.last_test_result.get("ok") else "failed"
+        if not test_result.get("ok"):
+            return "failed"
+
+        changed_files = getattr(context, "task_changed_files", None)
+        if changed_files is None:
+            changed_files = getattr(context, "changed_files", set())
+        has_task_mutations = getattr(context, "has_task_mutations", None)
+        task_mutated = (
+            bool(has_task_mutations())
+            if callable(has_task_mutations)
+            else bool(changed_files)
+        )
+        if (
+            task_mutated
+            and hasattr(context, "task_verification_version")
+            and context.task_verification_version != context.mutation_version
+        ):
+            return "stale"
+        return "passed"
+
+    def _task_test_result(self, context: AgentContext) -> dict:
+        if hasattr(context, "task_test_result"):
+            return context.task_test_result or {}
+        return context.last_test_result or {}
 
     def _failure_summary(self, context: AgentContext, test_result: dict) -> str:
         if context.success is True:
