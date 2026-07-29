@@ -7,12 +7,15 @@ from pathlib import Path
 from agent.context import AgentContext, RunConfig, make_run_id
 from agent.model_client import ModelClient
 from agent.prompts import build_initial_messages, build_system_prompt
+from runtime.access_policy import AccessPolicy
 from runtime.artifact_store import ArtifactStore
 from runtime.bootstrap import RuntimeBundle
 from runtime.cost_tracker import CostTracker
 from runtime.diff_manager import DiffManager
+from runtime.environment_policy import EnvironmentPolicy
 from runtime.hooks import HookEvent
 from runtime.permission import PermissionGate
+from runtime.redaction import SecretRedactor
 from runtime.report_writer import ReportWriter
 from runtime.sandbox import SandboxRuntime
 from runtime.trace_logger import TraceLogger
@@ -178,7 +181,12 @@ class AgentLoop:
 
             response_action = self._response_action(response)
             if response_action == "final":
-                context.final_text = response.text
+                redactor = getattr(context, "redactor", None)
+                context.final_text = (
+                    redactor.redact(response.text)
+                    if redactor is not None
+                    else response.text
+                )
                 context.finished = True
                 context.success = self.infer_success(context)
                 context.trace.log(
@@ -388,7 +396,15 @@ class AgentLoop:
 
         config = self.config or RunConfig(permission_mode=self.permission_mode)
         config.permission_mode = self.permission_mode
-        sandbox = SandboxRuntime(repo_path=repo_path, run_dir=run_dir, config=config)
+        access_policy = AccessPolicy()
+        environment_policy = EnvironmentPolicy(config.bash_env_allowlist)
+        redactor = SecretRedactor.from_environment()
+        sandbox = SandboxRuntime(
+            repo_path=repo_path,
+            run_dir=run_dir,
+            config=config,
+            access_policy=access_policy,
+        )
 
         if config.sandbox_fail_if_unavailable and sandbox.status.enabled and not sandbox.status.available:
             raise RuntimeError(f"Sandbox requested but unavailable: {sandbox.status.reason}")
@@ -405,12 +421,15 @@ class AgentLoop:
             conversation_messages=list(initial_messages),
             permission_mode=config.permission_mode,
             permission_gate=PermissionGate(),
-            trace=TraceLogger(run_dir, run_id=run_id),
+            trace=TraceLogger(run_dir, run_id=run_id, redactor=redactor),
             artifacts=ArtifactStore(run_dir),
             cost_tracker=CostTracker(run_dir),
             diff_manager=DiffManager(repo_path, run_dir),
             report_writer=ReportWriter(),
             sandbox=sandbox,
+            access_policy=access_policy,
+            environment_policy=environment_policy,
+            redactor=redactor,
         )
 
     def infer_success(self, context: AgentContext) -> bool:

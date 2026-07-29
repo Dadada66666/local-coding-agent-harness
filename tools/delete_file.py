@@ -9,8 +9,8 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 class DeleteFileTool(BaseTool):
     name = "delete_file"
     description = (
-        "Delete one known file. Requires a current read/write snapshot; "
-        "directories and symlinks are not supported."
+        "Delete one known file previously read with read_file or changed by a file tool. "
+        "Shell reads do not create the required snapshot; directories and symlinks are unsupported."
     )
     input_schema = {
         "type": "object",
@@ -40,6 +40,20 @@ class DeleteFileTool(BaseTool):
         path = args.get("path")
         if not isinstance(path, str) or not path:
             raise ToolValidationError("delete_file requires a non-empty string path")
+        if context is None:
+            return
+
+        try:
+            target = context.safe_path(path)
+        except (OSError, ValueError):
+            return
+        if context.access_policy.is_protected_resolved_write(context.repo_path, target):
+            return
+        if str(target) not in context.read_file_state:
+            raise ToolValidationError(
+                "delete_file requires a current structured snapshot; use read_file first. "
+                "A Bash read does not count."
+            )
 
     def call(self, args: dict, context) -> ToolResult:
         requested_path = args["path"]

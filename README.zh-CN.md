@@ -40,6 +40,9 @@ MODEL_ID=
 ANTHROPIC_BASE_URL=
 ```
 
+默认只加载 Harness 根目录下的 `.env`，不会在当前 `WORKDIR` 中自动搜索。以安装包
+方式运行且配置文件位于其他位置时，应通过 `LCAH_ENV_FILE` 指定明确路径。
+
 模型适配层使用 Anthropic Messages API 形状，包括顶层 `system`、`messages`、`tools`、assistant `tool_use` blocks 和 user `tool_result` blocks。`ANTHROPIC_BASE_URL` 可以指向 Anthropic-compatible provider。
 
 ## CLI
@@ -169,11 +172,15 @@ agent --sandbox
 - `--sandbox-fail-if-unavailable`：如果 `srt` 不可运行，启动直接失败。
 - `--sandbox-settings <path>`：使用自定义 SRT settings 文件。
 - `--sandbox-auto-allow/--no-sandbox-auto-allow`：控制 strong sandbox 可用时 unknown bash 是否自动允许。
+- `--bash-env <name>`：显式向 Bash 传入一个非敏感环境变量；可重复指定。Provider
+  Key 和名称疑似 secret/token/password 的变量永远不会继承。
 
 Linux/macOS：
 
 - 使用 `srt --settings <settings_path> ...`
-- probe 成功后视为 strong boundary
+- `.env`、`.agent`、`.mcp.json` 和 SSH 数据在 OS 读取边界被拒绝；`git status`
+  所需的 Git 元数据仍可由 Git 内部读取，但直接 Bash 引用和所有受保护写入仍会被 gate
+- 启动时运行 OS 级 protected-read canary，只有确认读取被拒绝后才视为 strong boundary
 
 Windows：
 
@@ -182,6 +189,9 @@ Windows：
 - 不能因为安装了 `srt` 就自动批准 unknown bash
 
 sandbox 是执行边界，不是 `PermissionGate` 的替代品。破坏性命令、网络命令、受保护路径、通过 shell 写文件等仍由 runtime permission checks 控制。
+
+Bash 使用经过清理的环境，而不是继承 Harness 进程的完整环境。Tool output 会在
+回填模型、写 trace 或持久化 artifact 之前统一脱敏。
 
 ## 开发
 

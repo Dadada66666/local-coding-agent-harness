@@ -83,6 +83,24 @@ def permission_hook(tool_call, tool, context):
     )
 
 
+def secret_redaction_hook(tool_call, tool, result, context) -> None:
+    redactor = getattr(context, "redactor", None)
+    if redactor is None:
+        return None
+
+    result.content, content_replacements = redactor.redact_with_count(result.content or "")
+    error_replacements = 0
+    if result.error:
+        result.error, error_replacements = redactor.redact_with_count(result.error)
+    result.metadata = redactor.redact_value(result.metadata)
+
+    replacements = content_replacements + error_replacements
+    if replacements:
+        result.metadata["secret_redacted"] = True
+        result.metadata["secret_redaction_count"] = replacements
+    return None
+
+
 def large_output_hook(tool_call, tool, result, context) -> None:
     if not result.content:
         return None

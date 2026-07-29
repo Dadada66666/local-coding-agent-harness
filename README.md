@@ -45,6 +45,10 @@ MODEL_ID=
 ANTHROPIC_BASE_URL=
 ```
 
+The adapter loads only the harness-root `.env` by default; it does not search
+the active `WORKDIR`. Set `LCAH_ENV_FILE` to an explicit path when running an
+installed package without that file.
+
 The model adapter uses the Anthropic Messages API shape, including top-level
 `system`, `messages`, `tools`, assistant `tool_use` blocks, and user
 `tool_result` blocks. `ANTHROPIC_BASE_URL` can point at an Anthropic-compatible
@@ -222,11 +226,18 @@ Useful options:
 - `--sandbox-settings <path>`: use a custom SRT settings file.
 - `--sandbox-auto-allow/--no-sandbox-auto-allow`: control unknown bash
   auto-allow when a strong sandbox is available.
+- `--bash-env <name>`: explicitly pass a non-secret environment variable to
+  Bash. Repeat the option for multiple names. Provider keys and secret-like
+  names are never inherited.
 
 Linux/macOS:
 
 - sandbox settings are applied with `srt --settings <settings_path> ...`
-- a successful probe is treated as a strong boundary
+- `.env`, `.agent`, `.mcp.json`, and SSH data are denied at the OS read
+  boundary; Git metadata required by `git status` remains internally readable,
+  while direct Bash references and all protected writes are still gated
+- startup performs an OS-level protected-read canary; only a successful denial
+  is treated as a strong boundary
 
 Windows:
 
@@ -237,6 +248,10 @@ Windows:
 The sandbox is an execution boundary, not a replacement for `PermissionGate`.
 Destructive commands, network commands, protected paths, and shell-based file
 writes remain controlled by runtime permission checks.
+
+Bash receives a sanitized environment instead of the harness process
+environment. Tool output is redacted before model feedback, trace logging, or
+artifact persistence.
 
 ## Development
 

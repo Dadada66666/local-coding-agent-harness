@@ -31,6 +31,9 @@ class DiffManager:
                 f"git diff failed with exit code {completed.returncode}.\n\n"
                 f"{completed.stderr or completed.stdout or ''}"
             )
+        redactor = getattr(context, "redactor", None)
+        if redactor is not None:
+            content = redactor.redact(content)
         self.path.write_text(content, encoding="utf-8")
         return self.path
 

@@ -44,6 +44,11 @@ def main(
         help="Fail the run if sandbox was requested but srt is unavailable.",
     ),
     sandbox_settings: Path | None = typer.Option(None, "--sandbox-settings", help="Optional srt settings path."),
+    bash_env: list[str] | None = typer.Option(
+        None,
+        "--bash-env",
+        help="Explicit non-secret environment variable name to pass to Bash. Repeat as needed.",
+    ),
 ) -> None:
     configure_stdio()
     if ctx.invoked_subcommand is not None:
@@ -56,6 +61,7 @@ def main(
         sandbox_auto_allow=sandbox_auto_allow,
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings=sandbox_settings,
+        bash_env=bash_env,
     )
 
 
@@ -80,12 +86,24 @@ def run(
         help="Fail the run if sandbox was requested but srt is unavailable.",
     ),
     sandbox_settings: Path | None = typer.Option(None, "--sandbox-settings", help="Optional srt settings path."),
+    bash_env: list[str] | None = typer.Option(
+        None,
+        "--bash-env",
+        help="Explicit non-secret environment variable name to pass to Bash. Repeat as needed.",
+    ),
 ) -> None:
     configure_stdio()
     workdir = Path.cwd()
     if task:
         mode = resolve_permission(permission)
-        config = build_run_config(mode, sandbox, sandbox_auto_allow, sandbox_fail_if_unavailable, sandbox_settings)
+        config = build_run_config(
+            mode,
+            sandbox,
+            sandbox_auto_allow,
+            sandbox_fail_if_unavailable,
+            sandbox_settings,
+            bash_env,
+        )
         runner = build_agent_runner(repo_path=workdir, permission_mode=mode, config=config)
         context = runner.run(task)
         typer.echo(f"Report saved to: {context.run_dir / 'report.md'}")
@@ -98,6 +116,7 @@ def run(
         sandbox_auto_allow=sandbox_auto_allow,
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings=sandbox_settings,
+        bash_env=bash_env,
     )
 
 
@@ -215,9 +234,17 @@ def run_interactive(
     sandbox_auto_allow: bool = True,
     sandbox_fail_if_unavailable: bool = False,
     sandbox_settings: Path | None = None,
+    bash_env: list[str] | None = None,
 ) -> None:
     mode = resolve_permission(permission)
-    config = build_run_config(mode, sandbox, sandbox_auto_allow, sandbox_fail_if_unavailable, sandbox_settings)
+    config = build_run_config(
+        mode,
+        sandbox,
+        sandbox_auto_allow,
+        sandbox_fail_if_unavailable,
+        sandbox_settings,
+        bash_env,
+    )
     runner = build_agent_runner(repo_path=workdir, permission_mode=mode, config=config)
     context = runner.start_interactive()
 
@@ -281,6 +308,7 @@ def build_run_config(
     sandbox_auto_allow: bool,
     sandbox_fail_if_unavailable: bool,
     sandbox_settings: Path | None,
+    bash_env: list[str] | None = None,
 ) -> RunConfig:
     return RunConfig(
         permission_mode=permission_mode,
@@ -288,6 +316,7 @@ def build_run_config(
         sandbox_auto_allow_bash=sandbox_auto_allow,
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings_path=str(sandbox_settings) if sandbox_settings else None,
+        bash_env_allowlist=tuple(bash_env or ()),
     )
 
 

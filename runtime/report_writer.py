@@ -60,7 +60,11 @@ class ReportWriter:
             "",
         ]
 
-        path.write_text("\n".join(lines), encoding="utf-8")
+        content = "\n".join(lines)
+        redactor = getattr(context, "redactor", None)
+        if redactor is not None:
+            content = redactor.redact(content)
+        path.write_text(content, encoding="utf-8")
         return path
 
     def _verification_status(self, context: AgentContext) -> str:
@@ -127,6 +131,7 @@ class ReportWriter:
                 "- available: false",
                 "- strong_boundary: false",
                 "- settings_applied: false",
+                "- protected_reads_enforced: false",
                 "- settings_path: N/A",
                 "- executable_path: N/A",
                 "- auto_allowed_unknown_bash: 0",
@@ -142,6 +147,7 @@ class ReportWriter:
             f"- available: {str(status.available).lower()}",
             f"- strong_boundary: {str(status.strong_boundary).lower()}",
             f"- settings_applied: {str(status.settings_applied).lower()}",
+            f"- protected_reads_enforced: {str(status.protected_reads_enforced).lower()}",
             f"- settings_path: `{settings_path}`",
             f"- executable_path: `{executable_path}`",
             f"- auto_allowed_unknown_bash: {context.sandbox_auto_allowed_unknown_bash_count}",
