@@ -38,9 +38,10 @@ class BashRiskDecision:
     command_prefix: str | None
     suggested_tool: str | None
     confidence: str
+    execution_route: str | None = None
 
     def to_metadata(self) -> dict[str, Any]:
-        return {
+        metadata = {
             "risk": self.risk,
             "reason": self.reason,
             "target_paths": self.target_paths,
@@ -48,6 +49,9 @@ class BashRiskDecision:
             "suggested_tool": self.suggested_tool,
             "confidence": self.confidence,
         }
+        if self.execution_route is not None:
+            metadata["execution_route"] = self.execution_route
+        return metadata
 
 
 @dataclass
@@ -81,6 +85,10 @@ class RiskClassifier:
     )
     SHELL_DELETE_COMMAND_RE = re.compile(
         r"""(?:^|&&|\|\||\||;|[\r\n])\s*(?P<command>rm|unlink|remove-item|del|erase)(?:\s|$)""",
+        re.IGNORECASE,
+    )
+    APPLY_PATCH_COMMAND_RE = re.compile(
+        r"""(?:^|&&|\|\||\||;|[\r\n])\s*apply_patch(?:\s|$)""",
         re.IGNORECASE,
     )
     SHELL_REDIRECT_RE = re.compile(
@@ -215,14 +223,15 @@ class RiskClassifier:
                 confidence="high" if python_paths else "medium",
             )
 
-        if self._is_apply_patch_heredoc(command):
+        if self._is_apply_patch_command(command):
             return BashRiskDecision(
                 risk=BashRisk.FILE_WRITE_VIA_BASH,
-                reason="apply_patch through shell heredoc can write files.",
+                reason="apply_patch through shell can write files.",
                 target_paths=[],
                 command_prefix=command_prefix,
                 suggested_tool="edit_file",
                 confidence="high",
+                execution_route="structured_tool",
             )
 
         if not self._is_python_inline(command_prefix):
@@ -307,8 +316,8 @@ class RiskClassifier:
             return [], f"Matched file deletion command: {matched.group('command').lower()}"
         return [], None
 
-    def _is_apply_patch_heredoc(self, command: str) -> bool:
-        return bool(re.search(r"\bapply_patch\b[^\n\r]*<<", command, re.IGNORECASE))
+    def _is_apply_patch_command(self, command: str) -> bool:
+        return bool(self.APPLY_PATCH_COMMAND_RE.search(command))
 
     def _python_write_details(self, command: str) -> tuple[list[str], str | None, str | None]:
         paths: list[str] = []
@@ -499,6 +508,10 @@ class PermissionGate:
                 terminal_on_deny=operation.terminal_on_deny,
                 decision_reason="deny_rule",
             )
+
+        protocol_decision = self._check_bash_protocol(operation, args, context)
+        if protocol_decision is not None:
+            return protocol_decision
 
         ask_rule = context.permission_rules.match("ask", tool.name, operation.scope_key)
         if ask_rule:
@@ -715,6 +728,7 @@ class PermissionGate:
 
         if answer in {"y", "yes", "once"}:
             self._log_user_response(context, tool, decision, "allow_once")
+            print("[permission] allowed once; executing tool.")
             return self._decision(
                 behavior=PermissionBehavior.ALLOW,
                 risk=decision.risk,
@@ -737,6 +751,7 @@ class PermissionGate:
             )
             self._log_user_response(context, tool, decision, "allow_scope")
             self._log_scope_event(context, tool, decision, "permission_scope_approved", scope)
+            print("[permission] allowed for this run scope; executing tool.")
             return self._decision(
                 behavior=PermissionBehavior.ALLOW,
                 risk=decision.risk,
@@ -882,6 +897,53 @@ class PermissionGate:
 
         return None
 
+    def _check_bash_protocol(
+        self,
+        operation: Operation,
+        args: dict,
+        context,
+    ) -> PermissionDecision | None:
+        bash_risk = operation.metadata.get("bash_risk")
+        if not isinstance(bash_risk, dict):
+            return None
+
+        risk = str(bash_risk.get("risk"))
+        purpose = str(args.get("purpose", "")).strip().lower()
+        suggested_tool = self._suggested_file_tool_from_metadata(bash_risk, context)
+
+        if purpose == "verify" and risk in {
+            BashRisk.FILE_WRITE_VIA_BASH,
+            BashRisk.FILE_DELETE_VIA_BASH,
+        }:
+            tool_hint = f" Use {suggested_tool} first." if suggested_tool else ""
+            return self._decision(
+                behavior=PermissionBehavior.DENY,
+                risk=risk,
+                message=(
+                    "A verification command cannot also perform explicit file mutations."
+                    f"{tool_hint} Run verification in a separate Bash call."
+                ),
+                operation=operation,
+                terminal_on_deny=False,
+                decision_reason="bash_mixed_mutation_verification",
+            )
+
+        if bash_risk.get("execution_route") == "structured_tool":
+            tool_hint = suggested_tool or "the matching structured file tool"
+            return self._decision(
+                behavior=PermissionBehavior.DENY,
+                risk=risk,
+                message=(
+                    "Shell-based patch application is not executed. "
+                    f"Use {tool_hint} so the runtime can validate and track the edit."
+                ),
+                operation=operation,
+                terminal_on_deny=False,
+                decision_reason="bash_structured_tool_route",
+            )
+
+        return None
+
     def _check_bash_operation(self, operation: Operation, context) -> PermissionDecision | None:
         bash_risk = operation.metadata.get("bash_risk")
         if not isinstance(bash_risk, dict):
@@ -979,12 +1041,28 @@ class PermissionGate:
         target_paths = bash_risk.get("target_paths") or []
         if target_paths:
             parts.append(f"Target paths: {', '.join(target_paths)}.")
-        suggested_tool = bash_risk.get("suggested_tool")
+        suggested_tool = self._suggested_file_tool_from_metadata(bash_risk, context)
         if suggested_tool:
             parts.append(f"Use {suggested_tool} instead of Bash for this file operation.")
         else:
             parts.append("Prefer write_file for new files or edit_file for precise edits.")
         return " ".join(parts)
+
+    def _suggested_file_tool_from_metadata(self, bash_risk: dict, context) -> str | None:
+        target_paths = bash_risk.get("target_paths") or []
+        if not target_paths:
+            return bash_risk.get("suggested_tool")
+
+        existing_targets = []
+        for path in target_paths:
+            try:
+                existing_targets.append(context.safe_path(path).exists())
+            except Exception:
+                continue
+
+        if existing_targets and all(existing_targets):
+            return "edit_file"
+        return bash_risk.get("suggested_tool")
 
     def _decision(
         self,

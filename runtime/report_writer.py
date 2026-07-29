@@ -69,6 +69,8 @@ class ReportWriter:
             return "not recorded"
         if not test_result.get("ok"):
             return "failed"
+        if getattr(context, "task_unresolved_mutation_failure", False):
+            return "invalidated by unresolved mutation failure"
 
         changed_files = getattr(context, "task_changed_files", None)
         if changed_files is None:
@@ -97,6 +99,8 @@ class ReportWriter:
             return "N/A"
         if test_result.get("error"):
             return test_result["error"]
+        if getattr(context, "task_unresolved_mutation_failure", False):
+            return "A mutation operation failed and was not recovered."
         if context.success is False and context.final_text:
             return context.final_text
         return "N/A"

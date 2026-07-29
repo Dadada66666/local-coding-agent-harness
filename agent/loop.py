@@ -414,6 +414,9 @@ class AgentLoop:
         )
 
     def infer_success(self, context: AgentContext) -> bool:
+        if getattr(context, "task_unresolved_mutation_failure", False):
+            return False
+
         changed_files = getattr(context, "task_changed_files", None)
         if changed_files is None:
             changed_files = getattr(context, "changed_files", set())

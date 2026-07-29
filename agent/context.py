@@ -83,6 +83,7 @@ class AgentContext:
     mutation_version: int = 0
     task_start_mutation_version: int = 0
     task_verification_version: int | None = None
+    task_unresolved_mutation_failure: bool = False
     changed_files: set[str] = field(default_factory=set)
     task_changed_files: set[str] = field(default_factory=set)
     created_files: set[str] = field(default_factory=set)
@@ -153,6 +154,7 @@ class AgentContext:
     def reset_task_state(self) -> None:
         self.task_test_result = None
         self.task_verification_version = None
+        self.task_unresolved_mutation_failure = False
         self.task_start_mutation_version = self.mutation_version
         self.task_model_calls = 0
         self.task_tool_rounds = 0

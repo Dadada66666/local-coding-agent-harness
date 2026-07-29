@@ -122,7 +122,8 @@ Available tools:
   approval. Directories and symlinks are not supported.
 - `bash`: run verification or inspection commands from `WORKDIR`. Commands can
   carry `purpose="verify"` so verification results are reflected in report
-  success.
+  success. Verification commands run fail-fast and cannot include explicit
+  file mutations; shell patching is routed to the structured file tools.
 - `view_diff`: show git diff when `WORKDIR` is a git repository; non-git
   directories return a clean "diff unavailable" result.
 
@@ -200,6 +201,9 @@ The runtime records verification results from:
 
 Read-only discovery commands such as `find`, `git status`, `git diff`, `ls`,
 `rg`, and `grep` are not treated as verification even if labeled `verify`.
+Commands that explicitly mutate files are also excluded from verification;
+perform the edit with a structured file tool, then verify it in a separate
+`bash` call.
 
 ## Sandbox Runtime
 

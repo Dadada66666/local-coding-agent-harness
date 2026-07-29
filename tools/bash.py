@@ -61,8 +61,9 @@ class BashTool(BaseTool):
         timeout = int(args.get("timeout", DEFAULT_TIMEOUT_SECONDS))
         stdin_content = args.get("input")
         purpose = args.get("purpose")
-        argv = self._build_command_argv(command)
-        shell_name = self._shell_name()
+        fail_fast = str(purpose or "").strip().lower() == "verify"
+        argv = self._build_command_argv(command, fail_fast=fail_fast)
+        shell_name = self._shell_name(fail_fast=fail_fast)
         sandbox_metadata = self._sandbox_metadata(context)
 
         sandbox = getattr(context, "sandbox", None)
@@ -82,7 +83,8 @@ class BashTool(BaseTool):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 check=False,
                 timeout=timeout,
                 env=self._build_env(),
@@ -101,6 +103,7 @@ class BashTool(BaseTool):
                     stdin_mode=stdin_mode,
                     sandbox=sandbox_metadata,
                     purpose=purpose,
+                    fail_fast=fail_fast,
                     timeout=timeout,
                     timed_out=True,
                 ),
@@ -120,19 +123,27 @@ class BashTool(BaseTool):
                 stdin_mode=stdin_mode,
                 sandbox=sandbox_metadata,
                 purpose=purpose,
+                fail_fast=fail_fast,
                 returncode=completed.returncode,
                 truncated=original_chars > len(content),
                 original_chars=original_chars,
             ),
         )
 
-    def _build_command_argv(self, command: str) -> list[str]:
+    def _build_command_argv(self, command: str, *, fail_fast: bool = False) -> list[str]:
         if platform.system() == "Windows":
+            fail_fast_setup = ""
+            if fail_fast:
+                fail_fast_setup = (
+                    "$ErrorActionPreference = 'Stop'; "
+                    "$PSNativeCommandUseErrorActionPreference = $true; "
+                )
             wrapped_command = (
                 "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                 "$OutputEncoding = [System.Text.Encoding]::UTF8; "
                 "$env:PYTHONIOENCODING = 'utf-8'; "
                 "$env:PYTHONUTF8 = '1'; "
+                f"{fail_fast_setup}"
                 f"{command}"
             )
             return [
@@ -146,7 +157,8 @@ class BashTool(BaseTool):
                 wrapped_command,
             ]
 
-        return ["/bin/sh", "-lc", command]
+        shell_flags = "-lec" if fail_fast else "-lc"
+        return ["/bin/sh", shell_flags, command]
 
     def _build_env(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -154,10 +166,10 @@ class BashTool(BaseTool):
         env["PYTHONUTF8"] = "1"
         return env
 
-    def _shell_name(self) -> str:
+    def _shell_name(self, *, fail_fast: bool = False) -> str:
         if platform.system() == "Windows":
             return f"{self._windows_shell_executable()} -NoProfile -Command"
-        return "/bin/sh -lc"
+        return f"/bin/sh {'-lec' if fail_fast else '-lc'}"
 
     def _windows_shell_executable(self) -> str:
         return shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
