@@ -20,7 +20,7 @@ Behavior:
 - When running a command to validate behavior, set bash purpose to "verify".
 
 Safety:
-- Do not attempt destructive operations.
+- Do not attempt broad or irreversible destructive operations.
 - If permission is denied, treat the operation as cancelled.
 
 Final answer:
@@ -50,4 +50,3 @@ SYSTEM_PROMPT = build_system_prompt(Path.cwd())
 
 def build_initial_messages(task: str) -> list[dict]:
     return [{"role": "user", "content": task}]
-

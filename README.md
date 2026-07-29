@@ -117,6 +117,9 @@ Available tools:
   replacements with `edits`. Repeated matches remain ambiguous by default;
   `occurrence` targets a specific match and `replace_all` explicitly replaces
   every match. Batch edits are atomic.
+- `delete_file`: delete one snapshotted file. Current-task files can be cleaned
+  up automatically in `accept_edits`; deleting a pre-existing file requires
+  approval. Directories and symlinks are not supported.
 - `bash`: run verification or inspection commands from `WORKDIR`. Commands can
   carry `purpose="verify"` so verification results are reflected in report
   success.
@@ -124,7 +127,7 @@ Available tools:
   directories return a clean "diff unavailable" result.
 
 File tools are constrained by `AgentContext.safe_path()`, so reads and writes
-cannot escape `WORKDIR`.
+cannot escape `WORKDIR`; protected-path checks also apply to deletions.
 
 ## Runtime Behavior
 
@@ -148,6 +151,9 @@ Important runtime properties:
   cancelled results so the message history remains valid.
 - Successful verification is tied to the current mutation version. A later
   file change makes that evidence stale until another verification runs.
+- Shell-based file deletion returns a non-terminal routing failure so the
+  model can retry with `delete_file`; recursive and broad destructive commands
+  remain terminal denials.
 - Directory listing and recursive search filter protected paths after canonical path
   resolution, including aliases that resolve to protected files.
 - Context compaction avoids leaving orphan `tool_result` messages without their

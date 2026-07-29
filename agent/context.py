@@ -85,6 +85,8 @@ class AgentContext:
     task_verification_version: int | None = None
     changed_files: set[str] = field(default_factory=set)
     task_changed_files: set[str] = field(default_factory=set)
+    created_files: set[str] = field(default_factory=set)
+    task_created_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
     denied_permission_scopes: set[str] = field(default_factory=set)
     access_policy: AccessPolicy = field(default_factory=AccessPolicy)
@@ -119,6 +121,29 @@ class AgentContext:
         self.task_changed_files.add(path)
         self.record_mutation()
 
+    def record_created_file(self, path: str) -> None:
+        self.created_files.add(path)
+        self.task_created_files.add(path)
+        self.record_changed_file(path)
+
+    def record_deleted_file(self, path: str) -> None:
+        self.read_file_state.pop(str(self.repo_path / path), None)
+
+        if path in self.task_created_files:
+            self.task_created_files.discard(path)
+            self.task_changed_files.discard(path)
+            self.created_files.discard(path)
+            self.changed_files.discard(path)
+            return
+
+        if path in self.created_files:
+            self.created_files.discard(path)
+            self.changed_files.discard(path)
+        else:
+            self.changed_files.add(path)
+        self.task_changed_files.add(path)
+        self.record_mutation()
+
     def record_mutation(self) -> None:
         self.mutation_version += 1
 
@@ -133,6 +158,7 @@ class AgentContext:
         self.task_tool_rounds = 0
         self.repair_attempts = 0
         self.task_changed_files.clear()
+        self.task_created_files.clear()
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)

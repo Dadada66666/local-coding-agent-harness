@@ -82,7 +82,7 @@ class WriteFileTool(BaseTool):
             )
 
         context.record_file_snapshot(target, target.read_bytes(), partial=False)
-        context.record_changed_file(str(target.relative_to(context.repo_path)))
+        context.record_created_file(str(target.relative_to(context.repo_path)))
 
         return ToolResult(
             ok=True,

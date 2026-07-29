@@ -66,6 +66,22 @@ def test_report_failure_summary_follows_latest_success(tmp_path: Path) -> None:
     assert "Verification: not recorded" in report
 
 
+def test_report_separates_current_task_from_session_state(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response("fresh answer")])
+    runner = make_runner(tmp_path, model)
+    context = runner.start_interactive()
+    context.changed_files.add("old_task.py")
+
+    runner.submit(context, "current task")
+    context.changed_files.add("current_task.py")
+    context.task_changed_files.add("current_task.py")
+    report = context.report_writer.write(context).read_text(encoding="utf-8")
+
+    assert "## Task\ncurrent task" in report
+    assert "## Changed Files\n- current_task.py" in report
+    assert "## Session Changed Files\n- current_task.py\n- old_task.py" in report
+
+
 def test_submit_success_ignores_changed_files_from_previous_prompt(tmp_path: Path) -> None:
     model = FakeModelClient([final_response("fresh answer")])
     runner = make_runner(tmp_path, model)

@@ -333,7 +333,7 @@ def _cancel_task_for_terminal_deny(tool_call, decision, context) -> None:
 
     context.finished = True
     context.success = False
-    context.final_text = _permission_cancelled_summary(decision)
+    context.final_text = _permission_cancelled_summary(decision, context)
     context.trace.log(
         {
             "type": "task_cancelled",
@@ -361,6 +361,7 @@ def _should_cache_denied_scope(decision) -> bool:
         "path_escape",
         "access_policy_read",
         "access_policy_write",
+        "access_policy_delete",
         "bash_destructive",
     }:
         return True
@@ -368,24 +369,40 @@ def _should_cache_denied_scope(decision) -> bool:
     return decision.risk in {
         "protected_read",
         "protected_write",
+        "protected_delete",
         "destructive",
     }
 
 
-def _permission_cancelled_summary(decision) -> str:
+def _permission_cancelled_summary(decision, context) -> str:
     scope = decision.proposed_scope or (
         decision.operation.scope_key if decision.operation is not None else "permission request"
     )
+    changed_files = sorted(getattr(context, "task_changed_files", set()))
+    changed_summary = (
+        "\n".join(f"- {path}" for path in changed_files)
+        if changed_files
+        else "- None"
+    )
+    test_result = getattr(context, "task_test_result", None)
+    if test_result:
+        check_summary = (
+            f"- `{test_result.get('command', 'unknown')}`: "
+            f"{'passed' if test_result.get('ok') else 'failed'}"
+        )
+    else:
+        check_summary = "- Not run."
+
     return (
         "Summary\n"
         f"- Permission denied for `{scope}`; this operation was cancelled.\n"
-        "- No files were created or modified by the denied operation.\n\n"
+        "- The denied operation made no additional file changes.\n\n"
         "Changed files\n"
-        "- None\n\n"
+        f"{changed_summary}\n\n"
         "Checks run\n"
-        "- Not run. Reason: permission was denied before the operation executed.\n\n"
+        f"{check_summary}\n\n"
         "Risks\n"
-        "- No file changes were made for the denied operation."
+        "- Earlier task changes, if listed above, remain in the worktree."
     )
 
 

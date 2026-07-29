@@ -9,6 +9,7 @@ from runtime.bootstrap import build_runtime
 from runtime.permission import BashRisk, PermissionBehavior, PermissionMode, RiskClassifier
 from tools.bash import BashTool
 from tools.base import ToolResult
+from tools.delete_file import DeleteFileTool
 from tools.edit_file import EditFileTool
 from tools.list_dir import ListDirTool
 from tools.read_file import ReadFileTool
@@ -278,6 +279,164 @@ def test_destructive_bash_denied(tmp_path: Path) -> None:
     assert decision.behavior == PermissionBehavior.DENY
     assert decision.risk == BashRisk.DESTRUCTIVE
     assert decision.terminal_on_deny is True
+
+
+def test_terminal_deny_summary_preserves_earlier_task_changes(tmp_path: Path) -> None:
+    model = FakeModelClient(
+        [
+            tool_response(
+                ToolCall(
+                    "call_1",
+                    "write_file",
+                    {"path": "kept.py", "content": "value = 1\n"},
+                )
+            ),
+            tool_response(
+                ToolCall("call_2", "bash", {"command": "rm -rf important"})
+            ),
+        ]
+    )
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS, model)
+    context = runner.create_context("write then attempt broad delete", include_initial_message=True)
+
+    runner.run_until_idle(context)
+
+    assert context.success is False
+    assert context.task_changed_files == {"kept.py"}
+    assert "Changed files\n- kept.py" in context.final_text
+    assert "Checks run\n- Not run." in context.final_text
+    assert (tmp_path / "kept.py").exists()
+
+
+def test_single_file_bash_delete_routes_to_delete_tool_without_cancelling(
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("clean temporary file", include_initial_message=True)
+
+    decision = context.permission_gate.check(
+        BashTool(),
+        {"command": "rm temporary.py && python3 app.py"},
+        context,
+    )
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert decision.risk == BashRisk.FILE_DELETE_VIA_BASH
+    assert decision.terminal_on_deny is False
+    assert "delete_file" in decision.message
+
+
+def test_agent_can_recover_from_shell_delete_routing_failure(tmp_path: Path) -> None:
+    model = FakeModelClient(
+        [
+            tool_response(
+                ToolCall(
+                    "call_1",
+                    "write_file",
+                    {"path": "temporary.py", "content": "value = 1\n"},
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "call_2",
+                    "bash",
+                    {
+                        "command": "python -m py_compile temporary.py",
+                        "purpose": "verify",
+                    },
+                )
+            ),
+            tool_response(
+                ToolCall("call_3", "bash", {"command": "rm temporary.py"})
+            ),
+            tool_response(
+                ToolCall("call_4", "delete_file", {"path": "temporary.py"})
+            ),
+            final_response(),
+        ]
+    )
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS, model)
+    context = runner.create_context("verify and clean up", include_initial_message=True)
+
+    runner.run_until_idle(context)
+
+    assert context.success is True
+    assert context.abort_reason is None
+    assert context.task_model_calls == 5
+    assert context.task_changed_files == set()
+    assert not (tmp_path / "temporary.py").exists()
+
+
+def test_python_file_delete_is_not_an_unknown_bash_bypass() -> None:
+    classifier = RiskClassifier()
+
+    pathlib_decision = classifier.classify_bash(
+        '''python3 -c "from pathlib import Path; Path('temporary.py').unlink()"'''
+    )
+    os_decision = classifier.classify_bash(
+        '''python3 -c "import os; os.remove('temporary.py')"'''
+    )
+    powershell_decision = classifier.classify_bash(
+        "Get-ChildItem temporary.py | Remove-Item"
+    )
+
+    assert pathlib_decision.risk == BashRisk.FILE_DELETE_VIA_BASH
+    assert pathlib_decision.target_paths == ["temporary.py"]
+    assert os_decision.risk == BashRisk.FILE_DELETE_VIA_BASH
+    assert os_decision.target_paths == ["temporary.py"]
+    assert powershell_decision.risk == BashRisk.FILE_DELETE_VIA_BASH
+
+
+def test_verification_command_is_not_treated_as_read_only(tmp_path: Path) -> None:
+    read_only_runner = make_runner(tmp_path, PermissionMode.READ_ONLY)
+    read_only_context = read_only_runner.create_context("verify", include_initial_message=True)
+    accept_runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    accept_context = accept_runner.create_context("verify", include_initial_message=True)
+    args = {"command": "python3 -m unittest -v test_demo.py"}
+
+    read_only_decision = read_only_context.permission_gate.check(
+        BashTool(),
+        args,
+        read_only_context,
+    )
+    accept_decision = accept_context.permission_gate.check(
+        BashTool(),
+        args,
+        accept_context,
+    )
+
+    assert read_only_decision.behavior == PermissionBehavior.ASK
+    assert read_only_decision.risk == "unknown_operation"
+    assert accept_decision.behavior == PermissionBehavior.ALLOW
+    assert accept_decision.risk == BashRisk.SAFE_CHECK
+
+
+def test_preexisting_delete_file_is_not_terminal_when_user_denies(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "existing.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("delete existing file", include_initial_message=True)
+    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
+
+    decision = context.permission_gate.check(
+        DeleteFileTool(),
+        {"path": "existing.py"},
+        context,
+    )
+    resolved = context.permission_gate.resolve(
+        decision,
+        DeleteFileTool(),
+        {"path": "existing.py"},
+        context,
+    )
+
+    assert resolved.behavior == PermissionBehavior.DENY
+    assert resolved.terminal_on_deny is False
+    assert context.finished is False
+    assert path.exists()
 
 
 def test_report_permission_denied_not_success(monkeypatch, tmp_path: Path) -> None:

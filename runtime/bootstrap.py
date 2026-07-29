@@ -18,6 +18,7 @@ from runtime.executor import ToolExecutor
 from runtime.hooks import HookEvent, HookManager
 from runtime.recovery import RecoveryPolicy
 from tools.bash import BashTool
+from tools.delete_file import DeleteFileTool
 from tools.edit_file import EditFileTool
 from tools.grep import GrepTool
 from tools.list_dir import ListDirTool
@@ -43,6 +44,7 @@ def build_tool_registry() -> ToolRegistry:
     registry.register(ReadFileTool())
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
+    registry.register(DeleteFileTool())
     registry.register(BashTool())
     registry.register(ViewDiffTool())
     return registry
