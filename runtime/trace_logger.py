@@ -8,9 +8,10 @@ from uuid import uuid4
 
 
 class TraceLogger:
-    def __init__(self, run_dir: Path, run_id: str) -> None:
+    def __init__(self, run_dir: Path, run_id: str, redactor=None) -> None:
         self.run_id = run_id
         self.path = run_dir / "trace.jsonl"
+        self.redactor = redactor
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.step = 0
         self.started_at = time.monotonic()
@@ -30,6 +31,8 @@ class TraceLogger:
             }
             enriched = dict(event)
             enriched.update(common)
+            if self.redactor is not None:
+                enriched = self.redactor.redact_value(enriched)
 
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(json.dumps(enriched, ensure_ascii=False) + "\n")

@@ -101,6 +101,8 @@ class RiskClassifier:
         ),
         re.IGNORECASE,
     )
+    SHELL_SEGMENT_RE = re.compile(r"&&|\|\||[|;\r\n]")
+    DYNAMIC_SHELL_RE = re.compile(r"\$\(|`|<\(|>\(", re.IGNORECASE)
 
     DESTRUCTIVE_PATTERNS = [
         "rm -rf",
@@ -161,6 +163,8 @@ class RiskClassifier:
         "npm test",
         "python -m unittest",
         "python3 -m unittest",
+        "test",
+        "[",
     ]
     READ_ONLY_PREFIXES = [
         "git status",
@@ -182,12 +186,21 @@ class RiskClassifier:
         "findstr",
         "grep",
         "rg",
+        "echo",
+        "printf",
+        "head",
+        "tail",
+        "wc",
+        "stat",
+        "file",
+        "which",
+        "where",
+        "test-path",
     ]
     PYTHON_INLINE_PREFIXES = ["python -c", "python3 -c", "py -c"]
 
     def classify_bash(self, command: str) -> BashRiskDecision:
         normalized = f" {command.strip().lower()} "
-        stripped = normalized.strip()
         command_prefix = self._command_prefix(command)
 
         destructive_pattern = self._matched_pattern(normalized, self.DESTRUCTIVE_PATTERNS)
@@ -269,26 +282,25 @@ class RiskClassifier:
                 confidence="high",
             )
 
-        safe_prefix = self._matched_prefix(stripped, self.SAFE_CHECK_PREFIXES)
-        if safe_prefix:
+        segment_risk, segment_prefix = self._classify_shell_segments(command)
+        if segment_risk == BashRisk.SAFE_CHECK:
             return BashRiskDecision(
                 risk=BashRisk.SAFE_CHECK,
-                reason=f"Command starts with safe check prefix: {safe_prefix}.",
+                reason="Every shell segment is a recognized verification or read-only command.",
                 target_paths=[],
-                command_prefix=safe_prefix,
+                command_prefix=segment_prefix,
                 suggested_tool=None,
                 confidence="high",
             )
 
-        read_only_prefix = self._matched_prefix(stripped, self.READ_ONLY_PREFIXES)
-        if read_only_prefix:
+        if segment_risk == BashRisk.READ_ONLY_COMMAND:
             return BashRiskDecision(
                 risk=BashRisk.READ_ONLY_COMMAND,
-                reason=f"Command starts with read-only prefix: {read_only_prefix}.",
+                reason="Every shell segment is a recognized read-only command.",
                 target_paths=[],
-                command_prefix=read_only_prefix,
+                command_prefix=segment_prefix,
                 suggested_tool=None,
-                confidence="medium",
+                confidence="high",
             )
 
         return BashRiskDecision(
@@ -299,6 +311,33 @@ class RiskClassifier:
             suggested_tool=None,
             confidence="low",
         )
+
+    def _classify_shell_segments(self, command: str) -> tuple[str | None, str | None]:
+        if self.DYNAMIC_SHELL_RE.search(command):
+            return None, None
+
+        segments = [
+            segment.strip().lower()
+            for segment in self.SHELL_SEGMENT_RE.split(command)
+            if segment.strip()
+        ]
+        if not segments:
+            return None, None
+
+        first_prefix = None
+        has_safe_check = False
+        for segment in segments:
+            safe_prefix = self._matched_prefix(segment, self.SAFE_CHECK_PREFIXES)
+            read_only_prefix = self._matched_prefix(segment, self.READ_ONLY_PREFIXES)
+            matched_prefix = safe_prefix or read_only_prefix
+            if matched_prefix is None:
+                return None, None
+            if first_prefix is None:
+                first_prefix = matched_prefix
+            has_safe_check = has_safe_check or safe_prefix is not None
+
+        risk = BashRisk.SAFE_CHECK if has_safe_check else BashRisk.READ_ONLY_COMMAND
+        return risk, first_prefix
 
     def _delete_details(self, command: str, normalized: str) -> tuple[list[str], str | None]:
         paths = []
@@ -866,6 +905,44 @@ class PermissionGate:
         )
 
     def _check_access_policy(self, operation: Operation, context) -> PermissionDecision | None:
+        if operation.command and operation.kind in {"fs.write", "fs.delete"}:
+            protected_references = context.access_policy.protected_write_references(
+                operation.command
+            )
+            if protected_references:
+                return self._decision(
+                    behavior=PermissionBehavior.DENY,
+                    risk=(
+                        "protected_delete"
+                        if operation.kind == "fs.delete"
+                        else "protected_write"
+                    ),
+                    message=(
+                        "Permission denied: Bash command references protected mutation path(s): "
+                        f"{', '.join(protected_references)}"
+                    ),
+                    operation=operation,
+                    terminal_on_deny=True,
+                    decision_reason="access_policy_bash_write",
+                )
+
+        if operation.command:
+            protected_references = context.access_policy.protected_read_references(
+                operation.command
+            )
+            if protected_references:
+                return self._decision(
+                    behavior=PermissionBehavior.DENY,
+                    risk="protected_read",
+                    message=(
+                        "Permission denied: Bash command references protected read path(s): "
+                        f"{', '.join(protected_references)}"
+                    ),
+                    operation=operation,
+                    terminal_on_deny=False,
+                    decision_reason="access_policy_bash_read",
+                )
+
         if operation.kind == "fs.read":
             for path in operation.paths:
                 target = context.safe_path(path)

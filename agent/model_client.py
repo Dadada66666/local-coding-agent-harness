@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from anthropic import Anthropic
@@ -10,13 +11,19 @@ from agent.messages import ModelResponse, TokenUsage, ToolCall
 
 
 DEFAULT_MAX_TOKENS = 4096
+DEFAULT_ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 
 
 class ModelClient:
     """Anthropic Messages API adapter."""
 
     def __init__(self, model: str | None = None, max_tokens: int = DEFAULT_MAX_TOKENS) -> None:
-        load_dotenv()
+        env_file = os.getenv("LCAH_ENV_FILE")
+        dotenv_path = Path(env_file).expanduser() if env_file else None
+        if dotenv_path is None and (DEFAULT_ENV_FILE.parent / ".env.example").is_file():
+            dotenv_path = DEFAULT_ENV_FILE
+        if dotenv_path is not None and dotenv_path.is_file():
+            load_dotenv(dotenv_path=dotenv_path)
         self.model = model or os.environ["MODEL_ID"]
         self.max_tokens = max_tokens
 

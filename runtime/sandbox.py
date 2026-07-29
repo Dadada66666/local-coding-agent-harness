@@ -8,10 +8,13 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from runtime.access_policy import AccessPolicy
+
 
 PROBE_TIMEOUT_SECONDS = 10
 MAX_REASON_CHARS = 600
 WINDOWS_NO_SETTINGS_REASON = "Windows SRT runs without --settings to avoid srt-win ACL stamp instability"
+READ_PROBE_MARKER = "local-coding-agent-harness-protected-read-probe"
 
 
 @dataclass(frozen=True)
@@ -23,13 +26,21 @@ class SandboxStatus:
     settings_path: Path | None = None
     executable_path: str | None = None
     settings_applied: bool = False
+    protected_reads_enforced: bool = False
 
 
 class SandboxRuntime:
-    def __init__(self, repo_path: Path, run_dir: Path, config) -> None:
+    def __init__(
+        self,
+        repo_path: Path,
+        run_dir: Path,
+        config,
+        access_policy: AccessPolicy | None = None,
+    ) -> None:
         self.repo_path = repo_path
         self.run_dir = run_dir
         self.config = config
+        self.access_policy = access_policy or AccessPolicy()
         self.status = self._detect()
 
     def _detect(self) -> SandboxStatus:
@@ -52,7 +63,6 @@ class SandboxRuntime:
 
         system = platform.system()
         settings_applied = self._should_apply_settings(system)
-        strong_boundary = settings_applied
         settings_path = self._settings_path() if settings_applied else None
 
         if settings_applied:
@@ -79,9 +89,21 @@ class SandboxRuntime:
                 executable_path=executable,
             )
 
+        read_probe_error = None
+        if settings_applied:
+            read_probe_error = self._probe_protected_read(
+                executable,
+                settings_path,
+                settings_applied,
+            )
+        protected_reads_enforced = settings_applied and read_probe_error is None
+        strong_boundary = settings_applied and protected_reads_enforced
+
         reason = None
         if system == "Windows":
             reason = WINDOWS_NO_SETTINGS_REASON
+        elif read_probe_error is not None:
+            reason = read_probe_error
         elif not strong_boundary:
             reason = "sandbox available but not a strong boundary on this platform"
 
@@ -93,6 +115,7 @@ class SandboxRuntime:
             settings_path=settings_path,
             executable_path=executable,
             settings_applied=settings_applied,
+            protected_reads_enforced=protected_reads_enforced,
         )
 
     def _find_executable(self) -> str | None:
@@ -130,19 +153,13 @@ class SandboxRuntime:
             "allowLocalBinding": False,
         }
 
-        deny_write = [".env", ".mcp.json", ".git/config", ".git/hooks"]
-
-        for relative_path in [".claude/commands", ".claude/agents", ".claude/skills"]:
-            if (self.repo_path / relative_path).exists():
-                deny_write.append(relative_path)
-
         data = {
             "network": network,
             "filesystem": {
-                "denyRead": ["~/.ssh"],
+                "denyRead": self.access_policy.sandbox_denied_read_paths(self.repo_path),
                 "allowRead": [],
                 "allowWrite": [str(self.repo_path), "/tmp"],
-                "denyWrite": deny_write,
+                "denyWrite": self.access_policy.sandbox_denied_write_paths(self.repo_path),
             },
         }
 
@@ -177,6 +194,46 @@ class SandboxRuntime:
         output = f"{completed.stdout or ''}{completed.stderr or ''}".strip()
         return f"srt probe failed: {self._preview(output) or f'exit code {completed.returncode}'}"
 
+    def _probe_protected_read(
+        self,
+        executable: str,
+        settings_path: Path | None,
+        settings_applied: bool,
+    ) -> str | None:
+        probe_path = self.run_dir / ".sandbox-read-probe"
+        try:
+            probe_path.write_text(READ_PROBE_MARKER, encoding="utf-8")
+            argv = self._srt_argv(
+                executable,
+                settings_path,
+                settings_applied,
+                ["/bin/cat", str(probe_path)],
+            )
+            completed = subprocess.run(
+                argv,
+                cwd=self.repo_path,
+                shell=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"protected read probe failed: {self._preview(str(exc))}"
+        finally:
+            try:
+                probe_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        output = f"{completed.stdout or ''}{completed.stderr or ''}"
+        if completed.returncode != 0 and READ_PROBE_MARKER not in output:
+            return None
+        return "sandbox protected read policy was not enforced"
+
     def _srt_argv(
         self,
         executable: str,
@@ -204,6 +261,7 @@ class SandboxRuntime:
             self.status.enabled
             and self.status.available
             and self.status.strong_boundary
+            and self.status.protected_reads_enforced
             and bool(getattr(self.config, "sandbox_auto_allow_bash", True))
         )
 
@@ -226,6 +284,7 @@ class SandboxRuntime:
             "settings_path": str(self.status.settings_path) if self.status.settings_path else None,
             "executable_path": self.status.executable_path,
             "settings_applied": self.status.settings_applied,
+            "protected_reads_enforced": self.status.protected_reads_enforced,
         }
 
     def prompt_status(self) -> str:

@@ -153,6 +153,45 @@ def test_bash_apply_patch_file_is_also_routed_to_structured_tool() -> None:
     assert decision.suggested_tool == "edit_file"
 
 
+def test_delete_missing_snapshot_fails_before_approval(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "existing.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("delete existing file", include_initial_message=True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("approval was requested")),
+    )
+
+    result = runner.runtime.executor.execute(
+        ToolCall("delete", "delete_file", {"path": "existing.py"}),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["validation_error"] is True
+    assert "use read_file first" in result.content
+    assert path.exists()
+
+
+def test_delete_preflight_preserves_terminal_path_escape(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("delete outside file", include_initial_message=True)
+
+    result = runner.runtime.executor.execute(
+        ToolCall("delete", "delete_file", {"path": "../outside.py"}),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["risk"] == "path_escape"
+    assert result.metadata["terminal_on_deny"] is True
+    assert context.finished is True
+
+
 def test_bash_apply_patch_routes_to_edit_file_without_approval(
     monkeypatch,
     tmp_path: Path,

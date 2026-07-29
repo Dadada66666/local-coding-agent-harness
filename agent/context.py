@@ -46,6 +46,7 @@ class RunConfig:
     sandbox_auto_allow_bash: bool = True
     sandbox_fail_if_unavailable: bool = False
     sandbox_settings_path: str | None = None
+    bash_env_allowlist: tuple[str, ...] = ()
 
 
 @dataclass
@@ -66,6 +67,8 @@ class AgentContext:
     diff_manager: Any
     report_writer: Any
     sandbox: Any | None = None
+    environment_policy: Any | None = None
+    redactor: Any | None = None
 
     conversation_messages: list[dict] = field(default_factory=list)
     finished: bool = False

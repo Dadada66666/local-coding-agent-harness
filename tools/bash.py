@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 
+from runtime.environment_policy import EnvironmentPolicy
 from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
@@ -65,6 +66,9 @@ class BashTool(BaseTool):
         argv = self._build_command_argv(command, fail_fast=fail_fast)
         shell_name = self._shell_name(fail_fast=fail_fast)
         sandbox_metadata = self._sandbox_metadata(context)
+        environment_policy = getattr(context, "environment_policy", None) or EnvironmentPolicy()
+        execution_env = self._build_env(context)
+        environment_metadata = environment_policy.metadata()
 
         sandbox = getattr(context, "sandbox", None)
         if sandbox is not None and sandbox.should_wrap_command(command):
@@ -87,7 +91,7 @@ class BashTool(BaseTool):
                 stderr=subprocess.STDOUT,
                 check=False,
                 timeout=timeout,
-                env=self._build_env(),
+                env=execution_env,
                 **stdin_kwargs,
             )
         except subprocess.TimeoutExpired as exc:
@@ -102,6 +106,7 @@ class BashTool(BaseTool):
                     shell_name=shell_name,
                     stdin_mode=stdin_mode,
                     sandbox=sandbox_metadata,
+                    environment=environment_metadata,
                     purpose=purpose,
                     fail_fast=fail_fast,
                     timeout=timeout,
@@ -122,6 +127,7 @@ class BashTool(BaseTool):
                 shell_name=shell_name,
                 stdin_mode=stdin_mode,
                 sandbox=sandbox_metadata,
+                environment=environment_metadata,
                 purpose=purpose,
                 fail_fast=fail_fast,
                 returncode=completed.returncode,
@@ -160,11 +166,9 @@ class BashTool(BaseTool):
         shell_flags = "-lec" if fail_fast else "-lc"
         return ["/bin/sh", shell_flags, command]
 
-    def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["PYTHONUTF8"] = "1"
-        return env
+    def _build_env(self, context=None) -> dict[str, str]:
+        policy = getattr(context, "environment_policy", None) or EnvironmentPolicy()
+        return policy.build(os.environ)
 
     def _shell_name(self, *, fail_fast: bool = False) -> str:
         if platform.system() == "Windows":
@@ -191,6 +195,7 @@ class BashTool(BaseTool):
                 "settings_path": None,
                 "executable_path": None,
                 "settings_applied": False,
+                "protected_reads_enforced": False,
                 "wrapped": False,
             }
 

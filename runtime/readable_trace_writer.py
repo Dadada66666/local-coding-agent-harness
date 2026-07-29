@@ -37,7 +37,11 @@ class ReadableTraceWriter:
         if notes:
             lines.extend(["## Runtime Notes", "", *notes, ""])
 
-        path.write_text("\n".join(lines), encoding="utf-8")
+        content = "\n".join(lines)
+        redactor = getattr(context, "redactor", None)
+        if redactor is not None:
+            content = redactor.redact(content)
+        path.write_text(content, encoding="utf-8")
         return path
 
     def _render_message(
