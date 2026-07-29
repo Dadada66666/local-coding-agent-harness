@@ -164,6 +164,19 @@ def mutation_result_hook(tool_call, tool, result, context) -> None:
     return None
 
 
+def mutation_outcome_hook(tool_call, tool, result, context) -> None:
+    operation_kind = _mutation_operation_kind(tool_call, tool, result, context)
+    if operation_kind not in {"fs.write", "fs.delete"}:
+        return None
+
+    had_failure = getattr(context, "task_unresolved_mutation_failure", False)
+    context.task_unresolved_mutation_failure = not result.ok
+    result.metadata["mutation_outcome"] = "succeeded" if result.ok else "failed"
+    if result.ok and had_failure:
+        result.metadata["mutation_failure_recovered"] = True
+    return None
+
+
 def test_result_hook(tool_call, tool, result, context) -> None:
     if tool.name != "bash":
         return None
@@ -175,17 +188,27 @@ def test_result_hook(tool_call, tool, result, context) -> None:
     is_test_command = _is_test_command(command)
     is_verification_command = _is_verification_command(tool_call, result)
 
+    if (
+        (is_test_command or is_verification_command)
+        and _mutation_operation_kind(tool_call, tool, result, context)
+        in {"fs.write", "fs.delete"}
+    ):
+        _record_verification_ignored(
+            tool_call,
+            result,
+            context,
+            command=command,
+            reason="explicit_mutation_command",
+        )
+        return None
+
     if is_verification_command and _is_discovery_command(command):
-        result.metadata["verification_ignored"] = True
-        context.trace.log(
-            {
-                "type": "verification_ignored",
-                "turn_id": _turn_id(context),
-                "tool_call_id": getattr(tool_call, "id", None),
-                "command": command,
-                "reason": "read_only_discovery_command",
-                "purpose": _verification_purpose(tool_call, result),
-            }
+        _record_verification_ignored(
+            tool_call,
+            result,
+            context,
+            command=command,
+            reason="read_only_discovery_command",
         )
         return None
 
@@ -430,6 +453,49 @@ def _is_discovery_command(command: str) -> bool:
 
 def _is_verification_command(tool_call, result) -> bool:
     return _verification_purpose(tool_call, result) == "verify"
+
+
+def _mutation_operation_kind(tool_call, tool, result, context) -> str | None:
+    operation_metadata = result.metadata.get("operation")
+    if isinstance(operation_metadata, dict):
+        kind = operation_metadata.get("kind")
+        if isinstance(kind, str):
+            return kind
+
+    if result.metadata.get("mutation_recorded"):
+        return "fs.write"
+
+    classify = getattr(tool, "classify_operation", None)
+    if not callable(classify):
+        return None
+
+    try:
+        operation = classify(getattr(tool_call, "arguments", {}), context)
+    except Exception:
+        return None
+    return getattr(operation, "kind", None)
+
+
+def _record_verification_ignored(
+    tool_call,
+    result,
+    context,
+    *,
+    command: str,
+    reason: str,
+) -> None:
+    result.metadata["verification_ignored"] = True
+    result.metadata["verification_ignored_reason"] = reason
+    context.trace.log(
+        {
+            "type": "verification_ignored",
+            "turn_id": _turn_id(context),
+            "tool_call_id": getattr(tool_call, "id", None),
+            "command": command,
+            "reason": reason,
+            "purpose": _verification_purpose(tool_call, result),
+        }
+    )
 
 
 def _verification_purpose(tool_call, result) -> str | None:

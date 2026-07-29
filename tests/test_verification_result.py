@@ -102,6 +102,21 @@ def test_denied_bash_result_is_not_recorded_as_verification() -> None:
     assert "verification_command" not in result.metadata
 
 
+def test_mutating_test_command_is_not_recorded_as_verification() -> None:
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "echo x > demo.py\npython -m pytest",
+            "purpose": "verify",
+        },
+        metadata={"purpose": "verify", "mutation_recorded": True},
+        ok=True,
+    )
+
+    assert context.last_test_result is None
+    assert result.metadata["verification_ignored"] is True
+    assert result.metadata["verification_ignored_reason"] == "explicit_mutation_command"
+
+
 def test_infer_success_prefers_recorded_verification_result() -> None:
     loop = AgentLoop(model_client=None, runtime=None, repo_path=Path("."))
 
@@ -135,6 +150,22 @@ def test_infer_success_requires_verification_after_changes() -> None:
             SimpleNamespace(
                 changed_files={"app.py"},
                 last_test_result=None,
+                final_text="done",
+            )
+        )
+        is False
+    )
+
+
+def test_infer_success_rejects_unresolved_mutation_failure() -> None:
+    loop = AgentLoop(model_client=None, runtime=None, repo_path=Path("."))
+
+    assert (
+        loop.infer_success(
+            SimpleNamespace(
+                task_unresolved_mutation_failure=True,
+                task_changed_files=set(),
+                task_test_result={"ok": True},
                 final_text="done",
             )
         )

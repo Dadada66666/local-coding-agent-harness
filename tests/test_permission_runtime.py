@@ -87,7 +87,7 @@ def test_read_only_write_file_denied_terminal(monkeypatch, tmp_path: Path) -> No
     assert "cancelled" in result_message["content"][1]["content"].lower()
 
 
-def test_read_only_write_file_allowed_once(monkeypatch, tmp_path: Path) -> None:
+def test_read_only_write_file_allowed_once(monkeypatch, tmp_path: Path, capsys) -> None:
     model = FakeModelClient(
         [
             tool_response(ToolCall("call_1", "write_file", {"path": "one.py", "content": "x = 1\n"})),
@@ -102,6 +102,7 @@ def test_read_only_write_file_allowed_once(monkeypatch, tmp_path: Path) -> None:
 
     assert (tmp_path / "one.py").read_text(encoding="utf-8") == "x = 1\n"
     assert context.approved_permission_scopes == set()
+    assert "[permission] allowed once; executing tool." in capsys.readouterr().out
 
 
 def test_read_only_write_file_allow_scope(monkeypatch, tmp_path: Path) -> None:
@@ -141,6 +142,65 @@ PATCH"""
     assert decision.risk == BashRisk.FILE_WRITE_VIA_BASH
     assert "pivot]" not in decision.target_paths
     assert decision.target_paths == []
+    assert decision.execution_route == "structured_tool"
+
+
+def test_bash_apply_patch_file_is_also_routed_to_structured_tool() -> None:
+    decision = RiskClassifier().classify_bash("apply_patch changes.patch")
+
+    assert decision.risk == BashRisk.FILE_WRITE_VIA_BASH
+    assert decision.execution_route == "structured_tool"
+    assert decision.suggested_tool == "edit_file"
+
+
+def test_bash_apply_patch_routes_to_edit_file_without_approval(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("edit through shell patch", include_initial_message=True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("approval was requested")),
+    )
+
+    decision = context.permission_gate.check(
+        BashTool(),
+        {
+            "command": (
+                "apply_patch <<'PATCH'\n"
+                "*** Begin Patch\n"
+                "*** Update File: demo.py\n"
+                "*** End Patch\n"
+                "PATCH"
+            )
+        },
+        context,
+    )
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert decision.terminal_on_deny is False
+    assert decision.decision_reason == "bash_structured_tool_route"
+    assert "edit_file" in decision.message
+
+
+def test_verification_cannot_mix_shell_write_and_test(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("write and verify", include_initial_message=True)
+
+    decision = context.permission_gate.check(
+        BashTool(),
+        {
+            "command": "echo x > demo.py\npython -m pytest",
+            "purpose": "verify",
+        },
+        context,
+    )
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert decision.terminal_on_deny is False
+    assert decision.decision_reason == "bash_mixed_mutation_verification"
+    assert "separate Bash call" in decision.message
 
 
 def test_bash_cat_heredoc_uses_header_redirection_only() -> None:
@@ -182,6 +242,63 @@ def test_approved_bash_file_write_records_task_mutation(monkeypatch, tmp_path: P
     assert context.task_changed_files == {"demo.py"}
     assert result.metadata["mutation_recorded"] is True
     assert result.metadata["mutation_paths"] == ["demo.py"]
+
+
+def test_failed_shell_patch_blocks_success_until_structured_edit_recovers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "demo.py"
+    path.write_text("value = 1\n", encoding="utf-8")
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("update demo", include_initial_message=True)
+
+    blocked = runner.runtime.executor.execute(
+        ToolCall(
+            "patch",
+            "bash",
+            {
+                "command": (
+                    "apply_patch <<'PATCH'\n"
+                    "*** Begin Patch\n"
+                    "*** Update File: demo.py\n"
+                    "*** End Patch\n"
+                    "PATCH"
+                )
+            },
+        ),
+        context,
+    )
+    context.task_test_result = {"ok": True}
+    context.final_text = "done"
+
+    assert blocked.ok is False
+    assert context.task_unresolved_mutation_failure is True
+    assert runner.infer_success(context) is False
+
+    read_result = runner.runtime.executor.execute(
+        ToolCall("read", "read_file", {"path": "demo.py"}),
+        context,
+    )
+    edit_result = runner.runtime.executor.execute(
+        ToolCall(
+            "edit",
+            "edit_file",
+            {
+                "path": "demo.py",
+                "old_text": "value = 1",
+                "new_text": "value = 2",
+            },
+        ),
+        context,
+    )
+    context.task_test_result = {"ok": True}
+    context.task_verification_version = context.mutation_version
+
+    assert read_result.ok is True
+    assert edit_result.ok is True
+    assert context.task_unresolved_mutation_failure is False
+    assert edit_result.metadata["mutation_failure_recovered"] is True
+    assert runner.infer_success(context) is True
 
 
 def test_protected_agent_dir_hidden_or_denied(tmp_path: Path) -> None:
