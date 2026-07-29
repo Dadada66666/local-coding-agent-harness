@@ -24,6 +24,7 @@ class BashRisk:
     SAFE_CHECK = "safe_check"
     READ_ONLY_COMMAND = "read_only_command"
     FILE_WRITE_VIA_BASH = "file_write_via_bash"
+    FILE_DELETE_VIA_BASH = "file_delete_via_bash"
     DESTRUCTIVE = "destructive"
     NETWORK = "network"
     UNKNOWN = "unknown"
@@ -70,6 +71,18 @@ class RiskClassifier:
         r"""(?:\bPath|\bpathlib\.Path)\s*\(\s*(['\"])(?P<path>[^'\"]+)\1\s*\)\s*\.\s*(?P<method>write_text|write_bytes)\s*\(""",
         re.IGNORECASE,
     )
+    PYTHON_PATH_DELETE_RE = re.compile(
+        r"""(?:\bPath|\bpathlib\.Path)\s*\(\s*(['\"])(?P<path>[^'\"]+)\1\s*\)\s*\.\s*unlink\s*\(""",
+        re.IGNORECASE,
+    )
+    PYTHON_OS_DELETE_RE = re.compile(
+        r"""\bos\s*\.\s*(?:remove|unlink)\s*\(\s*(['\"])(?P<path>[^'\"]+)\1""",
+        re.IGNORECASE,
+    )
+    SHELL_DELETE_COMMAND_RE = re.compile(
+        r"""(?:^|&&|\|\||\||;|[\r\n])\s*(?P<command>rm|unlink|remove-item|del|erase)(?:\s|$)""",
+        re.IGNORECASE,
+    )
     SHELL_REDIRECT_RE = re.compile(
         r"""(?<![<>])>>?\s*(?P<path>\"[^\"]+\"|'[^']+'|[^\s&|;]+)""",
         re.IGNORECASE,
@@ -83,7 +96,7 @@ class RiskClassifier:
 
     DESTRUCTIVE_PATTERNS = [
         "rm -rf",
-        "rm ",
+        "rm -fr",
         "git reset --hard",
         "git clean",
         "sudo",
@@ -93,11 +106,9 @@ class RiskClassifier:
         "shutdown",
         "reboot",
         ":(){ :|:& };:",
-        "remove-item",
-        "clear-content",
+        "remove-item -recurse",
+        "shutil.rmtree",
         "rmdir",
-        " del ",
-        "erase ",
     ]
     FILE_WRITE_PATTERNS = {
         "set-content": ("PowerShell Set-Content writes file content.", "write_file"),
@@ -109,6 +120,7 @@ class RiskClassifier:
         "new-item": ("PowerShell New-Item can create files or directories.", "write_file"),
         "copy-item": ("PowerShell Copy-Item writes a destination path.", "write_file"),
         "move-item": ("PowerShell Move-Item mutates filesystem paths.", "edit_file"),
+        "clear-content": ("PowerShell Clear-Content clears file content.", "edit_file"),
     }
     NETWORK_PATTERNS = [
         "curl",
@@ -126,10 +138,13 @@ class RiskClassifier:
     SAFE_CHECK_PREFIXES = [
         "pytest",
         "python -m pytest",
+        "python3 -m pytest",
         "py -m pytest",
         "python -m py_compile",
+        "python3 -m py_compile",
         "py -m py_compile",
         "python -m compileall",
+        "python3 -m compileall",
         "py -m compileall",
         "uv run pytest",
         "poetry run pytest",
@@ -137,6 +152,7 @@ class RiskClassifier:
         "mypy",
         "npm test",
         "python -m unittest",
+        "python3 -m unittest",
     ]
     READ_ONLY_PREFIXES = [
         "git status",
@@ -175,6 +191,17 @@ class RiskClassifier:
                 command_prefix=command_prefix,
                 suggested_tool=None,
                 confidence="high",
+            )
+
+        delete_paths, delete_kind = self._delete_details(command, normalized)
+        if delete_kind:
+            return BashRiskDecision(
+                risk=BashRisk.FILE_DELETE_VIA_BASH,
+                reason=f"{delete_kind} deletes files through shell.",
+                target_paths=delete_paths,
+                command_prefix=command_prefix,
+                suggested_tool="delete_file",
+                confidence="high" if delete_paths else "medium",
             )
 
         python_paths, python_write_kind, python_suggested_tool = self._python_write_details(command)
@@ -263,6 +290,22 @@ class RiskClassifier:
             suggested_tool=None,
             confidence="low",
         )
+
+    def _delete_details(self, command: str, normalized: str) -> tuple[list[str], str | None]:
+        paths = []
+        for pattern in (self.PYTHON_PATH_DELETE_RE, self.PYTHON_OS_DELETE_RE):
+            for match in pattern.finditer(command):
+                path = self._clean_target_path(match.group("path"))
+                if path:
+                    paths.append(path)
+
+        if paths:
+            return self._unique(paths), "Python file deletion API"
+
+        matched = self.SHELL_DELETE_COMMAND_RE.search(command)
+        if matched:
+            return [], f"Matched file deletion command: {matched.group('command').lower()}"
+        return [], None
 
     def _is_apply_patch_heredoc(self, command: str) -> bool:
         return bool(re.search(r"\bapply_patch\b[^\n\r]*<<", command, re.IGNORECASE))
@@ -425,7 +468,10 @@ class PermissionGate:
                     risk="path_escape",
                     message=f"Permission denied: path escapes WORKDIR: {path}",
                     operation=operation,
-                    terminal_on_deny=operation.terminal_on_deny,
+                    terminal_on_deny=(
+                        operation.terminal_on_deny
+                        or operation.kind in {"fs.write", "fs.delete"}
+                    ),
                     decision_reason="path_escape",
                 )
 
@@ -485,6 +531,22 @@ class PermissionGate:
                     operation=operation,
                     decision_reason="accept_edits_read",
                 )
+            if operation.kind == "fs.delete":
+                if self._all_paths_created_in_current_task(operation, context):
+                    return self._decision(
+                        behavior=PermissionBehavior.ALLOW,
+                        risk="task_created_file_cleanup",
+                        message=f"Allowed cleanup of current-task file {operation.subject}.",
+                        operation=operation,
+                        decision_reason="accept_edits_owned_cleanup",
+                    )
+                return self._decision(
+                    behavior=PermissionBehavior.ASK,
+                    risk="preexisting_file_delete",
+                    message=f"Model requested deletion of existing file {operation.subject}.",
+                    operation=operation,
+                    decision_reason="accept_edits_delete_approval",
+                )
             if operation.kind == "fs.write" and not operation.is_sensitive:
                 return self._decision(
                     behavior=PermissionBehavior.ALLOW,
@@ -495,12 +557,16 @@ class PermissionGate:
                 )
 
         if context.permission_mode == PermissionMode.READ_ONLY:
-            if operation.kind == "fs.write":
+            if operation.kind in {"fs.write", "fs.delete"}:
                 return self._decision(
                     behavior=PermissionBehavior.ASK,
-                    risk="write_tool_in_read_only",
+                    risk=(
+                        "delete_tool_in_read_only"
+                        if operation.kind == "fs.delete"
+                        else "write_tool_in_read_only"
+                    ),
                     message=(
-                        f"Model requested write operation {operation.scope_key} "
+                        f"Model requested mutation {operation.scope_key} "
                         "while permission mode is read_only."
                     ),
                     operation=operation,
@@ -517,7 +583,7 @@ class PermissionGate:
                 )
 
         if context.permission_mode == PermissionMode.MANUAL_APPROVAL:
-            if operation.kind in {"fs.write", "process.exec"}:
+            if operation.kind in {"fs.write", "fs.delete", "process.exec"}:
                 return self._decision(
                     behavior=PermissionBehavior.ASK,
                     risk="manual_approval",
@@ -562,6 +628,18 @@ class PermissionGate:
             terminal_on_deny=operation.terminal_on_deny,
             decision_reason="fallback_ask",
         )
+
+    def _all_paths_created_in_current_task(self, operation: Operation, context) -> bool:
+        if not operation.paths:
+            return False
+
+        task_created_files = getattr(context, "task_created_files", set())
+        for path in operation.paths:
+            target = context.safe_path(path)
+            relative_path = str(target.relative_to(context.repo_path))
+            if relative_path not in task_created_files:
+                return False
+        return True
 
     def resolve(self, decision: PermissionDecision, tool, args: dict, context) -> PermissionDecision:
         if decision.behavior != PermissionBehavior.ASK:
@@ -743,7 +821,20 @@ class PermissionGate:
                 metadata=metadata,
             )
 
-        is_read_only = risk in {BashRisk.SAFE_CHECK, BashRisk.READ_ONLY_COMMAND}
+        if risk == BashRisk.FILE_DELETE_VIA_BASH:
+            return Operation(
+                kind="fs.delete",
+                action="bash",
+                subject=bash_decision.command_prefix or operation.subject,
+                paths=bash_decision.target_paths,
+                command=command,
+                scope_key=self._bash_approval_scope(risk, bash_decision),
+                terminal_on_deny=False,
+                is_sensitive=True,
+                metadata=metadata,
+            )
+
+        is_read_only = risk == BashRisk.READ_ONLY_COMMAND
         is_destructive = risk == BashRisk.DESTRUCTIVE
         return Operation(
             kind="process.exec",
@@ -772,17 +863,21 @@ class PermissionGate:
                         decision_reason="access_policy_read",
                     )
 
-        if operation.kind == "fs.write":
+        if operation.kind in {"fs.write", "fs.delete"}:
             for path in operation.paths:
                 target = context.safe_path(path)
                 if context.access_policy.is_protected_resolved_write(context.repo_path, target):
                     return self._decision(
                         behavior=PermissionBehavior.DENY,
-                        risk="protected_write",
-                        message=f"Permission denied: protected write path: {path}",
+                        risk="protected_delete" if operation.kind == "fs.delete" else "protected_write",
+                        message=f"Permission denied: protected mutation path: {path}",
                         operation=operation,
                         terminal_on_deny=True,
-                        decision_reason="access_policy_write",
+                        decision_reason=(
+                            "access_policy_delete"
+                            if operation.kind == "fs.delete"
+                            else "access_policy_write"
+                        ),
                     )
 
         return None
@@ -807,6 +902,19 @@ class PermissionGate:
                 decision_reason="bash_destructive",
             )
 
+        if risk == BashRisk.FILE_DELETE_VIA_BASH:
+            return self._decision(
+                behavior=PermissionBehavior.DENY,
+                risk=risk,
+                message=(
+                    "Shell-based file deletion is not executed. "
+                    "Use delete_file for one reviewed file and split cleanup from verification."
+                ),
+                operation=operation,
+                terminal_on_deny=False,
+                decision_reason="bash_file_delete_route",
+            )
+
         if risk == BashRisk.FILE_WRITE_VIA_BASH:
             return self._decision(
                 behavior=PermissionBehavior.ASK,
@@ -815,6 +923,18 @@ class PermissionGate:
                 operation=operation,
                 terminal_on_deny=True,
                 decision_reason="bash_file_write",
+            )
+
+        if (
+            risk == BashRisk.SAFE_CHECK
+            and context.permission_mode == PermissionMode.ACCEPT_EDITS
+        ):
+            return self._decision(
+                behavior=PermissionBehavior.ALLOW,
+                risk=risk,
+                message="Allowed verification command in accept_edits mode.",
+                operation=operation,
+                decision_reason="accept_edits_safe_check",
             )
 
         if risk == BashRisk.NETWORK:

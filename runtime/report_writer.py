@@ -25,6 +25,9 @@ class ReportWriter:
             "## Changed Files",
             *self._changed_files(context),
             "",
+            "## Session Changed Files",
+            *self._session_changed_files(context),
+            "",
             "## Test Result",
             f"Command: {test_result.get('command', 'N/A')}",
             f"Result: {'passed' if test_result.get('ok') else 'failed' if test_result else 'not recorded'}",
@@ -99,22 +102,15 @@ class ReportWriter:
         return "N/A"
 
     def _task_summary(self, context: AgentContext) -> str:
-        user_messages = [
-            message.get("content")
-            for message in getattr(context, "conversation_messages", [])
-            if message.get("role") == "user" and isinstance(message.get("content"), str)
-        ]
-        if not user_messages:
-            return context.task
-
-        first = user_messages[0]
-        latest = user_messages[-1]
-        if first == latest:
-            return first
-
-        return f"Initial request:\n{first}\n\nLatest request:\n{latest}"
+        return context.task
 
     def _changed_files(self, context: AgentContext) -> list[str]:
+        changed_files = getattr(context, "task_changed_files", context.changed_files)
+        if not changed_files:
+            return ["- N/A"]
+        return [f"- {path}" for path in sorted(changed_files)]
+
+    def _session_changed_files(self, context: AgentContext) -> list[str]:
         if not context.changed_files:
             return ["- N/A"]
         return [f"- {path}" for path in sorted(context.changed_files)]

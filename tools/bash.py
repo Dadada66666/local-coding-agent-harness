@@ -10,6 +10,7 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
 DEFAULT_TIMEOUT_SECONDS = 120
+MAX_TIMEOUT_SECONDS = 600
 MAX_OUTPUT_CHARS = 12000
 
 
@@ -20,7 +21,10 @@ class BashTool(BaseTool):
         "type": "object",
         "properties": {
             "command": {"type": "string"},
-            "timeout": {"type": "integer"},
+            "timeout": {
+                "type": "integer",
+                "description": "Timeout in seconds (1-600).",
+            },
             "input": {"type": "string"},
             "purpose": {"type": "string"},
         },
@@ -46,8 +50,11 @@ class BashTool(BaseTool):
     def validate(self, args: dict, context) -> None:
         if not args.get("command"):
             raise ToolValidationError("bash requires command")
-        if int(args.get("timeout", DEFAULT_TIMEOUT_SECONDS)) <= 0:
-            raise ToolValidationError("timeout must be > 0")
+        timeout = int(args.get("timeout", DEFAULT_TIMEOUT_SECONDS))
+        if timeout <= 0 or timeout > MAX_TIMEOUT_SECONDS:
+            raise ToolValidationError(
+                f"timeout must be between 1 and {MAX_TIMEOUT_SECONDS} seconds"
+            )
 
     def call(self, args: dict, context) -> ToolResult:
         command = str(args["command"])
