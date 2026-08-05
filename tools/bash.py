@@ -16,7 +16,10 @@ MAX_TIMEOUT_SECONDS = 600
 
 class BashTool(BaseTool):
     name = "bash"
-    description = 'Run a shell command from WORKDIR; purpose can be "verify" for validation.'
+    description = (
+        'Run a shell command from WORKDIR; purpose="verify" records validation '
+        "and enables fail-fast execution."
+    )
     input_schema = {
         "type": "object",
         "properties": {

@@ -67,7 +67,7 @@ class ListDirTool(BaseTool):
 
         return ToolResult(
             ok=True,
-            content="\n".join(entries),
+            content="\n".join(entries) if entries else "Directory is empty.",
             metadata={
                 "path": str(target),
                 "requested_path": requested_path,
