@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from runtime.permission import BashRisk
 from runtime.readable_trace_writer import ReadableTraceWriter
+from runtime.text_preview import head_tail_preview
 from tools.base import ToolResult
 from tools.bash import DEFAULT_TIMEOUT_SECONDS
 from tools.read_file import DEFAULT_LIMIT as READ_FILE_DEFAULT_LIMIT
@@ -102,6 +103,8 @@ def secret_redaction_hook(tool_call, tool, result, context) -> None:
 
 
 def large_output_hook(tool_call, tool, result, context) -> None:
+    if result.artifact_id:
+        _register_artifact_reference(context, tool_call.id, result.artifact_id)
     if not result.content:
         return None
 
@@ -110,22 +113,60 @@ def large_output_hook(tool_call, tool, result, context) -> None:
         return None
 
     full_content = result.content
-    path = context.artifacts.persist(
-        tool_call_id=tool_call.id,
-        content=full_content,
-    )
+    try:
+        reference = context.artifacts.persist(
+            tool_call_id=tool_call.id,
+            content=full_content,
+        )
+    except (OSError, UnicodeError) as exc:
+        result.content = _bounded_output_message(
+            prefix=(
+                "<persisted-output-error>\n"
+                f"Output too large ({len(full_content)} chars) and artifact persistence failed.\n"
+                "Only this preview is available:\n"
+            ),
+            content=full_content,
+            suffix="\n</persisted-output-error>",
+            max_chars=max_chars,
+        )
+        result.metadata.update(
+            {
+                "persisted": False,
+                "artifact_persist_failed": True,
+                "original_chars": len(full_content),
+                "truncated": True,
+            }
+        )
+        context.trace.log(
+            {
+                "type": "artifact_persist_error",
+                "tool_call_id": getattr(tool_call, "id", None),
+                "exception_type": exc.__class__.__name__,
+                "exception": str(exc)[:500],
+            }
+        )
+        return None
 
-    result.artifact_path = path
-    result.content = (
-        "<persisted-output>\n"
-        f"Full output saved to: {path}\n"
-        "Preview:\n"
-        f"{full_content[:2000]}\n"
-        "</persisted-output>"
+    result.artifact_id = reference.artifact_id
+    result.artifact_path = str(reference.path)
+    _register_artifact_reference(context, tool_call.id, reference.artifact_id)
+    result.content = _bounded_output_message(
+        prefix=(
+            "<persisted-output>\n"
+            f"Output too large ({len(full_content)} chars).\n"
+            f"artifact_id: {reference.artifact_id}\n"
+            "Use read_artifact with this id for additional slices.\n"
+            "Preview (head and tail):\n"
+        ),
+        content=full_content,
+        suffix="\n</persisted-output>",
+        max_chars=max_chars,
     )
 
     result.metadata["persisted"] = True
     result.metadata["original_chars"] = len(full_content)
+    result.metadata["artifact_id"] = reference.artifact_id
+    result.metadata["truncated"] = True
 
     return None
 
@@ -274,6 +315,7 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
             "ok": result.ok,
             "error": result.error,
             "output_preview": result.content[:500] if result.content else "",
+            "artifact_id": result.artifact_id,
             "artifact_path": result.artifact_path,
             "metadata": result.metadata,
         }
@@ -356,6 +398,26 @@ def _write_stop_artifact(context, name: str, writer):
 def _print_artifact_path(label: str, path) -> None:
     if path is not None:
         print(f"[{label}] {path}")
+
+
+def _bounded_output_message(
+    *,
+    prefix: str,
+    content: str,
+    suffix: str,
+    max_chars: int,
+) -> str:
+    preview_budget = max(max_chars - len(prefix) - len(suffix), 0)
+    rendered = f"{prefix}{head_tail_preview(content, preview_budget)}{suffix}"
+    return rendered[:max_chars]
+
+
+def _register_artifact_reference(context, tool_call_id: str, artifact_id: str) -> None:
+    artifact_map = getattr(context, "tool_result_artifacts", None)
+    if artifact_map is None:
+        artifact_map = {}
+        context.tool_result_artifacts = artifact_map
+    artifact_map[str(tool_call_id)] = artifact_id
 
 
 def _turn_id(context) -> int:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent.context import AgentContext, RunConfig, make_run_id
-from agent.model_client import ModelClient
+from agent.model_client import ModelClient, ModelContextOverflowError
 from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.access_policy import AccessPolicy
 from runtime.artifact_store import ArtifactStore
@@ -59,6 +59,7 @@ class AgentLoop:
         return context
 
     def submit(self, context: AgentContext, prompt: str) -> AgentContext:
+        context.capture_completed_task()
         context.task = prompt
         context.reset_task_state()
         context.add_user_message({"role": "user", "content": prompt})
@@ -124,8 +125,14 @@ class AgentLoop:
                 }
             )
 
-            self.runtime.context_manager.prepare_context(context)
             tool_schemas = self.runtime.tool_registry.schemas()
+            max_output_tokens = int(getattr(self.model_client, "max_tokens", 4096))
+            preparation = self.runtime.context_manager.prepare_context(
+                context,
+                system=context.system_prompt,
+                tools=tool_schemas,
+                max_output_tokens=max_output_tokens,
+            )
 
             context.trace.log(
                 {
@@ -133,8 +140,12 @@ class AgentLoop:
                     "turn_id": turn_id,
                     "message_count": len(context.messages),
                     "tool_schema_count": len(tool_schemas),
+                    "context_tokens": preparation.measurement.used_tokens,
+                    "context_source": preparation.measurement.source,
+                    "context_soft_limit": preparation.measurement.soft_limit_tokens,
                 }
             )
+            request_message_count = len(context.messages)
             model_started = time.monotonic()
             try:
                 response = self.model_client.call(
@@ -151,6 +162,25 @@ class AgentLoop:
                     }
                 )
                 raise
+            except ModelContextOverflowError as exc:
+                recovered = self._attempt_context_overflow_recovery(
+                    context,
+                    tool_schemas,
+                    max_output_tokens=max_output_tokens,
+                    turn_id=turn_id,
+                    source="provider_error",
+                    detail=self._preview_error(str(exc)),
+                )
+                if recovered:
+                    self._log_turn_end(context, turn_id, turn_started)
+                    continue
+                self._stop_for_context_overflow(
+                    context,
+                    turn_id=turn_id,
+                    detail=self._preview_error(str(exc)),
+                )
+                self._log_turn_end(context, turn_id, turn_started)
+                break
             except Exception as exc:
                 self._fail_model_call(context, turn_id, turn_started, model_started, exc)
                 break
@@ -165,6 +195,12 @@ class AgentLoop:
                     "tool_names": [tool_call.name for tool_call in response.tool_calls],
                     "input_tokens": getattr(response.usage, "input_tokens", None),
                     "output_tokens": getattr(response.usage, "output_tokens", None),
+                    "cache_creation_input_tokens": getattr(
+                        response.usage, "cache_creation_input_tokens", None
+                    ),
+                    "cache_read_input_tokens": getattr(
+                        response.usage, "cache_read_input_tokens", None
+                    ),
                     "stop_reason": response.stop_reason,
                 }
             )
@@ -177,7 +213,30 @@ class AgentLoop:
                 response_message=response.message,
                 usage=response.usage,
             )
+
+            if response.stop_reason == "model_context_window_exceeded":
+                recovered = self._attempt_context_overflow_recovery(
+                    context,
+                    tool_schemas,
+                    max_output_tokens=max_output_tokens,
+                    turn_id=turn_id,
+                    source="stop_reason",
+                    detail=response.stop_reason,
+                )
+                if recovered:
+                    self._log_turn_end(context, turn_id, turn_started)
+                    continue
+                self._stop_for_context_overflow(
+                    context,
+                    turn_id=turn_id,
+                    detail=response.stop_reason,
+                )
+                self._log_turn_end(context, turn_id, turn_started)
+                break
+
+            context.mark_model_request_consumed(request_message_count)
             context.add_assistant_message(response.message)
+            context.record_model_usage(response.usage, len(context.messages) - 1)
 
             response_action = self._response_action(response)
             if response_action == "final":
@@ -262,7 +321,7 @@ class AgentLoop:
 
             if not context.finished and self.runtime.recovery_policy.should_inject_retry(context):
                 retry_message = self.runtime.recovery_policy.build_retry_message(context)
-                context.messages.append(retry_message)
+                context.add_runtime_message(retry_message)
                 context.repair_attempts += 1
                 test_result = getattr(context, "task_test_result", context.last_test_result)
                 if test_result is not None:
@@ -309,6 +368,76 @@ class AgentLoop:
         if stop_reason == "refusal":
             return "refusal"
         return "protocol_error"
+
+    def _attempt_context_overflow_recovery(
+        self,
+        context: AgentContext,
+        tool_schemas: list[dict],
+        *,
+        max_output_tokens: int,
+        turn_id: int,
+        source: str,
+        detail: str,
+    ) -> bool:
+        max_attempts = int(context.config.max_context_recovery_attempts)
+        if context.context_recovery_attempts >= max_attempts:
+            context.trace.log(
+                {
+                    "type": "context_recovery_skipped",
+                    "turn_id": turn_id,
+                    "source": source,
+                    "reason": "attempt_limit",
+                    "attempts": context.context_recovery_attempts,
+                }
+            )
+            return False
+
+        context.context_recovery_attempts += 1
+        preparation = self.runtime.context_manager.prepare_context(
+            context,
+            system=context.system_prompt,
+            tools=tool_schemas,
+            max_output_tokens=max_output_tokens,
+            force=True,
+            reason="context_overflow",
+        )
+        recovered = preparation.changed and preparation.saved_tokens > 0
+        context.trace.log(
+            {
+                "type": "context_recovery",
+                "turn_id": turn_id,
+                "source": source,
+                "detail": detail,
+                "attempt": context.context_recovery_attempts,
+                "recovered": recovered,
+                "compacted": preparation.compacted,
+                "microcompacted": preparation.microcompacted,
+                "saved_tokens": preparation.saved_tokens,
+                "context_tokens": preparation.measurement.used_tokens,
+            }
+        )
+        return recovered
+
+    def _stop_for_context_overflow(
+        self,
+        context: AgentContext,
+        *,
+        turn_id: int,
+        detail: str,
+    ) -> None:
+        context.finished = True
+        context.success = False
+        context.abort_reason = "model_context_overflow"
+        context.final_text = "Stopped: model context window exceeded after bounded recovery."
+        context.trace.log(
+            {
+                "type": "model_context_overflow",
+                "turn_id": turn_id,
+                "detail": detail,
+                "recovery_attempts": context.context_recovery_attempts,
+                "message_count": len(context.messages),
+            }
+        )
 
     def _stop_for_model_response(self, context, response, action: str, turn_id: int) -> None:
         stop_reason = response.stop_reason or "missing"
@@ -396,6 +525,10 @@ class AgentLoop:
 
         config = self.config or RunConfig(permission_mode=self.permission_mode)
         config.permission_mode = self.permission_mode
+        if config.context_window_tokens is None:
+            configured_window = getattr(self.model_client, "context_window_tokens", None)
+            if configured_window:
+                config.context_window_tokens = int(configured_window)
         access_policy = AccessPolicy()
         environment_policy = EnvironmentPolicy(config.bash_env_allowlist)
         redactor = SecretRedactor.from_environment()

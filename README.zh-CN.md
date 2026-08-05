@@ -37,11 +37,15 @@ pip install -e ".[dev]"
 ```bash
 ANTHROPIC_API_KEY=
 MODEL_ID=
+MODEL_CONTEXT_WINDOW_TOKENS=
 ANTHROPIC_BASE_URL=
 ```
 
 默认只加载 Harness 根目录下的 `.env`，不会在当前 `WORKDIR` 中自动搜索。以安装包
 方式运行且配置文件位于其他位置时，应通过 `LCAH_ENV_FILE` 指定明确路径。
+
+当 provider 不提供模型窗口大小时，可设置 `MODEL_CONTEXT_WINDOW_TOKENS`，启用基于 token
+预算的压缩；未设置时继续使用兼容的字符阈值回退策略。
 
 模型适配层使用 Anthropic Messages API 形状，包括顶层 `system`、`messages`、`tools`、assistant `tool_use` blocks 和 user `tool_result` blocks。`ANTHROPIC_BASE_URL` 可以指向 Anthropic-compatible provider。
 
@@ -96,6 +100,7 @@ agent replay <run_id>
 - `list_dir`：列出可见文件和目录，跳过 `.agent`、`.git`、`.venv`、`node_modules`、`__pycache__` 等 runtime/cache 目录。
 - `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
 - `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
+- `read_artifact`：通过当前 run 内有效的不透明 ID，分页读取大工具结果；不接受文件系统路径。
 - `write_file`：写入新的 UTF-8 文件。文件已存在属于工具语义失败，不是权限拒绝；已有文件应使用 `edit_file`。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
 - `delete_file`：删除一个已有 snapshot 的普通文件。`accept_edits` 下可自动清理当前任务创建的文件；删除预先存在的文件需要审批。不支持目录和符号链接。
@@ -118,7 +123,10 @@ agent replay <run_id>
 - 成功验证会绑定当前 mutation version。验证后的文件修改会让证据变为 stale，直到重新运行验证。
 - Bash 文件删除会返回非终止的工具路由失败，让模型改用 `delete_file`；递归或大范围破坏性命令仍会终止任务。
 - 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
-- 上下文压缩会避免留下没有对应 `tool_use` 的孤儿 `tool_result`。
+- 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 可作为本地估算的锚点。容量软上限与默认 32K 经济上下文目标取较小值，字符阈值继续作为兼容兜底。
+- 上下文缩减采用分层策略：先按单轮总预算把大 observation 落盘，再把已消费的旧 observation 替换为可恢复引用，最后生成有界 runtime checkpoint，并完整保留最近 API rounds。append-only 审计历史不会被改写。
+- provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
+- 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。
 - unknown tool 和参数校验失败会作为正常 tool result 进入 trace，方便排障。
 - recovery prompt 不会重复塞入已经存在于前一个 tool result 中的大段失败输出。
 
@@ -137,9 +145,10 @@ agent replay <run_id>
 - `report.md`：状态、变更文件、验证结果、sandbox、成本、artifact
 - `diff.patch`：git diff，非 git 目录会写入清晰占位内容
 - `cost.json`：模型 usage 和每轮 token breakdown 估算
-- `artifacts/`：大工具输出落盘位置
+- `artifacts/`：完整大工具输出，可在当前 run 内通过不透明 ID 恢复
 
 `cost.json` 会把模型输入/输出拆成 system prompt、tool schemas、user messages、assistant tool calls、tool results、compacted history、assistant text、tool calls 等类别。这个 breakdown 是本地优化估算；provider 返回的 usage 才是计费真实来源。
+provider 返回时，cache creation/read usage 与上下文管理的估算节省量也会分别记录。
 
 ## 验证机制
 

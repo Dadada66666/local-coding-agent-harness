@@ -12,7 +12,6 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_TIMEOUT_SECONDS = 600
-MAX_OUTPUT_CHARS = 12000
 
 
 class BashTool(BaseTool):
@@ -96,10 +95,9 @@ class BashTool(BaseTool):
             )
         except subprocess.TimeoutExpired as exc:
             output = self._combine_output(exc.stdout, exc.stderr).strip()
-            preview = self._truncate_output(output)
             return ToolResult(
                 ok=False,
-                content=f"Command timed out after {timeout}s.\n{preview}".strip(),
+                content=f"Command timed out after {timeout}s.\n{output}".strip(),
                 error=f"timeout after {timeout}s",
                 metadata=self._metadata(
                     command=command,
@@ -116,11 +114,10 @@ class BashTool(BaseTool):
 
         output = self._combine_output(completed.stdout, completed.stderr).strip()
         original_chars = len(output)
-        content = self._truncate_output(output)
 
         return ToolResult(
             ok=completed.returncode == 0,
-            content=content,
+            content=output,
             error=None if completed.returncode == 0 else f"command exited {completed.returncode}",
             metadata=self._metadata(
                 command=command,
@@ -131,7 +128,7 @@ class BashTool(BaseTool):
                 purpose=purpose,
                 fail_fast=fail_fast,
                 returncode=completed.returncode,
-                truncated=original_chars > len(content),
+                truncated=False,
                 original_chars=original_chars,
             ),
         )
@@ -224,9 +221,3 @@ class BashTool(BaseTool):
         if isinstance(value, bytes):
             return value.decode("utf-8", errors="replace")
         return str(value)
-
-    def _truncate_output(self, output: str) -> str:
-        if len(output) <= MAX_OUTPUT_CHARS:
-            return output
-        omitted = len(output) - MAX_OUTPUT_CHARS
-        return f"{output[:MAX_OUTPUT_CHARS]}\n... {omitted} chars omitted"

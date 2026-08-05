@@ -55,7 +55,12 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
             }
         ],
         response_message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
-        usage=TokenUsage(input_tokens=100, output_tokens=20),
+        usage=TokenUsage(
+            input_tokens=40,
+            output_tokens=20,
+            cache_creation_input_tokens=20,
+            cache_read_input_tokens=40,
+        ),
     )
 
     path = tracker.write()
@@ -64,16 +69,37 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
 
     assert path == Path("unused-run-dir") / "cost.json"
     assert data["calls"] == 1
-    assert data["input_tokens"] == 100
+    assert data["input_tokens"] == 40
+    assert data["logical_input_tokens"] == 100
+    assert data["cache_creation_input_tokens"] == 20
+    assert data["cache_read_input_tokens"] == 40
     assert data["output_tokens"] == 20
+    assert data["total_tokens"] == 60
+    assert data["logical_total_tokens"] == 120
     assert turn["turn_id"] == 1
     assert turn["input_breakdown"]["system_prompt"]["estimated_tokens"] > 0
     assert turn["input_breakdown"]["tool_schemas"]["estimated_tokens"] > 0
     assert turn["input_breakdown"]["assistant_tool_calls"]["estimated_tokens"] > 0
     assert turn["input_breakdown"]["tool_results"]["estimated_tokens"] > 0
     assert turn["output_breakdown"]["assistant_text"]["estimated_tokens"] > 0
+    assert turn["logical_input_tokens"] == 100
+    assert turn["total_tokens"] == 60
+    assert turn["logical_total_tokens"] == 120
     assert _allocated_total(turn["input_breakdown"]) == 100
     assert _allocated_total(turn["output_breakdown"]) == 20
+
+
+def test_runtime_checkpoint_is_counted_as_compacted_history() -> None:
+    tracker = CostTracker(Path("unused-run-dir"))
+
+    breakdown = tracker._input_breakdown(
+        "system",
+        [{"role": "user", "content": "[Runtime checkpoint]\n{}"}],
+        [],
+    )
+
+    assert breakdown["compacted_history"]["estimated_tokens"] > 0
+    assert breakdown["user_messages"]["estimated_tokens"] == 0
 
 
 def _allocated_total(breakdown: dict) -> int:

@@ -42,6 +42,9 @@ class ReportWriter:
             "## Cost",
             cost_summary,
             "",
+            "## Context Management",
+            *self._context_management_summary(context),
+            "",
             "## Sandbox",
             *self._sandbox_summary(context),
             "",
@@ -183,5 +186,19 @@ class ReportWriter:
         return (
             f"calls={tracker.calls}, "
             f"input_tokens={tracker.input_tokens}, "
+            f"logical_input_tokens={getattr(tracker, 'logical_input_tokens', tracker.input_tokens)}, "
+            f"cache_read_input_tokens={getattr(tracker, 'cache_read_input_tokens', 0)}, "
             f"output_tokens={tracker.output_tokens}"
         )
+
+    def _context_management_summary(self, context: AgentContext) -> list[str]:
+        tracker = context.cost_tracker
+        events = getattr(tracker, "context_events", [])
+        saved_tokens = sum(max(int(event.get("saved_tokens", 0)), 0) for event in events)
+        return [
+            f"- window_tokens: {getattr(context.config, 'context_window_tokens', None) or 'unknown'}",
+            f"- target_tokens: {getattr(context.config, 'context_target_tokens', None) or 'disabled'}",
+            f"- compactions: {getattr(context, 'context_compactions', 0)}",
+            f"- overflow_recovery_attempts: {getattr(context, 'context_recovery_attempts', 0)}",
+            f"- estimated_tokens_saved: {saved_tokens}",
+        ]

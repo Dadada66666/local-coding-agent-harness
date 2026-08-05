@@ -47,6 +47,14 @@ class TraceLogger:
             "type": "model_usage",
             "input_tokens": getattr(usage, "input_tokens", None),
             "output_tokens": getattr(usage, "output_tokens", None),
+            "cache_creation_input_tokens": getattr(
+                usage, "cache_creation_input_tokens", None
+            ),
+            "cache_read_input_tokens": getattr(usage, "cache_read_input_tokens", None),
+            "cache_deleted_input_tokens": getattr(
+                usage, "cache_deleted_input_tokens", None
+            ),
+            "logical_input_tokens": getattr(usage, "logical_input_tokens", None),
         }
         if turn_id is not None:
             event["turn_id"] = turn_id

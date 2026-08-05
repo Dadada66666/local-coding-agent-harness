@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from tools.base import ToolValidationError
@@ -33,3 +35,23 @@ def test_normal_commands_keep_existing_posix_shell_behavior(monkeypatch) -> None
     argv = tool._build_command_argv("echo ok")
 
     assert argv == ["/bin/sh", "-lc", "echo ok"]
+
+
+def test_bash_keeps_full_output_for_post_processing(monkeypatch, tmp_path) -> None:
+    output = "x" * 20000
+    monkeypatch.setattr(
+        "tools.bash.subprocess.run",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout=output,
+            stderr=None,
+            returncode=0,
+        ),
+    )
+    context = SimpleNamespace(repo_path=tmp_path, sandbox=None)
+
+    result = BashTool().call({"command": "echo output"}, context)
+
+    assert result.ok is True
+    assert result.content == output
+    assert result.metadata["original_chars"] == len(output)
+    assert result.metadata["truncated"] is False

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Any
+
+from runtime.context_budget import estimate_text_tokens, render_for_tokens
 
 
 INPUT_CATEGORIES = (
@@ -27,18 +28,11 @@ def _empty_bucket(categories: tuple[str, ...]) -> dict[str, dict[str, int]]:
 
 
 def _render(value: Any) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+    return render_for_tokens(value)
 
 
 def _estimate_tokens(text: str) -> int:
-    if not text:
-        return 0
-
-    ascii_chars = sum(1 for char in text if ord(char) < 128)
-    non_ascii_chars = len(text) - ascii_chars
-    return max(1, math.ceil((ascii_chars / 4) + (non_ascii_chars / 1.5)))
+    return estimate_text_tokens(text)
 
 
 def _add_text(bucket: dict[str, dict[str, int]], category: str, value: Any) -> None:
@@ -81,15 +75,29 @@ class CostTracker:
         self.calls = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_creation_input_tokens = 0
+        self.cache_read_input_tokens = 0
+        self.cache_deleted_input_tokens = 0
+        self.logical_input_tokens = 0
         self.turns: list[dict[str, Any]] = []
+        self.context_events: list[dict[str, Any]] = []
 
     def add_usage(self, usage) -> None:
         if not usage:
             return
 
         self.calls += 1
-        self.input_tokens += getattr(usage, "input_tokens", 0) or 0
-        self.output_tokens += getattr(usage, "output_tokens", 0) or 0
+        input_tokens = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_deleted = getattr(usage, "cache_deleted_input_tokens", 0) or 0
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        self.cache_creation_input_tokens += cache_creation
+        self.cache_read_input_tokens += cache_read
+        self.cache_deleted_input_tokens += cache_deleted
+        self.logical_input_tokens += input_tokens + cache_creation + cache_read
 
     def record_model_call(
         self,
@@ -106,27 +114,43 @@ class CostTracker:
 
         input_tokens = getattr(usage, "input_tokens", 0) or 0
         output_tokens = getattr(usage, "output_tokens", 0) or 0
+        cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        cache_deleted = getattr(usage, "cache_deleted_input_tokens", 0) or 0
+        logical_input_tokens = input_tokens + cache_creation + cache_read
         input_breakdown = self._input_breakdown(system, messages, tools)
         output_breakdown = self._output_breakdown(response_message)
 
-        _allocate_actual_tokens(input_breakdown, input_tokens)
+        _allocate_actual_tokens(input_breakdown, logical_input_tokens)
         _allocate_actual_tokens(output_breakdown, output_tokens)
 
         self.calls += 1
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
+        self.cache_creation_input_tokens += cache_creation
+        self.cache_read_input_tokens += cache_read
+        self.cache_deleted_input_tokens += cache_deleted
+        self.logical_input_tokens += logical_input_tokens
         self.turns.append(
             {
                 "turn_id": turn_id,
                 "input_tokens": input_tokens,
+                "logical_input_tokens": logical_input_tokens,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "cache_deleted_input_tokens": cache_deleted,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
+                "logical_total_tokens": logical_input_tokens + output_tokens,
                 "input_breakdown": input_breakdown,
                 "output_breakdown": output_breakdown,
                 "top_input_categories": self._top_categories(input_breakdown),
                 "top_output_categories": self._top_categories(output_breakdown),
             }
         )
+
+    def record_context_event(self, event: dict[str, Any]) -> None:
+        self.context_events.append(dict(event))
 
     def write(self, context=None) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,13 +159,27 @@ class CostTracker:
                 {
                     "calls": self.calls,
                     "input_tokens": self.input_tokens,
+                    "logical_input_tokens": self.logical_input_tokens,
+                    "cache_creation_input_tokens": self.cache_creation_input_tokens,
+                    "cache_read_input_tokens": self.cache_read_input_tokens,
+                    "cache_deleted_input_tokens": self.cache_deleted_input_tokens,
                     "output_tokens": self.output_tokens,
                     "total_tokens": self.input_tokens + self.output_tokens,
+                    "logical_total_tokens": self.logical_input_tokens + self.output_tokens,
                     "estimated_cost_usd": None,
+                    "context_management": {
+                        "events": self.context_events,
+                        "estimated_tokens_saved": sum(
+                            max(int(event.get("saved_tokens", 0)), 0)
+                            for event in self.context_events
+                        ),
+                    },
                     "token_breakdown": {
                         "note": (
                             "Breakdowns are local estimates for optimization. "
-                            "API input_tokens/output_tokens remain the billing source of truth."
+                            "Provider usage fields remain the billing source of truth. "
+                            "logical_input_tokens includes cache creation and cache reads; "
+                            "logical_total_tokens adds model output to that logical input."
                         ),
                         "aggregate": self._aggregate_breakdown(),
                         "turns": self.turns,
@@ -178,7 +216,12 @@ class CostTracker:
 
     def _add_user_content(self, bucket: dict[str, dict[str, int]], content: Any) -> None:
         if isinstance(content, str):
-            category = "compacted_history" if content.startswith("[Compacted history]") else "user_messages"
+            compacted_prefixes = ("[Compacted history]", "[Runtime checkpoint]")
+            category = (
+                "compacted_history"
+                if content.startswith(compacted_prefixes)
+                else "user_messages"
+            )
             _add_text(bucket, category, content)
             return
 
@@ -242,7 +285,7 @@ class CostTracker:
             _merge_buckets(input_totals, turn["input_breakdown"])
             _merge_buckets(output_totals, turn["output_breakdown"])
 
-        self._add_aggregate_shares(input_totals, self.input_tokens)
+        self._add_aggregate_shares(input_totals, self.logical_input_tokens)
         self._add_aggregate_shares(output_totals, self.output_tokens)
         return {"input": input_totals, "output": output_totals}
 
