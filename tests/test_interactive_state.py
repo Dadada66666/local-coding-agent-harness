@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from agent.context import RunConfig
@@ -116,3 +117,41 @@ def test_each_interactive_task_gets_an_independent_model_call_budget(tmp_path: P
     assert context.task_model_calls == 1
     assert context.turn_count == 2
     assert model.calls == 2
+
+
+def test_submit_records_task_boundary_and_task_cost(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response("done")])
+    runner = make_runner(tmp_path, model)
+    context = runner.start_interactive()
+
+    runner.submit(context, "current task")
+    report = context.report_writer.write(context).read_text(encoding="utf-8")
+    events = [
+        json.loads(line)
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    user_events = [event for event in events if event["type"] == "user_prompt"]
+
+    assert context.task_id == "task-1"
+    assert user_events[-1]["task_id"] == "task-1"
+    assert user_events[-1]["task"] == "current task"
+    assert "## Task Cost\ncalls=1" in report
+    assert "## Session Cost\ncalls=1" in report
+
+
+def test_report_keeps_recovered_tool_failures(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response("## Summary\ndone")])
+    runner = make_runner(tmp_path, model)
+    context = runner.start_interactive()
+    context.begin_task("recover")
+    context.task_tool_failures.append(
+        {"turn_id": 3, "tool": "bash", "error": "command exited 22"}
+    )
+    context.success = True
+    context.final_text = "## Summary\ndone"
+
+    report = context.report_writer.write(context).read_text(encoding="utf-8")
+
+    assert "## Recovered Failures\n- turn 3 bash: command exited 22" in report
+    assert "## Summary\ndone" in report
+    assert "## Summary\n## Summary" not in report

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from runtime.context_manager import ContextManager
 from runtime.default_hooks import (
+    failure_history_hook,
     large_output_hook,
     mutation_outcome_hook,
     mutation_result_hook,
@@ -68,6 +69,7 @@ def build_hooks() -> HookManager:
     hooks.register(HookEvent.POST_TOOL_USE, mutation_result_hook)
     hooks.register(HookEvent.POST_TOOL_USE, mutation_outcome_hook)
     hooks.register(HookEvent.POST_TOOL_USE, test_result_hook)
+    hooks.register(HookEvent.POST_TOOL_USE, failure_history_hook)
     hooks.register(HookEvent.POST_TOOL_USE, post_tool_trace_hook)
 
     hooks.register(HookEvent.STOP, stop_report_hook)

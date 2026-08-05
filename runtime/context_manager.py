@@ -183,6 +183,45 @@ class ContextManager:
                 ),
             )
 
+    def compact_task_boundary(self, context) -> bool:
+        threshold = int(getattr(context.config, "context_task_boundary_tokens", 0))
+        if threshold <= 0 or len(context.messages) <= 1:
+            return False
+
+        current_message = context.messages[-1]
+        old_messages = context.messages[:-1]
+        old_tokens = estimate_messages_tokens(old_messages)
+        if old_tokens < threshold:
+            return False
+
+        checkpoint = self.checkpoint_builder.build(context, old_messages)
+        projected = [{"role": "user", "content": checkpoint}, deepcopy(current_message)]
+        before_tokens = estimate_messages_tokens(context.messages)
+        after_tokens = estimate_messages_tokens(projected)
+        if after_tokens >= before_tokens:
+            return False
+
+        context.messages = projected
+        context.context_compactions = int(getattr(context, "context_compactions", 0)) + 1
+        context.last_model_consumed_message_count = 0
+        self._mark_context_changed(context)
+        event = {
+            "type": "context_compact",
+            "reason": "task_boundary",
+            "mode": "task_boundary",
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "saved_tokens": before_tokens - after_tokens,
+            "total_saved_tokens": before_tokens - after_tokens,
+            "message_count": len(context.messages),
+            "context_generation": getattr(context, "context_generation", 0),
+        }
+        context.trace.log(event)
+        tracker = getattr(context, "cost_tracker", None)
+        if tracker is not None and hasattr(tracker, "record_context_event"):
+            tracker.record_context_event(event)
+        return True
+
     def _finish_preparation(
         self,
         context,

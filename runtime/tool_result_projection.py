@@ -18,6 +18,7 @@ COMPACTABLE_TOOL_RESULTS = {
 }
 PERSISTED_OUTPUT_PREFIX = "<persisted-output>"
 CLEARED_OUTPUT_PREFIX = "[Old tool observation cleared;"
+MIN_PROJECTION_SAVINGS_TOKENS = 32
 
 
 @dataclass(frozen=True)
@@ -152,16 +153,26 @@ class ToolResultProjector:
                 if not self._is_compactable_result(block, names):
                     continue
                 tool_use_id = str(block["tool_use_id"])
+                tool_name = names.get(tool_use_id, "unknown")
+                before_tokens = estimate_value_tokens(block)
+                preview_block = deepcopy(block)
+                preview_block["content"] = self._cleared_output(
+                    tool_name,
+                    "artifact_0000000000000000",
+                )
+                if (
+                    before_tokens - estimate_value_tokens(preview_block)
+                    < MIN_PROJECTION_SAVINGS_TOKENS
+                ):
+                    continue
                 artifact_id = self.persist_tool_result(context, tool_use_id, block["content"])
                 if artifact_id is None:
                     continue
-                before_tokens = estimate_value_tokens(block)
-                block["content"] = (
-                    f"{CLEARED_OUTPUT_PREFIX} "
-                    f"tool={names.get(tool_use_id, 'unknown')}; "
-                    f"artifact_id={artifact_id}]"
-                )
-                saved_tokens += max(before_tokens - estimate_value_tokens(block), 0)
+                block["content"] = self._cleared_output(tool_name, artifact_id)
+                reduction = max(before_tokens - estimate_value_tokens(block), 0)
+                if reduction < MIN_PROJECTION_SAVINGS_TOKENS:
+                    continue
+                saved_tokens += reduction
                 compacted_ids.append(tool_use_id)
 
         if not compacted_ids:
@@ -224,6 +235,13 @@ class ToolResultProjector:
             f"artifact_id: {artifact_id}\n"
             "Preview omitted by the tool-result round budget; use read_artifact.\n"
             "</persisted-output>"
+        )
+
+    def _cleared_output(self, tool_name: str, artifact_id: str) -> str:
+        return (
+            f"{CLEARED_OUTPUT_PREFIX} "
+            f"tool={tool_name}; "
+            f"artifact_id={artifact_id}]"
         )
 
     def _message_tool_result_tokens(self, message: dict) -> int:

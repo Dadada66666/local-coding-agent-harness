@@ -99,6 +99,16 @@ class WriteFileTool(BaseTool):
     def _file_exists_result(self, requested_path: str) -> ToolResult:
         return ToolResult(
             ok=False,
-            content=f"File already exists: {requested_path}. Use edit_file for precise edits.",
+            content=(
+                f"File already exists: {requested_path}. "
+                "Do not delete and recreate it to overwrite content; use edit_file."
+            ),
             error="file exists",
+            metadata={
+                "error_code": "file_exists",
+                "path": requested_path,
+                "recoverable": True,
+                "recovery_tool": "edit_file",
+                "delete_not_required": True,
+            },
         )

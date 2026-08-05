@@ -18,6 +18,15 @@ INPUT_CATEGORIES = (
     "other_messages",
 )
 OUTPUT_CATEGORIES = ("assistant_text", "tool_calls", "other")
+USAGE_FIELDS = (
+    "calls",
+    "input_tokens",
+    "logical_input_tokens",
+    "cache_creation_input_tokens",
+    "cache_read_input_tokens",
+    "cache_deleted_input_tokens",
+    "output_tokens",
+)
 
 
 def _empty_bucket(categories: tuple[str, ...]) -> dict[str, dict[str, int]]:
@@ -152,6 +161,20 @@ class CostTracker:
     def record_context_event(self, event: dict[str, Any]) -> None:
         self.context_events.append(dict(event))
 
+    def snapshot(self) -> dict[str, int]:
+        return self._with_totals(
+            {field: int(getattr(self, field, 0)) for field in USAGE_FIELDS}
+        )
+
+    def delta(self, baseline: dict[str, int] | None = None) -> dict[str, int]:
+        baseline = baseline or {}
+        return self._with_totals(
+            {
+                field: max(int(getattr(self, field, 0)) - int(baseline.get(field, 0)), 0)
+                for field in USAGE_FIELDS
+            }
+        )
+
     def write(self, context=None) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
@@ -167,6 +190,8 @@ class CostTracker:
                     "total_tokens": self.input_tokens + self.output_tokens,
                     "logical_total_tokens": self.logical_input_tokens + self.output_tokens,
                     "estimated_cost_usd": None,
+                    "current_task": self._current_task_cost(context),
+                    "completed_tasks": list(getattr(context, "completed_tasks", [])),
                     "context_management": {
                         "events": self.context_events,
                         "estimated_tokens_saved": sum(
@@ -308,3 +333,21 @@ class CostTracker:
             reverse=True,
         )
         return [item for item in ranked[:limit] if item["allocated_tokens"] > 0]
+
+    def _current_task_cost(self, context) -> dict[str, Any] | None:
+        if context is None:
+            return None
+        return {
+            "task_id": getattr(context, "task_id", None),
+            "task": getattr(context, "task", ""),
+            **self.delta(getattr(context, "task_cost_start", None)),
+        }
+
+    def _with_totals(self, values: dict[str, int]) -> dict[str, int]:
+        return {
+            **values,
+            "total_tokens": values["input_tokens"] + values["output_tokens"],
+            "logical_total_tokens": (
+                values["logical_input_tokens"] + values["output_tokens"]
+            ),
+        }

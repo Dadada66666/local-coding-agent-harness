@@ -60,14 +60,19 @@ class AgentLoop:
 
     def submit(self, context: AgentContext, prompt: str) -> AgentContext:
         context.capture_completed_task()
-        context.task = prompt
-        context.reset_task_state()
+        context.begin_task(prompt)
         context.add_user_message({"role": "user", "content": prompt})
         context.finished = False
         context.final_text = ""
         context.abort_reason = None
         context.success = False
         try:
+            self.runtime.hooks.trigger(
+                HookEvent.USER_PROMPT_SUBMIT,
+                task=prompt,
+                context=context,
+            )
+            self.runtime.context_manager.compact_task_boundary(context)
             self.run_until_idle(context)
         except KeyboardInterrupt as exc:
             self.abort(context, reason="interrupted", message="Stopped: interrupted by user (Ctrl+C).", exc=exc)
@@ -120,6 +125,7 @@ class AgentLoop:
                 {
                     "type": "turn_start",
                     "turn_id": turn_id,
+                    "task_id": getattr(context, "task_id", None),
                     "task_model_call": context.task_model_calls,
                     "message_count": len(context.messages),
                 }
@@ -252,6 +258,7 @@ class AgentLoop:
                     {
                         "type": "final_response",
                         "turn_id": turn_id,
+                        "task_id": getattr(context, "task_id", None),
                         "message_count": len(context.messages),
                         "success": context.success,
                         "text_preview": context.final_text[:500] if context.final_text else "",
@@ -504,6 +511,7 @@ class AgentLoop:
             {
                 "type": "turn_end",
                 "turn_id": turn_id,
+                "task_id": getattr(context, "task_id", None),
                 "duration_ms": round((time.monotonic() - started) * 1000, 3),
                 "message_count": len(context.messages),
                 "finished": context.finished,
@@ -543,7 +551,7 @@ class AgentLoop:
             raise RuntimeError(f"Sandbox requested but unavailable: {sandbox.status.reason}")
 
         initial_messages = build_initial_messages(task) if include_initial_message else []
-        return AgentContext(
+        context = AgentContext(
             run_id=run_id,
             task=task,
             repo_path=repo_path,
@@ -564,6 +572,10 @@ class AgentLoop:
             environment_policy=environment_policy,
             redactor=redactor,
         )
+        if include_initial_message:
+            context.task_sequence = 1
+            context.task_id = "task-1"
+        return context
 
     def infer_success(self, context: AgentContext) -> bool:
         if getattr(context, "task_unresolved_mutation_failure", False):

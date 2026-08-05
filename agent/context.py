@@ -50,6 +50,7 @@ class RunConfig:
     context_recent_max_tokens: int = 16000
     context_min_recent_rounds: int = 2
     context_checkpoint_max_chars: int = 6000
+    context_task_boundary_tokens: int = 12000
     max_context_recovery_attempts: int = 1
     max_context_compaction_failures: int = 3
     artifact_read_max_chars: int = 6000
@@ -91,6 +92,8 @@ class RunConfig:
             raise ValueError("context_min_recent_rounds must be > 0")
         if self.context_checkpoint_max_chars < 512:
             raise ValueError("context_checkpoint_max_chars must be >= 512")
+        if self.context_task_boundary_tokens < 0:
+            raise ValueError("context_task_boundary_tokens must be >= 0")
         if self.max_context_recovery_attempts < 0:
             raise ValueError("max_context_recovery_attempts must be >= 0")
         if self.max_context_compaction_failures <= 0:
@@ -130,6 +133,10 @@ class AgentContext:
     current_turn_id: int = 0
     task_model_calls: int = 0
     task_tool_rounds: int = 0
+    task_sequence: int = 0
+    task_id: str | None = None
+    task_cost_start: dict[str, int] = field(default_factory=dict)
+    task_tool_failures: list[dict[str, Any]] = field(default_factory=list)
     repair_attempts: int = 0
     last_test_result: dict | None = None
     task_test_result: dict | None = None
@@ -224,8 +231,17 @@ class AgentContext:
         self.repair_attempts = 0
         self.context_recovery_attempts = 0
         self.context_compaction_failures = 0
+        snapshot = getattr(self.cost_tracker, "snapshot", None)
+        self.task_cost_start = snapshot() if callable(snapshot) else {}
+        self.task_tool_failures.clear()
         self.task_changed_files.clear()
         self.task_created_files.clear()
+
+    def begin_task(self, task: str) -> None:
+        self.task = task
+        self.task_sequence += 1
+        self.task_id = f"task-{self.task_sequence}"
+        self.reset_task_state()
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)
@@ -276,6 +292,7 @@ class AgentContext:
 
         test_result = self.task_test_result or {}
         summary = {
+            "task_id": self.task_id,
             "task": self.task,
             "result": (self.final_text or "")[:2000],
             "changed_files": sorted(self.task_changed_files),
@@ -288,6 +305,8 @@ class AgentContext:
                     else None
                 ),
             },
+            "cost": self.cost_tracker.delta(self.task_cost_start),
+            "failures": list(self.task_tool_failures),
         }
         self.completed_tasks.append(summary)
         del self.completed_tasks[:-5]

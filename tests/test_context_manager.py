@@ -280,6 +280,64 @@ def test_microcompact_only_clears_consumed_old_observations(tmp_path) -> None:
     assert context.tool_result_artifacts
 
 
+def test_microcompact_skips_results_without_net_token_savings(tmp_path) -> None:
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=compact_config(context_min_recent_rounds=1),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.messages = [
+        {"role": "user", "content": "inspect"},
+        tool_use_message("call_1"),
+        tool_result_message("call_1", "short output"),
+        tool_use_message("call_2"),
+        tool_result_message("call_2", "recent output"),
+    ]
+    context.last_model_consumed_message_count = 3
+    generation = context.context_generation
+
+    projection = ContextManager()._project_consumed_results(context)
+
+    assert projection.count == 0
+    assert projection.saved_tokens == 0
+    assert context.context_generation == generation
+    assert not context.tool_result_artifacts
+
+
+def test_task_boundary_compaction_preserves_current_prompt_and_audit(tmp_path) -> None:
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=compact_config(context_task_boundary_tokens=100),
+    )
+    context = runner.create_context("old task", include_initial_message=True)
+    context.messages.extend(
+        [
+            {"role": "assistant", "content": [{"type": "text", "text": "x" * 2000}]},
+            {"role": "user", "content": "new task"},
+        ]
+    )
+    context.conversation_messages = deepcopy(context.messages)
+
+    changed = ContextManager().compact_task_boundary(context)
+
+    assert changed is True
+    assert len(context.messages) == 2
+    assert str(context.messages[0]["content"]).startswith("[Runtime checkpoint]")
+    assert context.messages[1] == {"role": "user", "content": "new task"}
+    assert len(context.conversation_messages) == 3
+    events = [
+        json.loads(line)
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["mode"] == "task_boundary"
+
+
 def test_existing_full_artifact_is_reused_during_microcompaction(tmp_path) -> None:
     runner = AgentLoop(
         model_client=object(),
