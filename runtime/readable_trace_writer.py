@@ -74,7 +74,7 @@ class ReadableTraceWriter:
     def _user_text(self, content) -> str | None:
         if not isinstance(content, str):
             return None
-        if content.startswith("[Compacted history]"):
+        if content.startswith(("[Compacted history]", "[Runtime checkpoint]")):
             return None
         if content.startswith("The previous test run failed."):
             return None
@@ -206,6 +206,23 @@ class ReadableTraceWriter:
                 notes.append(
                     f"- artifact error: {event.get('artifact', 'unknown')}"
                     f"{self._suffix(event.get('error') or '')}"
+                )
+            elif event_type == "tool_result_budget":
+                notes.append(
+                    "- tool results projected: "
+                    f"{event.get('replaced_results', 0)} results, "
+                    f"about {event.get('saved_tokens', 0)} tokens saved"
+                )
+            elif event_type == "context_compact":
+                notes.append(
+                    f"- context compacted ({event.get('mode', 'unknown')}): "
+                    f"about {event.get('saved_tokens', 0)} tokens saved"
+                )
+            elif event_type == "context_recovery":
+                status = "succeeded" if event.get("recovered") else "failed"
+                notes.append(
+                    f"- context overflow recovery {status}: "
+                    f"attempt {event.get('attempt', 0)}"
                 )
         return notes
 

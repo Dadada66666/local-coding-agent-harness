@@ -4,21 +4,27 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent.context import RunConfig
 from agent.loop import AgentLoop
 from agent.messages import ModelResponse, TokenUsage, ToolCall
-from agent.model_client import ModelClient
+from agent.model_client import ModelClient, ModelContextOverflowError
 from runtime.bootstrap import build_runtime
 
 
 class FakeModelClient:
-    def __init__(self, responses: list[ModelResponse]) -> None:
+    def __init__(self, responses: list[ModelResponse | Exception]) -> None:
         self.responses = responses
         self.calls = 0
+        self.max_tokens = 4096
+        self.context_window_tokens = None
 
     def call(self, system: str, messages: list[dict], tools: list[dict]) -> ModelResponse:
         response = self.responses[self.calls]
         self.calls += 1
+        if isinstance(response, Exception):
+            raise response
         return response
 
 
@@ -87,6 +93,48 @@ def test_model_client_preserves_provider_stop_reason() -> None:
     response = client.call(system="system", messages=[], tools=[])
 
     assert response.stop_reason == "end_turn"
+
+
+def test_model_client_preserves_cache_usage_fields() -> None:
+    provider_response = SimpleNamespace(
+        content=[{"type": "text", "text": "done"}],
+        usage=SimpleNamespace(
+            input_tokens=10,
+            output_tokens=2,
+            cache_creation_input_tokens=20,
+            cache_read_input_tokens=30,
+            cache_deleted_input_tokens=4,
+        ),
+        stop_reason="end_turn",
+    )
+    client = ModelClient.__new__(ModelClient)
+    client.model = "test-model"
+    client.max_tokens = 100
+    client.client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **kwargs: provider_response)
+    )
+
+    response = client.call(system="system", messages=[], tools=[])
+
+    assert response.usage.logical_input_tokens == 60
+    assert response.usage.context_tokens == 62
+    assert response.usage.cache_deleted_input_tokens == 4
+
+
+def test_model_client_classifies_context_overflow_errors() -> None:
+    client = ModelClient.__new__(ModelClient)
+    client.model = "test-model"
+    client.max_tokens = 100
+    client.client = SimpleNamespace(
+        messages=SimpleNamespace(
+            create=lambda **kwargs: (_ for _ in ()).throw(
+                RuntimeError("prompt is too long for this context window")
+            )
+        )
+    )
+
+    with pytest.raises(ModelContextOverflowError, match="prompt is too long"):
+        client.call(system="system", messages=[], tools=[])
 
 
 def test_stop_reason_and_content_mismatch_is_protocol_error(tmp_path: Path) -> None:
@@ -160,6 +208,105 @@ def test_model_call_limit_counts_final_and_tool_turns(tmp_path: Path) -> None:
     assert context.task_model_calls == 1
     assert context.turn_count == 1
     assert model.calls == 1
+
+
+def test_context_overflow_compacts_and_retries_once(tmp_path: Path) -> None:
+    model = FakeModelClient(
+        [
+            ModelContextOverflowError("prompt too long"),
+            final_response("recovered"),
+        ]
+    )
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.config.compact_threshold_chars = 1_000_000
+    context.config.context_recent_target_tokens = 1
+    context.config.context_recent_max_tokens = 200
+    context.config.context_min_recent_rounds = 2
+    for index in range(6):
+        context.messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call_{index}",
+                            "name": "read_file",
+                            "input": {"path": "demo.py"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call_{index}",
+                            "content": "result " * 100,
+                        }
+                    ],
+                },
+            ]
+        )
+
+    runner.run_until_idle(context)
+
+    assert context.success is True
+    assert context.final_text == "recovered"
+    assert context.context_recovery_attempts == 1
+    assert context.context_compactions == 1
+    assert model.calls == 2
+    assert _has_trace_type(context.trace.path, "context_recovery")
+
+
+def test_repeated_context_overflow_stops_without_a_retry_loop(tmp_path: Path) -> None:
+    model = FakeModelClient(
+        [
+            ModelContextOverflowError("prompt too long"),
+            ModelContextOverflowError("prompt too long again"),
+        ]
+    )
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.config.compact_threshold_chars = 1_000_000
+    context.config.context_recent_target_tokens = 1
+    context.config.context_recent_max_tokens = 200
+    context.config.context_min_recent_rounds = 1
+    for index in range(4):
+        context.messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": f"call_{index}",
+                            "name": "list_dir",
+                            "input": {},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": f"call_{index}",
+                            "content": "entry\n" * 100,
+                        }
+                    ],
+                },
+            ]
+        )
+
+    runner.run_until_idle(context)
+
+    assert context.success is False
+    assert context.abort_reason == "model_context_overflow"
+    assert context.context_recovery_attempts == 1
+    assert model.calls == 2
+    assert _has_trace_type(context.trace.path, "context_recovery_skipped")
 
 
 def _has_trace_type(path: Path, event_type: str) -> bool:

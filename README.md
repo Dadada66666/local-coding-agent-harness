@@ -42,12 +42,17 @@ Create `.env` from `.env.example`:
 ```bash
 ANTHROPIC_API_KEY=
 MODEL_ID=
+MODEL_CONTEXT_WINDOW_TOKENS=
 ANTHROPIC_BASE_URL=
 ```
 
 The adapter loads only the harness-root `.env` by default; it does not search
 the active `WORKDIR`. Set `LCAH_ENV_FILE` to an explicit path when running an
 installed package without that file.
+
+Set `MODEL_CONTEXT_WINDOW_TOKENS` when the provider does not expose the model's
+window size. This enables token-budget compaction; without it, the runtime keeps
+the compatible character-threshold fallback.
 
 The model adapter uses the Anthropic Messages API shape, including top-level
 `system`, `messages`, `tools`, assistant `tool_use` blocks, and user
@@ -113,6 +118,8 @@ Available tools:
 - `read_file`: read UTF-8 text with line numbers and record a file snapshot.
   Non-UTF-8 files return a normal tool failure instead of an unhandled decode
   exception.
+- `read_artifact`: retrieve a bounded slice of a large tool result through an
+  opaque ID scoped to the current run; it does not accept filesystem paths.
 - `write_file`: write a new UTF-8 file. Existing files fail as tool semantics,
   not as permission denials; use `edit_file` for existing files. Successful
   writes update the file snapshot.
@@ -161,8 +168,18 @@ Important runtime properties:
   remain terminal denials.
 - Directory listing and recursive search filter protected paths after canonical path
   resolution, including aliases that resolve to protected files.
-- Context compaction avoids leaving orphan `tool_result` messages without their
-  corresponding `tool_use`.
+- Context pressure includes the system prompt, tool schemas, messages, reserved
+  output, and a safety margin. Provider usage anchors the local estimator when
+  available. Capacity pressure and the default 32K economic context target use
+  the lower limit; a character threshold remains the compatibility fallback.
+- Context reduction is layered: aggregate tool-result budgets persist large
+  observations first, consumed old observations become retrieval references,
+  and full compaction writes a bounded runtime checkpoint while preserving
+  complete recent API rounds. The append-only conversation audit is unchanged.
+- Provider context overflow gets one bounded force-compaction retry. Repeated
+  overflow or compaction failures stop cleanly instead of looping indefinitely.
+- Context measurements and savings notes are trace/report observability only;
+  they are not appended to model messages.
 - Unknown tools and validation failures are traced as normal tool results, which
   keeps debugging artifacts complete.
 - Recovery prompts avoid duplicating large failed test output already present in
@@ -183,12 +200,14 @@ Artifacts:
 - `report.md`: status, changed files, verification, sandbox, cost, artifacts
 - `diff.patch`: git diff, or a clean non-git placeholder
 - `cost.json`: model usage plus estimated per-turn token breakdown
-- `artifacts/`: persisted large tool outputs
+- `artifacts/`: complete large tool outputs, recoverable in-run by opaque ID
 
 `cost.json` breaks model input/output into categories such as system prompt,
 tool schemas, user messages, assistant tool calls, tool results, compacted
 history, assistant text, and tool calls. The breakdown is local estimation for
 optimization; provider usage remains the billing source of truth.
+Cache creation/read usage and estimated context-management savings are recorded
+separately when the provider reports them.
 
 ## Verification
 

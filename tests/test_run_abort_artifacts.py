@@ -40,8 +40,14 @@ class FakeHooks:
 
 
 class FakeContextManager:
-    def prepare_context(self, context) -> None:
-        return None
+    def prepare_context(self, context, **kwargs):
+        return SimpleNamespace(
+            measurement=SimpleNamespace(
+                used_tokens=0,
+                source="estimate",
+                soft_limit_tokens=None,
+            )
+        )
 
 
 class FakeToolRegistry:

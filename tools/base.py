@@ -15,6 +15,7 @@ class ToolResult:
     ok: bool
     content: str
     error: str | None = None
+    artifact_id: str | None = None
     artifact_path: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

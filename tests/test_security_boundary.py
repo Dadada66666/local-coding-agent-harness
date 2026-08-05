@@ -182,6 +182,70 @@ def test_tool_result_is_redacted_before_messages_and_artifacts(
     assert tool_result["output_preview"].endswith(REDACTED)
 
 
+def test_large_tool_output_is_persisted_once_and_recoverable(monkeypatch, tmp_path) -> None:
+    runner = make_runner(tmp_path)
+    context = runner.create_context("inspect generated output", include_initial_message=True)
+    bash = runner.runtime.tool_registry.get("bash")
+    full_output = "0123456789" * 1200
+    monkeypatch.setattr(
+        bash,
+        "call",
+        lambda args, current_context: ToolResult(ok=True, content=full_output),
+    )
+
+    result = runner.runtime.executor.execute(
+        ToolCall("large-output", "bash", {"command": "printf safe"}),
+        context,
+    )
+
+    assert result.artifact_id is not None
+    assert context.tool_result_artifacts["large-output"] == result.artifact_id
+    assert str(context.run_dir) not in result.content
+    reference = context.artifacts.get(result.artifact_id)
+    assert reference is not None
+    assert reference.path.read_text(encoding="utf-8") == full_output
+
+    artifact_result = runner.runtime.executor.execute(
+        ToolCall(
+            "read-slice",
+            "read_artifact",
+            {"artifact_id": result.artifact_id, "offset": 10, "limit": 20},
+        ),
+        context,
+    )
+    assert artifact_result.ok is True
+    assert artifact_result.content.startswith("01234567890123456789")
+    assert context.tool_result_artifacts["read-slice"] == result.artifact_id
+
+
+def test_large_output_persistence_failure_returns_bounded_preview(monkeypatch, tmp_path) -> None:
+    runner = make_runner(tmp_path)
+    context = runner.create_context("inspect generated output", include_initial_message=True)
+    context.config.max_tool_result_chars = 512
+    bash = runner.runtime.tool_registry.get("bash")
+    monkeypatch.setattr(
+        bash,
+        "call",
+        lambda args, current_context: ToolResult(ok=True, content="x" * 12000),
+    )
+    monkeypatch.setattr(
+        context.artifacts,
+        "persist",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+
+    result = runner.runtime.executor.execute(
+        ToolCall("large-output", "bash", {"command": "printf safe"}),
+        context,
+    )
+
+    assert result.ok is True
+    assert result.artifact_id is None
+    assert result.metadata["artifact_persist_failed"] is True
+    assert len(result.content) <= context.config.max_tool_result_chars
+    assert "artifact_persist_error" in context.trace.path.read_text(encoding="utf-8")
+
+
 def test_unknown_auto_allow_requires_attested_protected_reads() -> None:
     sandbox = SimpleNamespace(
         status=SimpleNamespace(
