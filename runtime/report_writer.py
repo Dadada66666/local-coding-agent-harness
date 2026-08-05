@@ -18,6 +18,7 @@ class ReportWriter:
             "",
             "## Task",
             self._task_summary(context),
+            f"ID: {getattr(context, 'task_id', None) or 'N/A'}",
             "",
             "## Status",
             f"Success: {str(context.success).lower()}",
@@ -32,14 +33,21 @@ class ReportWriter:
             f"Command: {test_result.get('command', 'N/A')}",
             f"Result: {'passed' if test_result.get('ok') else 'failed' if test_result else 'not recorded'}",
             f"Verification: {self._verification_status(context)}",
+            f"Level: {test_result.get('verification_level', 'not recorded')}",
             "",
             "## Failure Summary",
             self._failure_summary(context, test_result),
             "",
+            "## Recovered Failures",
+            *self._recovered_failures(context),
+            "",
             "## Repair Attempts",
             str(context.repair_attempts),
             "",
-            "## Cost",
+            "## Task Cost",
+            self._cost_summary(context, task_only=True),
+            "",
+            "## Session Cost",
             cost_summary,
             "",
             "## Context Management",
@@ -52,7 +60,7 @@ class ReportWriter:
             *self._tool_efficiency(context),
             "",
             "## Summary",
-            context.final_text or "N/A",
+            self._final_summary(context),
             "",
             "## Artifacts",
             f"- trace: `{context.trace.path}`",
@@ -111,6 +119,22 @@ class ReportWriter:
         if context.success is False and context.final_text:
             return context.final_text
         return "N/A"
+
+    def _recovered_failures(self, context: AgentContext) -> list[str]:
+        failures = getattr(context, "task_tool_failures", [])
+        if not failures:
+            return ["- N/A"]
+        return [
+            f"- turn {failure.get('turn_id', 'N/A')} {failure.get('tool', 'tool')}: "
+            f"{failure.get('error', 'failed')}"
+            for failure in failures
+        ]
+
+    def _final_summary(self, context: AgentContext) -> str:
+        text = (context.final_text or "N/A").strip()
+        if text.startswith("## Summary"):
+            text = text[len("## Summary") :].lstrip("\r\n ")
+        return text or "N/A"
 
     def _task_summary(self, context: AgentContext) -> str:
         return context.task
@@ -179,16 +203,38 @@ class ReportWriter:
                 "Consider narrowing queries or improving pagination."
             )
 
+        failures = getattr(context, "task_tool_failures", [])
+        repeated = {}
+        for failure in failures:
+            key = (failure.get("tool"), failure.get("error"))
+            repeated[key] = repeated.get(key, 0) + 1
+        for (tool, error), count in repeated.items():
+            if count >= 2:
+                warnings.append(
+                    f"Repeated deterministic failure {count} times: {tool} ({error})."
+                )
+
+        if getattr(context, "task_model_calls", 0) >= 10:
+            warnings.append(
+                f"Current task required {context.task_model_calls} model calls; "
+                "inspect trace for avoidable retries or oversized tool payloads."
+            )
+
         return warnings
 
-    def _cost_summary(self, context: AgentContext) -> str:
+    def _cost_summary(self, context: AgentContext, *, task_only: bool = False) -> str:
         tracker = context.cost_tracker
+        values = (
+            tracker.delta(getattr(context, "task_cost_start", None))
+            if task_only
+            else tracker.snapshot()
+        )
         return (
-            f"calls={tracker.calls}, "
-            f"input_tokens={tracker.input_tokens}, "
-            f"logical_input_tokens={getattr(tracker, 'logical_input_tokens', tracker.input_tokens)}, "
-            f"cache_read_input_tokens={getattr(tracker, 'cache_read_input_tokens', 0)}, "
-            f"output_tokens={tracker.output_tokens}"
+            f"calls={values['calls']}, "
+            f"input_tokens={values['input_tokens']}, "
+            f"logical_input_tokens={values['logical_input_tokens']}, "
+            f"cache_read_input_tokens={values['cache_read_input_tokens']}, "
+            f"output_tokens={values['output_tokens']}"
         )
 
     def _context_management_summary(self, context: AgentContext) -> list[str]:
@@ -196,6 +242,7 @@ class ReportWriter:
         events = getattr(tracker, "context_events", [])
         saved_tokens = sum(max(int(event.get("saved_tokens", 0)), 0) for event in events)
         return [
+            "- scope: session",
             f"- window_tokens: {getattr(context.config, 'context_window_tokens', None) or 'unknown'}",
             f"- target_tokens: {getattr(context.config, 'context_target_tokens', None) or 'disabled'}",
             f"- compactions: {getattr(context, 'context_compactions', 0)}",

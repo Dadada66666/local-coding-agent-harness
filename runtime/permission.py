@@ -6,6 +6,12 @@ from typing import Any
 
 from runtime.operation import Operation
 from runtime.permission_rules import PermissionRule, PermissionRuleValue
+from runtime.shell_analysis import (
+    analyze_shell_effects,
+    mask_quoted_text,
+    redirection_targets,
+    split_shell_segments,
+)
 
 
 class PermissionMode:
@@ -39,6 +45,8 @@ class BashRiskDecision:
     suggested_tool: str | None
     confidence: str
     execution_route: str | None = None
+    effects: tuple[str, ...] = ()
+    network_hosts: tuple[str, ...] = ()
 
     def to_metadata(self) -> dict[str, Any]:
         metadata = {
@@ -51,6 +59,10 @@ class BashRiskDecision:
         }
         if self.execution_route is not None:
             metadata["execution_route"] = self.execution_route
+        if self.effects:
+            metadata["effects"] = list(self.effects)
+        if self.network_hosts:
+            metadata["network_hosts"] = list(self.network_hosts)
         return metadata
 
 
@@ -91,17 +103,12 @@ class RiskClassifier:
         r"""(?:^|&&|\|\||\||;|[\r\n])\s*apply_patch(?:\s|$)""",
         re.IGNORECASE,
     )
-    SHELL_REDIRECT_RE = re.compile(
-        r"""(?<![<>])>>?\s*(?P<path>\"[^\"]+\"|'[^']+'|[^\s&|;]+)""",
-        re.IGNORECASE,
-    )
     HEREDOC_START_RE = re.compile(
         r"""<<-?\s*(?P<quote>['"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*) (?P=quote)""".replace(
             " ", ""
         ),
         re.IGNORECASE,
     )
-    SHELL_SEGMENT_RE = re.compile(r"&&|\|\||[|;\r\n]")
     DYNAMIC_SHELL_RE = re.compile(r"\$\(|`|<\(|>\(", re.IGNORECASE)
 
     DESTRUCTIVE_PATTERNS = [
@@ -161,6 +168,9 @@ class RiskClassifier:
         "ruff check",
         "mypy",
         "npm test",
+        "node --check",
+        "sh -n",
+        "bash -n",
         "python -m unittest",
         "python3 -m unittest",
         "test",
@@ -200,8 +210,10 @@ class RiskClassifier:
     PYTHON_INLINE_PREFIXES = ["python -c", "python3 -c", "py -c"]
 
     def classify_bash(self, command: str) -> BashRiskDecision:
-        normalized = f" {command.strip().lower()} "
+        syntax_command = self._strip_heredoc_bodies(command)
+        normalized = f" {mask_quoted_text(syntax_command).strip().lower()} "
         command_prefix = self._command_prefix(command)
+        effects = analyze_shell_effects(syntax_command)
 
         destructive_pattern = self._matched_pattern(normalized, self.DESTRUCTIVE_PATTERNS)
         if destructive_pattern:
@@ -236,7 +248,7 @@ class RiskClassifier:
                 confidence="high" if python_paths else "medium",
             )
 
-        if self._is_apply_patch_command(command):
+        if self._is_apply_patch_command(mask_quoted_text(syntax_command)):
             return BashRiskDecision(
                 risk=BashRisk.FILE_WRITE_VIA_BASH,
                 reason="apply_patch through shell can write files.",
@@ -247,19 +259,24 @@ class RiskClassifier:
                 execution_route="structured_tool",
             )
 
-        if not self._is_python_inline(command_prefix):
-            redirect_paths = self._redirection_targets(command)
-            if redirect_paths:
-                return BashRiskDecision(
-                    risk=BashRisk.FILE_WRITE_VIA_BASH,
-                    reason="Shell redirection writes command output to a file.",
-                    target_paths=redirect_paths,
-                    command_prefix=command_prefix,
-                    suggested_tool="write_file",
-                    confidence="high",
-                )
-
         file_write = self._matched_file_write_pattern(normalized)
+        network_pattern = self._matched_pattern(normalized, self.NETWORK_PATTERNS)
+        if effects.has_network or network_pattern:
+            network_program = effects.network_program or network_pattern or command_prefix
+            effect_names = ["network"]
+            if effects.has_file_mutation:
+                effect_names.append("file_write")
+            return BashRiskDecision(
+                risk=BashRisk.NETWORK,
+                reason=f"Matched network command: {network_program}.",
+                target_paths=list(effects.mutation_paths),
+                command_prefix=network_program,
+                suggested_tool=None,
+                confidence="high",
+                effects=tuple(effect_names),
+                network_hosts=effects.network_hosts,
+            )
+
         if file_write is not None:
             pattern, reason, suggested_tool = file_write
             return BashRiskDecision(
@@ -269,17 +286,27 @@ class RiskClassifier:
                 command_prefix=command_prefix,
                 suggested_tool=suggested_tool,
                 confidence="high",
+                effects=("file_write",),
             )
 
-        network_pattern = self._matched_pattern(normalized, self.NETWORK_PATTERNS)
-        if network_pattern:
+        if not self._is_python_inline(command_prefix) and effects.has_file_mutation:
+            if effects.metadata_write_paths:
+                reason = "chmod mutates file metadata through shell."
+                suggested_tool = None
+            elif effects.directory_write_paths:
+                reason = "Shell command creates filesystem directories."
+                suggested_tool = "write_file"
+            else:
+                reason = "Shell redirection writes command output to a file."
+                suggested_tool = "write_file"
             return BashRiskDecision(
-                risk=BashRisk.NETWORK,
-                reason=f"Matched network command pattern: {network_pattern}.",
-                target_paths=[],
+                risk=BashRisk.FILE_WRITE_VIA_BASH,
+                reason=reason,
+                target_paths=list(effects.mutation_paths),
                 command_prefix=command_prefix,
-                suggested_tool=None,
+                suggested_tool=suggested_tool,
                 confidence="high",
+                effects=("file_write",),
             )
 
         segment_risk, segment_prefix = self._classify_shell_segments(command)
@@ -316,11 +343,7 @@ class RiskClassifier:
         if self.DYNAMIC_SHELL_RE.search(command):
             return None, None
 
-        segments = [
-            segment.strip().lower()
-            for segment in self.SHELL_SEGMENT_RE.split(command)
-            if segment.strip()
-        ]
+        segments = [segment.strip().lower() for segment in split_shell_segments(command)]
         if not segments:
             return None, None
 
@@ -350,7 +373,8 @@ class RiskClassifier:
         if paths:
             return self._unique(paths), "Python file deletion API"
 
-        matched = self.SHELL_DELETE_COMMAND_RE.search(command)
+        shell_syntax = mask_quoted_text(self._strip_heredoc_bodies(command))
+        matched = self.SHELL_DELETE_COMMAND_RE.search(shell_syntax)
         if matched:
             return [], f"Matched file deletion command: {matched.group('command').lower()}"
         return [], None
@@ -390,12 +414,7 @@ class RiskClassifier:
 
     def _redirection_targets(self, command: str) -> list[str]:
         command = self._strip_heredoc_bodies(command)
-        paths: list[str] = []
-        for match in self.SHELL_REDIRECT_RE.finditer(command):
-            path = self._clean_target_path(match.group("path"))
-            if path and path not in {"&1", "&2"}:
-                paths.append(path)
-        return self._unique(paths)
+        return list(redirection_targets(command))
 
     def _strip_heredoc_bodies(self, command: str) -> str:
         lines = command.splitlines()
@@ -743,9 +762,18 @@ class PermissionGate:
         return bash_decision.suggested_tool
 
     def _bash_approval_scope(self, risk: str, bash_decision: BashRiskDecision) -> str:
-        prefix = bash_decision.command_prefix or "unknown"
-        prefix = re.sub(r"[^a-zA-Z0-9_.-]+", "_", prefix).strip("_") or "unknown"
-        return f"bash:{risk}:{prefix}"
+        parts = [risk, bash_decision.command_prefix or "unknown"]
+        if risk == BashRisk.NETWORK:
+            parts.append(bash_decision.network_hosts[0] if bash_decision.network_hosts else "any-host")
+        if bash_decision.target_paths:
+            parts.append(bash_decision.target_paths[0])
+        elif "file_write" in bash_decision.effects:
+            parts.append("write-any-path")
+        normalized = [
+            re.sub(r"[^a-zA-Z0-9_.-]+", "_", part).strip("_") or "unknown"
+            for part in parts
+        ]
+        return "bash:" + ":".join(normalized)
 
     def _ask_user(self, decision: PermissionDecision, tool, args: dict, context) -> PermissionDecision:
         print("\n[permission request]")
@@ -890,8 +918,9 @@ class PermissionGate:
 
         is_read_only = risk == BashRisk.READ_ONLY_COMMAND
         is_destructive = risk == BashRisk.DESTRUCTIVE
+        has_file_mutation = "file_write" in bash_decision.effects
         return Operation(
-            kind="process.exec",
+            kind="fs.write" if has_file_mutation else "process.exec",
             action=risk,
             subject=bash_decision.command_prefix or operation.subject,
             paths=bash_decision.target_paths,
@@ -987,11 +1016,12 @@ class PermissionGate:
         risk = str(bash_risk.get("risk"))
         purpose = str(args.get("purpose", "")).strip().lower()
         suggested_tool = self._suggested_file_tool_from_metadata(bash_risk, context)
+        effects = set(bash_risk.get("effects") or [])
 
-        if purpose == "verify" and risk in {
-            BashRisk.FILE_WRITE_VIA_BASH,
-            BashRisk.FILE_DELETE_VIA_BASH,
-        }:
+        if purpose == "verify" and (
+            risk in {BashRisk.FILE_WRITE_VIA_BASH, BashRisk.FILE_DELETE_VIA_BASH}
+            or "file_write" in effects
+        ):
             tool_hint = f" Use {suggested_tool} first." if suggested_tool else ""
             return self._decision(
                 behavior=PermissionBehavior.DENY,
@@ -1077,10 +1107,19 @@ class PermissionGate:
             )
 
         if risk == BashRisk.NETWORK:
+            details = [str(bash_risk.get("reason") or "Network command requires approval.")]
+            hosts = bash_risk.get("network_hosts") or []
+            paths = bash_risk.get("target_paths") or []
+            if hosts:
+                details.append(f"Hosts: {', '.join(hosts)}.")
+            if paths:
+                details.append(f"Filesystem mutations: {', '.join(paths)}.")
+            elif "file_write" in set(bash_risk.get("effects") or []):
+                details.append("Filesystem mutations: target path was not statically resolved.")
             return self._decision(
                 behavior=PermissionBehavior.ASK,
                 risk=risk,
-                message=str(bash_risk.get("reason") or "Network command requires approval."),
+                message=" ".join(details),
                 operation=operation,
                 decision_reason="bash_network",
             )

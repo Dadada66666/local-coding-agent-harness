@@ -166,6 +166,9 @@ Important runtime properties:
 - Shell-based file deletion returns a non-terminal routing failure so the
   model can retry with `delete_file`; recursive and broad destructive commands
   remain terminal denials.
+- Shell risk analysis is quote-aware and records composite effects. A network
+  command that also creates or writes paths presents the host and filesystem
+  targets in one approval scope instead of hiding the write behind `network`.
 - Directory listing and recursive search filter protected paths after canonical path
   resolution, including aliases that resolve to protected files.
 - Context pressure includes the system prompt, tool schemas, messages, reserved
@@ -176,6 +179,9 @@ Important runtime properties:
   observations first, consumed old observations become retrieval references,
   and full compaction writes a bounded runtime checkpoint while preserving
   complete recent API rounds. The append-only conversation audit is unchanged.
+- Interactive task boundaries compact completed history above a token threshold
+  into a deterministic checkpoint before the next task starts. The current
+  prompt and the append-only audit remain intact.
 - Provider context overflow gets one bounded force-compaction retry. Repeated
   overflow or compaction failures stop cleanly instead of looping indefinitely.
 - Context measurements and savings notes are trace/report observability only;
@@ -197,7 +203,8 @@ Artifacts:
 
 - `trace.jsonl`: structured runtime events
 - `readable_trace.md`: developer-friendly conversation/tool chain
-- `report.md`: status, changed files, verification, sandbox, cost, artifacts
+- `report.md`: task/session cost, changed files, verification level, recovered
+  failures, sandbox, and artifacts
 - `diff.patch`: git diff, or a clean non-git placeholder
 - `cost.json`: model usage plus estimated per-turn token breakdown
 - `artifacts/`: complete large tool outputs, recoverable in-run by opaque ID
@@ -208,6 +215,8 @@ history, assistant text, and tool calls. The breakdown is local estimation for
 optimization; provider usage remains the billing source of truth.
 Cache creation/read usage and estimated context-management savings are recorded
 separately when the provider reports them.
+The top-level totals remain session-wide; `current_task` and completed task
+records expose task-local usage without resetting the run audit.
 
 ## Verification
 

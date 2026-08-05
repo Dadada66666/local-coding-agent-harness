@@ -75,6 +75,9 @@ def test_write_file_does_not_overwrite_existing_file(tmp_path: Path) -> None:
 
     assert result.ok is False
     assert result.error == "file exists"
+    assert result.metadata["recovery_tool"] == "edit_file"
+    assert result.metadata["delete_not_required"] is True
+    assert "Do not delete and recreate" in result.content
     assert path.read_text(encoding="utf-8") == "original\n"
     assert context.changed_files == set()
 

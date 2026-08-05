@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from runtime.permission import BashRisk
+from runtime.console import print_tool_call
 from runtime.readable_trace_writer import ReadableTraceWriter
 from runtime.text_preview import head_tail_preview
 from tools.base import ToolResult
@@ -12,14 +13,18 @@ def user_prompt_submit_hook(task: str, context) -> None:
     context.trace.log(
         {
             "type": "user_prompt",
+            "task_id": getattr(context, "task_id", None),
+            "task_sequence": getattr(context, "task_sequence", 0),
             "task": task,
             "workdir": str(context.repo_path),
         }
     )
 
-    print(f"[run] {context.run_id}")
-    print(f"[task] {task}")
-    print(f"[workdir] {context.repo_path}")
+    if not getattr(context, "run_banner_printed", False):
+        print(f"[run] {context.run_id}")
+        print(f"[task] {task}")
+        print(f"[workdir] {context.repo_path}")
+        context.run_banner_printed = True
 
     return None
 
@@ -38,7 +43,7 @@ def pre_tool_trace_hook(tool_call, tool, context) -> None:
         }
     )
 
-    print(f"[tool] {tool_call.name} {tool_call.arguments}")
+    print_tool_call(tool_call.name, tool_call.arguments)
 
     return None
 
@@ -200,7 +205,7 @@ def mutation_result_hook(tool_call, tool, result, context) -> None:
 
     command = str(tool_call.arguments.get("command", ""))
     decision = context.permission_gate.risk_classifier.classify_bash(command)
-    if decision.risk != BashRisk.FILE_WRITE_VIA_BASH:
+    if decision.risk != BashRisk.FILE_WRITE_VIA_BASH and "file_write" not in decision.effects:
         return None
 
     recorded_paths = []
@@ -209,6 +214,10 @@ def mutation_result_hook(tool_call, tool, result, context) -> None:
             target = context.safe_path(requested_path)
             relative = target.relative_to(context.repo_path)
         except (OSError, ValueError):
+            continue
+        if target.exists() and not target.is_file():
+            continue
+        if not target.exists() and not result.ok:
             continue
         normalized_path = relative.as_posix()
         context.record_changed_file(normalized_path)
@@ -220,6 +229,24 @@ def mutation_result_hook(tool_call, tool, result, context) -> None:
     result.metadata["mutation_recorded"] = True
     result.metadata["mutation_paths"] = recorded_paths
     result.metadata["mutation_version"] = context.mutation_version
+    return None
+
+
+def failure_history_hook(tool_call, tool, result, context) -> None:
+    if result.ok or result.metadata.get("denied"):
+        return None
+    failures = getattr(context, "task_tool_failures", None)
+    if failures is None:
+        return None
+    failures.append(
+        {
+            "turn_id": _turn_id(context),
+            "tool": tool_call.name,
+            "error": result.error or "tool failed",
+            "output_preview": head_tail_preview(result.content or "", 300),
+        }
+    )
+    del failures[:-20]
     return None
 
 
@@ -281,6 +308,7 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         "output_preview": result.content[:2000],
         "metadata": result.metadata,
         "mutation_version": getattr(context, "mutation_version", 0),
+        "verification_level": _verification_level(command),
     }
     context.last_test_result = test_result
     context.task_test_result = test_result
@@ -299,6 +327,7 @@ def test_result_hook(tool_call, tool, result, context) -> None:
             "error": result.error,
             "purpose": _verification_purpose(tool_call, result),
             "mutation_version": test_result["mutation_version"],
+            "verification_level": test_result["verification_level"],
         }
     )
 
@@ -533,6 +562,20 @@ def _is_discovery_command(command: str) -> bool:
 
 def _is_verification_command(tool_call, result) -> bool:
     return _verification_purpose(tool_call, result) == "verify"
+
+
+def _verification_level(command: str) -> str:
+    normalized = command.lower()
+    if any(value in normalized for value in ("playwright", "selenium", "cypress")):
+        return "integration"
+    if _is_test_command(command):
+        return "test_suite"
+    if any(
+        value in normalized
+        for value in ("--check", "py_compile", "compileall", "sh -n", "bash -n", "ruff check")
+    ):
+        return "static"
+    return "custom"
 
 
 def _mutation_operation_kind(tool_call, tool, result, context) -> str | None:

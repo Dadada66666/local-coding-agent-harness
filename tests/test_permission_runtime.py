@@ -253,6 +253,51 @@ EOF"""
     assert decision.target_paths == ["quick_sort.py"]
 
 
+def test_quoted_html_is_not_misclassified_as_redirection() -> None:
+    command = (
+        "node --check game/game.js && "
+        "grep -q '恐怖氛围音乐' game/README.md && "
+        "grep -q 'M</kbd>' game/index.html && "
+        "printf '%s\\n' 'Syntax and horror-theme UI checks: OK'"
+    )
+
+    decision = RiskClassifier().classify_bash(command)
+
+    assert decision.risk == BashRisk.SAFE_CHECK
+    assert decision.target_paths == []
+
+
+def test_network_download_reports_host_and_filesystem_effects(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("download asset", include_initial_message=True)
+    command = (
+        "mkdir -p game/assets && "
+        "curl -L -o game/assets/darkest-child.mp3 "
+        "'https://incompetech.com/music/darkest-child.mp3'"
+    )
+
+    decision = context.permission_gate.check(BashTool(), {"command": command}, context)
+
+    assert decision.behavior == PermissionBehavior.ASK
+    assert decision.risk == BashRisk.NETWORK
+    assert decision.operation is not None
+    assert decision.operation.kind == "fs.write"
+    assert decision.operation.paths == ["game/assets/darkest-child.mp3", "game/assets"]
+    assert decision.proposed_scope == (
+        "bash:network:curl:incompetech.com:game_assets_darkest-child.mp3"
+    )
+    assert "Hosts: incompetech.com" in decision.message
+    assert "Filesystem mutations" in decision.message
+
+
+def test_chmod_is_classified_as_file_metadata_write() -> None:
+    decision = RiskClassifier().classify_bash("chmod +x run_game.sh")
+
+    assert decision.risk == BashRisk.FILE_WRITE_VIA_BASH
+    assert decision.target_paths == ["run_game.sh"]
+    assert decision.effects == ("file_write",)
+
+
 def test_bash_new_file_write_suggests_write_file() -> None:
     decision = RiskClassifier().classify_bash("Set-Content demo.py 'x = 1'")
 

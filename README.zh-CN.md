@@ -122,9 +122,11 @@ agent replay <run_id>
 - 并行工具调用会在一个 user message 中返回全部匹配的 `tool_result`。terminal deny 后未执行的调用会得到显式 cancelled result，保持消息历史合法。
 - 成功验证会绑定当前 mutation version。验证后的文件修改会让证据变为 stale，直到重新运行验证。
 - Bash 文件删除会返回非终止的工具路由失败，让模型改用 `delete_file`；递归或大范围破坏性命令仍会终止任务。
+- Shell 风险分析具备引号感知能力，并会记录复合副作用。网络命令如果同时创建目录或写文件，审批会同时展示目标主机和文件路径，不会用单一 `network` 标签隐藏写入行为。
 - 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
 - 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 可作为本地估算的锚点。容量软上限与默认 32K 经济上下文目标取较小值，字符阈值继续作为兼容兜底。
 - 上下文缩减采用分层策略：先按单轮总预算把大 observation 落盘，再把已消费的旧 observation 替换为可恢复引用，最后生成有界 runtime checkpoint，并完整保留最近 API rounds。append-only 审计历史不会被改写。
+- 交互任务切换时，如果已完成历史超过 token 阈值，runtime 会在下一任务开始前生成确定性 checkpoint；当前 prompt 和 append-only 审计链保持完整。
 - provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
 - 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。
 - unknown tool 和参数校验失败会作为正常 tool result 进入 trace，方便排障。
@@ -142,13 +144,14 @@ agent replay <run_id>
 
 - `trace.jsonl`：结构化 runtime events
 - `readable_trace.md`：开发者友好的对话/工具链路视图
-- `report.md`：状态、变更文件、验证结果、sandbox、成本、artifact
+- `report.md`：task/session 成本、变更文件、验证等级、已恢复失败、sandbox 和 artifact
 - `diff.patch`：git diff，非 git 目录会写入清晰占位内容
 - `cost.json`：模型 usage 和每轮 token breakdown 估算
 - `artifacts/`：完整大工具输出，可在当前 run 内通过不透明 ID 恢复
 
 `cost.json` 会把模型输入/输出拆成 system prompt、tool schemas、user messages、assistant tool calls、tool results、compacted history、assistant text、tool calls 等类别。这个 breakdown 是本地优化估算；provider 返回的 usage 才是计费真实来源。
 provider 返回时，cache creation/read usage 与上下文管理的估算节省量也会分别记录。
+顶层 totals 保持 session 累计口径；`current_task` 和已完成任务记录提供任务级 usage，不会重置整次运行的审计数据。
 
 ## 验证机制
 
