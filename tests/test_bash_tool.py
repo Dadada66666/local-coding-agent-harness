@@ -26,6 +26,8 @@ def test_verify_commands_use_fail_fast_posix_shell(monkeypatch) -> None:
 
     assert argv == ["/bin/sh", "-lec", "false\ntrue"]
     assert tool._shell_name(fail_fast=True) == "/bin/sh -lec"
+    assert 'purpose="verify"' in tool.description
+    assert "fail-fast" in tool.description
 
 
 def test_normal_commands_keep_existing_posix_shell_behavior(monkeypatch) -> None:

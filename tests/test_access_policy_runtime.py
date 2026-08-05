@@ -22,6 +22,16 @@ def make_context(tmp_path: Path):
     return runner.create_context("inspect", include_initial_message=True)
 
 
+def test_list_dir_reports_an_explicit_empty_directory(tmp_path: Path) -> None:
+    context = make_context(tmp_path)
+
+    listed = ListDirTool().call({"path": "."}, context)
+
+    assert listed.ok is True
+    assert listed.content == "Directory is empty."
+    assert listed.metadata["entry_count"] == 0
+
+
 def test_repository_search_filters_protected_files(tmp_path: Path) -> None:
     (tmp_path / ".env").write_text("SECRET_MARKER=hidden-value\n", encoding="utf-8")
     (tmp_path / ".agent").mkdir()

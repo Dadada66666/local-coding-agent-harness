@@ -24,7 +24,9 @@ class RecoveryPolicy:
         return {
             "role": "user",
             "content": (
-                "The previous test run failed. Analyze the preceding tool result and fix the code.\n\n"
+                "Verification failed. Determine whether the cause is code, tests, environment, "
+                "or the command itself; apply only the necessary correction. Verify commands "
+                "are fail-fast, so guard expected non-zero checks.\n\n"
                 "<test_failure>\n"
                 f"Command: {test.get('command')}\n"
                 f"Error: {test.get('error')}\n\n"
