@@ -239,7 +239,33 @@ def test_verification_cannot_mix_shell_write_and_test(tmp_path: Path) -> None:
     assert decision.behavior == PermissionBehavior.DENY
     assert decision.terminal_on_deny is False
     assert decision.decision_reason == "bash_mixed_mutation_verification"
+    assert decision.metadata["track_mutation_failure"] is False
     assert "separate Bash call" in decision.message
+
+
+def test_blocked_mixed_verification_does_not_mark_mutation_failure(
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("verify without mutation", include_initial_message=True)
+
+    result = runner.runtime.executor.execute(
+        ToolCall(
+            "verify",
+            "bash",
+            {
+                "command": "echo x > temporary.txt\npython -m pytest",
+                "purpose": "verify",
+            },
+        ),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["denied"] is True
+    assert result.metadata["mutation_outcome"] == "not_executed"
+    assert context.task_unresolved_mutation_failure is False
+    assert not (tmp_path / "temporary.txt").exists()
 
 
 def test_bash_cat_heredoc_uses_header_redirection_only() -> None:

@@ -254,6 +254,9 @@ def mutation_outcome_hook(tool_call, tool, result, context) -> None:
     operation_kind = _mutation_operation_kind(tool_call, tool, result, context)
     if operation_kind not in {"fs.write", "fs.delete"}:
         return None
+    if result.metadata.get("track_mutation_failure") is False:
+        result.metadata["mutation_outcome"] = "not_executed"
+        return None
 
     had_failure = getattr(context, "task_unresolved_mutation_failure", False)
     context.task_unresolved_mutation_failure = not result.ok

@@ -12,13 +12,15 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_TIMEOUT_SECONDS = 600
+EXIT_EXPECTATIONS = {"zero", "nonzero"}
 
 
 class BashTool(BaseTool):
     name = "bash"
     description = (
         'Run a shell command from WORKDIR; purpose="verify" records validation '
-        "and enables fail-fast execution."
+        "and enables fail-fast execution; exit_expectation declares the expected "
+        "overall status."
     )
     input_schema = {
         "type": "object",
@@ -30,6 +32,11 @@ class BashTool(BaseTool):
             },
             "input": {"type": "string"},
             "purpose": {"type": "string"},
+            "exit_expectation": {
+                "type": "string",
+                "enum": ["zero", "nonzero"],
+                "description": "Expected overall exit status; defaults to zero.",
+            },
         },
         "required": ["command"],
     }
@@ -58,12 +65,18 @@ class BashTool(BaseTool):
             raise ToolValidationError(
                 f"timeout must be between 1 and {MAX_TIMEOUT_SECONDS} seconds"
             )
+        exit_expectation = self._exit_expectation(args)
+        if exit_expectation not in EXIT_EXPECTATIONS:
+            raise ToolValidationError(
+                'exit_expectation must be either "zero" or "nonzero"'
+            )
 
     def call(self, args: dict, context) -> ToolResult:
         command = str(args["command"])
         timeout = int(args.get("timeout", DEFAULT_TIMEOUT_SECONDS))
         stdin_content = args.get("input")
         purpose = args.get("purpose")
+        exit_expectation = self._exit_expectation(args)
         fail_fast = str(purpose or "").strip().lower() == "verify"
         argv = self._build_command_argv(command, fail_fast=fail_fast)
         shell_name = self._shell_name(fail_fast=fail_fast)
@@ -110,6 +123,7 @@ class BashTool(BaseTool):
                     environment=environment_metadata,
                     purpose=purpose,
                     fail_fast=fail_fast,
+                    exit_expectation=exit_expectation,
                     timeout=timeout,
                     timed_out=True,
                 ),
@@ -117,11 +131,16 @@ class BashTool(BaseTool):
 
         output = self._combine_output(completed.stdout, completed.stderr).strip()
         original_chars = len(output)
+        exit_matched = self._exit_matches(completed.returncode, exit_expectation)
 
         return ToolResult(
-            ok=completed.returncode == 0,
+            ok=exit_matched,
             content=output,
-            error=None if completed.returncode == 0 else f"command exited {completed.returncode}",
+            error=(
+                None
+                if exit_matched
+                else self._exit_error(completed.returncode, exit_expectation)
+            ),
             metadata=self._metadata(
                 command=command,
                 shell_name=shell_name,
@@ -130,6 +149,7 @@ class BashTool(BaseTool):
                 environment=environment_metadata,
                 purpose=purpose,
                 fail_fast=fail_fast,
+                exit_expectation=exit_expectation,
                 returncode=completed.returncode,
                 truncated=False,
                 original_chars=original_chars,
@@ -183,6 +203,19 @@ class BashTool(BaseTool):
         if not parts:
             return "bash"
         return " ".join(parts[:2])
+
+    def _exit_expectation(self, args: dict) -> str:
+        return str(args.get("exit_expectation", "zero")).strip().lower()
+
+    def _exit_matches(self, returncode: int, expectation: str) -> bool:
+        if expectation == "nonzero":
+            return returncode != 0
+        return returncode == 0
+
+    def _exit_error(self, returncode: int, expectation: str) -> str:
+        if expectation == "nonzero":
+            return f"command exited {returncode}; expected nonzero"
+        return f"command exited {returncode}"
 
     def _sandbox_metadata(self, context) -> dict:
         sandbox = getattr(context, "sandbox", None)

@@ -104,7 +104,7 @@ agent replay <run_id>
 - `write_file`：写入新的 UTF-8 文件。文件已存在属于工具语义失败，不是权限拒绝；已有文件应使用 `edit_file`。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
 - `delete_file`：删除一个已有 snapshot 的普通文件。`accept_edits` 下可自动清理当前任务创建的文件；删除预先存在的文件需要审批。不支持目录和符号链接。
-- `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；shell patch 会被路由到结构化文件工具。
+- `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；预期整体返回非零状态时可设置 `exit_expectation="nonzero"`。shell patch 会被路由到结构化文件工具。
 - `view_diff`：在 git 仓库中查看 diff；非 git 目录会返回干净的 "diff unavailable" 结果。
 
 文件工具由 `AgentContext.safe_path()` 约束，读写不能逃逸 `WORKDIR`。
