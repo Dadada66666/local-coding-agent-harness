@@ -23,13 +23,18 @@ LangGraph adapters.
 
 Core directories:
 
-- `agent/`: loop, context state, prompts, model client, message conversion
-- `tools/`: tool implementations and registry
-- `runtime/`: permissions, hooks, sandbox integration, tracing, artifacts,
-  context compaction, recovery, reports, cost tracking
-- `cli/`: Typer CLI
-- `tests/`: unit and runtime behavior tests
-- `examples/`: demo repository fixtures
+- `src/agent/`: agent loop, prompts, model client, and message conversion
+- `src/runtime/`: session state, execution, recovery, and runtime composition
+- `src/runtime/context/`: context budgets, checkpoints, compaction, and projection
+- `src/runtime/security/`: access policy, permission gate, risk analysis, and sandbox
+- `src/runtime/hooks/`: lifecycle, policy, and tracking hooks
+- `src/runtime/observability/`: traces, reports, artifacts, diffs, and cost tracking
+- `src/tools/`: explicit tool implementations and registry
+- `src/cli/`: Typer commands, interactive mode, and trace replay
+- `tests/unit/` and `tests/integration/`: tests organized by source domain
+
+See [`docs/architecture.md`](docs/architecture.md) for the dependency map and
+the main execution paths.
 
 ## Install
 
@@ -71,7 +76,7 @@ lcah
 Fallback without installing scripts:
 
 ```bash
-python -m cli.main
+python -m cli.app
 ```
 
 Interactive mode uses the current terminal directory as `WORKDIR`:

@@ -19,12 +19,17 @@ Local Coding Agent Harness 是一个本地 Coding Agent Runtime。它让模型�
 
 核心目录：
 
-- `agent/`：loop、上下文状态、提示词、模型客户端、消息转换
-- `tools/`：工具实现和注册表
-- `runtime/`：权限、hooks、sandbox 集成、trace、artifact、上下文压缩、失败恢复、报告、成本统计
-- `cli/`：Typer CLI
-- `tests/`：单元测试和 runtime 行为测试
-- `examples/`：示例仓库 fixture
+- `src/agent/`：agent loop、提示词、模型客户端和消息转换
+- `src/runtime/`：会话状态、工具执行、失败恢复和运行时装配
+- `src/runtime/context/`：上下文预算、检查点、压缩和工具结果投影
+- `src/runtime/security/`：访问策略、权限 Gate、风险分析和 Sandbox
+- `src/runtime/hooks/`：生命周期、策略和状态追踪 Hooks
+- `src/runtime/observability/`：Trace、Report、Artifact、Diff 和成本统计
+- `src/tools/`：显式工具实现和注册表
+- `src/cli/`：Typer 命令、交互模式和 Trace Replay
+- `tests/unit/` 与 `tests/integration/`：按源码领域组织的测试
+
+依赖方向和主要执行链路见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 安装
 
@@ -61,7 +66,7 @@ lcah
 未安装 console script 时可以使用：
 
 ```bash
-python -m cli.main
+python -m cli.app
 ```
 
 交互模式使用当前终端目录作为 `WORKDIR`：
