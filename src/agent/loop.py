@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from inspect import signature
 from pathlib import Path
 
 from agent.model_client import ModelClient, ModelContextOverflowError
@@ -9,6 +10,7 @@ from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.bootstrap import RuntimeBundle
 from runtime.config import RunConfig
 from runtime.hooks import HookEvent
+from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy, PlanStepStatus
 from runtime.session import AgentContext
 from runtime.session_factory import create_agent_session
 
@@ -70,6 +72,23 @@ class AgentLoop:
             self.abort(context, reason="interrupted", message="Stopped: interrupted by user (Ctrl+C).", exc=exc)
         return context
 
+    def resume(self, context: AgentContext, runtime_text: str) -> AgentContext:
+        context.add_runtime_message({"role": "user", "content": runtime_text})
+        context.finished = False
+        context.final_text = ""
+        context.abort_reason = None
+        context.success = False
+        try:
+            self.run_until_idle(context)
+        except KeyboardInterrupt as exc:
+            self.abort(
+                context,
+                reason="interrupted",
+                message="Stopped: interrupted by user (Ctrl+C).",
+                exc=exc,
+            )
+        return context
+
     def finish(self, context: AgentContext) -> None:
         if context.stop_recorded:
             return
@@ -123,7 +142,11 @@ class AgentLoop:
                 }
             )
 
-            tool_schemas = self.runtime.tool_registry.schemas()
+            context.system_prompt = build_system_prompt(
+                self.repo_path,
+                getattr(context, "plan_state", None),
+            )
+            tool_schemas = self._tool_schemas(context)
             max_output_tokens = int(getattr(self.model_client, "max_tokens", 4096))
             preparation = self.runtime.context_manager.prepare_context(
                 context,
@@ -243,6 +266,19 @@ class AgentLoop:
 
             response_action = self._response_action(response)
             if response_action == "final":
+                plan_retry = self._plan_final_retry(context)
+                if plan_retry:
+                    context.add_runtime_message({"role": "user", "content": plan_retry})
+                    context.trace.log(
+                        {
+                            "type": "plan_final_deferred",
+                            "turn_id": turn_id,
+                            "plan_phase": context.plan_state.phase.value,
+                            "reason": plan_retry,
+                        }
+                    )
+                    self._log_turn_end(context, turn_id, turn_started)
+                    continue
                 redactor = getattr(context, "redactor", None)
                 context.final_text = (
                     redactor.redact(response.text)
@@ -325,6 +361,10 @@ class AgentLoop:
                 }
             )
 
+            if not context.finished and self._apply_plan_boundary(context):
+                self._log_turn_end(context, turn_id, turn_started)
+                break
+
             if not context.finished:
                 progress = self.runtime.progress_policy.evaluate(
                     context,
@@ -348,6 +388,80 @@ class AgentLoop:
                     test_result["repair_injected"] = True
 
             self._log_turn_end(context, turn_id, turn_started)
+
+    def _tool_schemas(self, context: AgentContext) -> list[dict]:
+        schemas = self.runtime.tool_registry.schemas
+        try:
+            parameters = signature(schemas).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if parameters:
+            return schemas(context)
+        return schemas()
+
+    def _plan_final_retry(self, context: AgentContext) -> str | None:
+        state = getattr(context, "plan_state", None)
+        if state is None or state.policy is PlanPolicy.OFF:
+            return None
+        if state.execution_path is ExecutionPath.DIRECT:
+            return None
+        if state.phase is PlanPhase.PLANNING:
+            return (
+                "Planning is still active. Use update_plan to create a structured plan and "
+                "submit it before giving a final response."
+            )
+        if state.phase is PlanPhase.EXECUTING:
+            incomplete = [
+                step.id
+                for step in state.steps
+                if step.status is not PlanStepStatus.COMPLETED
+            ]
+            if incomplete:
+                return (
+                    "Plan execution is not complete. Continue the authorized plan and update "
+                    f"the unfinished steps: {', '.join(incomplete[:10])}."
+                )
+            return (
+                "All plan steps are complete, but the lifecycle is still executing. "
+                "Call update_plan with action complete before the final response."
+            )
+        return None
+
+    def _apply_plan_boundary(self, context: AgentContext) -> bool:
+        state = getattr(context, "plan_state", None)
+        if state is None or state.policy is PlanPolicy.OFF:
+            return False
+        if state.phase is PlanPhase.AWAITING_APPROVAL:
+            context.finished = True
+            context.success = False
+            context.abort_reason = None
+            context.final_text = (
+                "Plan is awaiting user approval. No repository changes were executed.\n\n"
+                f"{context.plan_controller.status_text()}"
+            )
+            context.trace.log(
+                {
+                    "type": "plan_awaiting_approval",
+                    "turn_id": context.current_turn_id,
+                    "version": state.version,
+                    "step_count": len(state.steps),
+                }
+            )
+            return True
+        if state.phase is PlanPhase.CANCELLED:
+            context.finished = True
+            context.success = False
+            context.abort_reason = "plan_cancelled"
+            context.final_text = "Stopped: the current plan was cancelled."
+            context.trace.log(
+                {
+                    "type": "plan_execution_cancelled",
+                    "turn_id": context.current_turn_id,
+                    "version": state.version,
+                }
+            )
+            return True
+        return False
 
     def _cancelled_tool_result(
         self,

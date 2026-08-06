@@ -45,6 +45,10 @@ class AgentContext:
     cost_tracker: Any
     diff_manager: Any
     report_writer: Any
+    plan_state: Any
+    plan_controller: Any
+    plan_store: Any
+    plan_gate: Any
     sandbox: Any | None = None
     environment_policy: Any | None = None
     redactor: Any | None = None
@@ -174,6 +178,7 @@ class AgentContext:
         self.task_sequence += 1
         self.task_id = f"task-{self.task_sequence}"
         self.reset_task_state()
+        self.plan_controller.reset(goal=task, policy=self.config.plan_policy)
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)
@@ -240,5 +245,8 @@ class AgentContext:
             "cost": self.cost_tracker.delta(self.task_cost_start),
             "failures": list(self.task_tool_failures),
         }
+        plan_summary = self.plan_state.checkpoint_summary()
+        if plan_summary is not None:
+            summary["plan"] = plan_summary
         self.completed_tasks.append(summary)
         del self.completed_tasks[:-5]

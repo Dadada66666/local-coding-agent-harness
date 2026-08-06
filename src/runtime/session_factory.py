@@ -10,6 +10,7 @@ from runtime.observability.cost_tracker import CostTracker
 from runtime.observability.diff_manager import DiffManager
 from runtime.observability.report_writer import ReportWriter
 from runtime.observability.trace_logger import TraceLogger
+from runtime.plan import PlanController, PlanGate, PlanState, PlanStore
 from runtime.security import PermissionGate
 from runtime.security.access_policy import AccessPolicy
 from runtime.security.environment_policy import EnvironmentPolicy
@@ -60,6 +61,11 @@ def create_agent_session(
     ):
         raise RuntimeError(f"Sandbox requested but unavailable: {sandbox.status.reason}")
 
+    trace = TraceLogger(run_dir, run_id=run_id, redactor=redactor)
+    plan_state = PlanState.initial(session_config.plan_policy, task)
+    plan_store = PlanStore(run_dir, run_id, trace=trace, redactor=redactor)
+    plan_controller = PlanController(plan_state, store=plan_store, trace=trace)
+
     context = AgentContext(
         run_id=run_id,
         task=task,
@@ -71,11 +77,15 @@ def create_agent_session(
         conversation_messages=list(initial_messages),
         permission_mode=session_config.permission_mode,
         permission_gate=PermissionGate(),
-        trace=TraceLogger(run_dir, run_id=run_id, redactor=redactor),
+        trace=trace,
         artifacts=ArtifactStore(run_dir),
         cost_tracker=CostTracker(run_dir),
         diff_manager=DiffManager(repo_path, run_dir),
         report_writer=ReportWriter(),
+        plan_state=plan_state,
+        plan_controller=plan_controller,
+        plan_store=plan_store,
+        plan_gate=PlanGate(),
         sandbox=sandbox,
         access_policy=access_policy,
         environment_policy=environment_policy,
@@ -84,4 +94,6 @@ def create_agent_session(
     if include_initial_message:
         context.task_sequence = 1
         context.task_id = "task-1"
+    if include_initial_message:
+        plan_controller.record_initial_state()
     return context

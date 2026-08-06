@@ -116,7 +116,7 @@ class RuntimeCheckpointBuilder:
             command = test_result.get("command")
             verification["command"] = self._clip(str(command), 500) if command else None
 
-        return {
+        state = {
             "changed_files": changed_files,
             "changed_files_omitted": changed_omitted,
             "created_files": created_files,
@@ -127,6 +127,10 @@ class RuntimeCheckpointBuilder:
             ),
             "verification": verification,
         }
+        plan_summary = self._plan_summary(context)
+        if plan_summary is not None:
+            state["plan"] = plan_summary
+        return state
 
     def _completed_task_summaries(self, context, *, limit: int) -> list[dict[str, Any]]:
         summaries = []
@@ -139,8 +143,7 @@ class RuntimeCheckpointBuilder:
                 item_chars=200,
             )
             verification = value.get("verification") or {}
-            summaries.append(
-                {
+            summary = {
                     "task": self._clip(str(value.get("task", "")), 500),
                     "result": self._clip(str(value.get("result", "")), 800),
                     "changed_files": changed_files,
@@ -151,7 +154,16 @@ class RuntimeCheckpointBuilder:
                         "current": verification.get("current"),
                     },
                 }
-            )
+            plan = value.get("plan")
+            if isinstance(plan, dict):
+                summary["plan"] = {
+                    "policy": plan.get("policy"),
+                    "execution_path": plan.get("execution_path"),
+                    "phase": plan.get("phase"),
+                    "version": plan.get("version"),
+                    "approved_version": plan.get("approved_version"),
+                }
+            summaries.append(summary)
         return summaries
 
     def _emergency_checkpoint(self, context, available_chars: int) -> str:
@@ -171,6 +183,16 @@ class RuntimeCheckpointBuilder:
                 ),
             },
         }
+        plan_summary = self._plan_summary(context, pending_limit=3)
+        if plan_summary is not None:
+            current = plan_summary.get("current_step") or {}
+            plan_summary["current_step"] = current.get("id")
+            plan_summary["pending_steps"] = [
+                step.get("id")
+                for step in plan_summary.get("pending_steps", [])
+                if isinstance(step, dict)
+            ]
+            state["plan"] = plan_summary
         task = str(getattr(context, "task", ""))
         low = 0
         high = len(task)
@@ -296,6 +318,18 @@ class RuntimeCheckpointBuilder:
         head_count = limit // 2
         selected = [*ordered[:head_count], *ordered[-(limit - head_count) :]]
         return selected, len(ordered) - len(selected)
+
+    def _plan_summary(
+        self,
+        context,
+        *,
+        pending_limit: int = 8,
+    ) -> dict[str, Any] | None:
+        plan_state = getattr(context, "plan_state", None)
+        checkpoint_summary = getattr(plan_state, "checkpoint_summary", None)
+        if not callable(checkpoint_summary):
+            return None
+        return checkpoint_summary(pending_limit=pending_limit)
 
     def _compact_json(self, value: Any) -> str:
         return json.dumps(

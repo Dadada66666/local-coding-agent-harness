@@ -1,4 +1,5 @@
 from runtime.config import RunConfig
+from runtime.plan import PlanPolicy
 from runtime.session_factory import create_agent_session
 
 
@@ -47,3 +48,18 @@ def test_create_agent_session_can_start_without_initial_task_message(tmp_path) -
     assert context.conversation_messages == []
     assert context.task_id is None
     assert context.task_sequence == 0
+
+
+def test_interactive_placeholder_does_not_write_plan_snapshot(tmp_path) -> None:
+    context = create_agent_session(
+        repo_path=tmp_path,
+        task="Interactive coding session",
+        permission_mode="accept_edits",
+        config=RunConfig(plan_policy=PlanPolicy.REQUIRED),
+        initial_messages=[],
+        system_prompt="system prompt",
+        include_initial_message=False,
+    )
+
+    assert context.plan_state.policy is PlanPolicy.REQUIRED
+    assert not (context.run_dir / "plan.json").exists()

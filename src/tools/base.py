@@ -33,6 +33,10 @@ class BaseTool(ABC):
     dangerous: bool = False
     concurrency_safe: bool = False
 
+    def is_available(self, context) -> bool:
+        """Return whether this tool should be exposed and callable in the current state."""
+        return True
+
     def schema(self) -> dict:
         return {
             "name": self.name,

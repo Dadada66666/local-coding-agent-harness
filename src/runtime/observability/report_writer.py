@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from runtime.session import AgentContext
+from runtime.plan import PlanPolicy
 
 
 class ReportWriter:
@@ -23,6 +24,7 @@ class ReportWriter:
             "## Status",
             f"Success: {str(context.success).lower()}",
             "",
+            *self._plan_section(context),
             "## Changed Files",
             *self._changed_files(context),
             "",
@@ -68,6 +70,7 @@ class ReportWriter:
             f"- diff: `{context.run_dir / 'diff.patch'}`",
             f"- cost: `{cost_path}`",
             f"- artifacts: `{context.run_dir / 'artifacts'}`",
+            *self._plan_artifact(context),
             "",
         ]
 
@@ -249,3 +252,32 @@ class ReportWriter:
             f"- overflow_recovery_attempts: {getattr(context, 'context_recovery_attempts', 0)}",
             f"- estimated_tokens_saved: {saved_tokens}",
         ]
+
+    def _plan_section(self, context: AgentContext) -> list[str]:
+        state = getattr(context, "plan_state", None)
+        if state is None or state.policy is PlanPolicy.OFF:
+            return []
+        lines = [
+            "## Plan",
+            f"- policy: {state.policy.value}",
+            f"- execution_path: {state.execution_path.value}",
+            f"- phase: {state.phase.value}",
+            f"- version: {state.version}",
+            f"- approved_version: {state.approved_version}",
+            f"- approval_source: {state.approval_source or 'N/A'}",
+            f"- selection_reason: {state.selection_reason or 'N/A'}",
+        ]
+        for step in state.steps[:50]:
+            lines.append(f"- [{step.status.value}] {step.id}: {step.description}")
+        if len(state.steps) > 50:
+            lines.append(f"- ... {len(state.steps) - 50} steps omitted")
+        return [*lines, ""]
+
+    def _plan_artifact(self, context: AgentContext) -> list[str]:
+        state = getattr(context, "plan_state", None)
+        if state is None or state.policy is PlanPolicy.OFF:
+            return []
+        path = context.run_dir / "plan.json"
+        if not path.is_file():
+            return []
+        return [f"- plan: `{path}`"]

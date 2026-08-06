@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from runtime.plan.models import PlanPolicy
+
 
 @dataclass
 class RunConfig:
@@ -29,8 +31,14 @@ class RunConfig:
     sandbox_fail_if_unavailable: bool = False
     sandbox_settings_path: str | None = None
     bash_env_allowlist: tuple[str, ...] = ()
+    plan_policy: PlanPolicy | str = PlanPolicy.OFF
 
     def __post_init__(self) -> None:
+        try:
+            self.plan_policy = PlanPolicy(self.plan_policy)
+        except ValueError as exc:
+            allowed = ", ".join(policy.value for policy in PlanPolicy)
+            raise ValueError(f"plan_policy must be one of: {allowed}") from exc
         if self.max_turns <= 0:
             raise ValueError("max_turns must be > 0")
         if self.max_repair_attempts < 0:

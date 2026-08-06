@@ -234,6 +234,18 @@ class ReadableTraceWriter:
                     f"- tool loop stopped: {event.get('reason', 'no_progress')}, "
                     f"repeat {event.get('repeat_count', 0)}"
                 )
+            elif event_type == "plan_transition":
+                after = event.get("after") or {}
+                notes.append(
+                    f"- plan {event.get('action', 'updated')}: "
+                    f"{after.get('execution_path', 'unknown')} / "
+                    f"{after.get('phase', 'unknown')} v{after.get('version', 0)}"
+                )
+            elif event_type == "plan_gate_blocked":
+                notes.append(
+                    f"- plan gate blocked `{event.get('tool', 'tool')}` in "
+                    f"{event.get('plan_phase', 'unknown')}"
+                )
         return notes
 
     def _suffix(self, text: str) -> str:
