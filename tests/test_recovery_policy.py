@@ -29,12 +29,13 @@ def test_recovery_retry_message_does_not_duplicate_large_tool_output() -> None:
 
     assert "python -m pytest" in message["content"]
     assert "command exited 1" in message["content"]
-    assert "code, tests, environment" in message["content"]
-    assert "command itself" in message["content"]
-    assert "guard expected non-zero checks" in message["content"]
+    assert "Continue the original task" in message["content"]
+    assert "code, tests, environment, or command logic" in message["content"]
+    assert 'exit_expectation="nonzero"' in message["content"]
+    assert "Summarize the entire task" in message["content"]
     assert "fix the code" not in message["content"]
     assert large_output[:100] not in message["content"]
-    assert len(message["content"]) < 300
+    assert len(message["content"]) < 400
 
 
 def test_recovery_policy_injects_once_per_failed_result() -> None:

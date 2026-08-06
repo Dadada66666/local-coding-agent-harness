@@ -134,7 +134,8 @@ Available tools:
 - `bash`: run verification or inspection commands from `WORKDIR`. Commands can
   carry `purpose="verify"` so verification results are reflected in report
   success. Verification commands run fail-fast and cannot include explicit
-  file mutations; shell patching is routed to the structured file tools.
+  file mutations; `exit_expectation="nonzero"` marks an intentionally non-zero
+  overall status. Shell patching is routed to the structured file tools.
 - `view_diff`: show git diff when `WORKDIR` is a git repository; non-git
   directories return a clean "diff unavailable" result.
 

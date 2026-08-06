@@ -24,9 +24,10 @@ class RecoveryPolicy:
         return {
             "role": "user",
             "content": (
-                "Verification failed. Determine whether the cause is code, tests, environment, "
-                "or the command itself; apply only the necessary correction. Verify commands "
-                "are fail-fast, so guard expected non-zero checks.\n\n"
+                "Continue the original task. Diagnose whether verification failed because of "
+                "code, tests, environment, or command logic; make only the necessary correction. "
+                'Verify is fail-fast; use exit_expectation="nonzero" when the overall command is '
+                "expected to fail. Summarize the entire task when done.\n\n"
                 "<test_failure>\n"
                 f"Command: {test.get('command')}\n"
                 f"Error: {test.get('error')}\n\n"

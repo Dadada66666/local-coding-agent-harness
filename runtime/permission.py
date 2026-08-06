@@ -1033,6 +1033,7 @@ class PermissionGate:
                 operation=operation,
                 terminal_on_deny=False,
                 decision_reason="bash_mixed_mutation_verification",
+                metadata={"track_mutation_failure": False},
             )
 
         if bash_risk.get("execution_route") == "structured_tool":
