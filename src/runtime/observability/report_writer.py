@@ -38,8 +38,8 @@ class ReportWriter:
             "## Failure Summary",
             self._failure_summary(context, test_result),
             "",
-            "## Recovered Failures",
-            *self._recovered_failures(context),
+            "## Tool Failures",
+            *self._tool_failures(context),
             "",
             "## Repair Attempts",
             str(context.repair_attempts),
@@ -120,7 +120,7 @@ class ReportWriter:
             return context.final_text
         return "N/A"
 
-    def _recovered_failures(self, context: AgentContext) -> list[str]:
+    def _tool_failures(self, context: AgentContext) -> list[str]:
         failures = getattr(context, "task_tool_failures", [])
         if not failures:
             return ["- N/A"]

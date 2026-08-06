@@ -224,6 +224,16 @@ class ReadableTraceWriter:
                     f"- context overflow recovery {status}: "
                     f"attempt {event.get('attempt', 0)}"
                 )
+            elif event_type == "tool_progress_retry":
+                notes.append(
+                    f"- bounded tool retry: {event.get('reason', 'no_progress')}, "
+                    f"repeat {event.get('repeat_count', 0)}"
+                )
+            elif event_type == "tool_progress_stalled":
+                notes.append(
+                    f"- tool loop stopped: {event.get('reason', 'no_progress')}, "
+                    f"repeat {event.get('repeat_count', 0)}"
+                )
         return notes
 
     def _suffix(self, text: str) -> str:

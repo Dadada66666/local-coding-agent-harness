@@ -52,7 +52,7 @@ def tool_response(*tool_calls: ToolCall, stop_reason: str | None = "tool_use") -
     )
 
 
-def make_runner(tmp_path: Path, model: FakeModelClient, *, max_turns: int = 30) -> AgentLoop:
+def make_runner(tmp_path: Path, model: FakeModelClient, *, max_turns: int = 40) -> AgentLoop:
     return AgentLoop(
         model_client=model,
         runtime=build_runtime(),
@@ -208,6 +208,51 @@ def test_model_call_limit_counts_final_and_tool_turns(tmp_path: Path) -> None:
     assert context.task_model_calls == 1
     assert context.turn_count == 1
     assert model.calls == 1
+
+
+def test_saturated_invalid_tool_loop_stops_after_one_bounded_retry(tmp_path: Path) -> None:
+    responses = [
+        tool_response(ToolCall(f"call_{index}", "write_file", {}))
+        for index in range(3)
+    ]
+    for response in responses:
+        response.usage = TokenUsage(output_tokens=4097)
+    model = FakeModelClient(responses)
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("rewrite a large file", include_initial_message=True)
+
+    runner.run_until_idle(context)
+
+    assert model.calls == 2
+    assert context.task_model_calls == 2
+    assert context.abort_reason == "repeated_tool_failure"
+    assert "write_file" in context.final_text
+    runtime_messages = [
+        message["content"]
+        for message in context.messages
+        if message.get("role") == "user" and isinstance(message.get("content"), str)
+    ]
+    assert sum("reached the output budget" in message for message in runtime_messages) == 1
+    assert _has_trace_type(context.trace.path, "tool_progress_retry")
+    assert _has_trace_type(context.trace.path, "tool_progress_stalled")
+
+
+def test_repeated_invalid_tool_loop_stops_before_model_call_limit(tmp_path: Path) -> None:
+    model = FakeModelClient(
+        [
+            tool_response(ToolCall(f"call_{index}", "write_file", {}))
+            for index in range(4)
+        ]
+    )
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("write a file", include_initial_message=True)
+
+    runner.run_until_idle(context)
+
+    assert model.calls == 3
+    assert context.task_model_calls == 3
+    assert context.abort_reason == "repeated_tool_failure"
+    assert not _has_trace_type(context.trace.path, "max_turns_exceeded")
 
 
 def test_context_overflow_compacts_and_retries_once(tmp_path: Path) -> None:

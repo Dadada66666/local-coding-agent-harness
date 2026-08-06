@@ -63,7 +63,7 @@ def test_write_file_creates_nested_file_and_records_snapshot(tmp_path: Path) -> 
     assert context.read_file_state[str(path)].partial is False
 
 
-def test_write_file_does_not_overwrite_existing_file(tmp_path: Path) -> None:
+def test_write_file_requires_snapshot_before_replacing_existing_file(tmp_path: Path) -> None:
     path = tmp_path / "demo.txt"
     path.write_text("original\n", encoding="utf-8")
     context = make_context(tmp_path)
@@ -74,12 +74,73 @@ def test_write_file_does_not_overwrite_existing_file(tmp_path: Path) -> None:
     )
 
     assert result.ok is False
-    assert result.error == "file exists"
-    assert result.metadata["recovery_tool"] == "edit_file"
+    assert result.error == "file not read"
+    assert result.metadata["recovery_tool"] == "read_file"
     assert result.metadata["delete_not_required"] is True
-    assert "Do not delete and recreate" in result.content
+    assert "do not delete and recreate" in result.content
     assert path.read_text(encoding="utf-8") == "original\n"
     assert context.changed_files == set()
+
+
+def test_write_file_atomically_replaces_snapshotted_file(tmp_path: Path) -> None:
+    path = tmp_path / "demo.txt"
+    path.write_text("original\n", encoding="utf-8")
+    context = make_context(tmp_path)
+    context.record_file_snapshot(path, path.read_bytes(), partial=False)
+
+    result = WriteFileTool().call(
+        {"path": "demo.txt", "content": "replacement\n"},
+        context,
+    )
+
+    assert result.ok is True
+    assert result.metadata["write_mode"] == "replace"
+    assert result.metadata["atomic"] is True
+    assert result.metadata["changed"] is True
+    assert path.read_text(encoding="utf-8") == "replacement\n"
+    assert context.changed_files == {"demo.txt"}
+    assert context.read_file_state[str(path)].partial is False
+
+
+def test_write_file_rejects_partial_or_stale_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "demo.txt"
+    path.write_text("original\n", encoding="utf-8")
+    context = make_context(tmp_path)
+    context.record_file_snapshot(path, path.read_bytes(), partial=True)
+
+    partial = WriteFileTool().call(
+        {"path": "demo.txt", "content": "replacement\n"},
+        context,
+    )
+    assert partial.error == "partial file snapshot"
+
+    context.record_file_snapshot(path, path.read_bytes(), partial=False)
+    path.write_text("external\n", encoding="utf-8")
+    stale = WriteFileTool().call(
+        {"path": "demo.txt", "content": "replacement\n"},
+        context,
+    )
+
+    assert stale.error == "stale file"
+    assert path.read_text(encoding="utf-8") == "external\n"
+    assert context.changed_files == set()
+
+
+def test_write_file_existing_noop_does_not_record_mutation(tmp_path: Path) -> None:
+    path = tmp_path / "demo.txt"
+    path.write_text("same\n", encoding="utf-8")
+    context = make_context(tmp_path)
+    context.record_file_snapshot(path, path.read_bytes(), partial=False)
+
+    result = WriteFileTool().call(
+        {"path": "demo.txt", "content": "same\n"},
+        context,
+    )
+
+    assert result.ok is True
+    assert result.metadata["changed"] is False
+    assert context.changed_files == set()
+    assert context.mutation_version == 0
 
 
 def test_write_file_rejects_existing_directory(tmp_path: Path) -> None:

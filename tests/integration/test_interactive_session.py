@@ -109,6 +109,9 @@ def test_each_interactive_task_gets_an_independent_model_call_budget(tmp_path: P
     runner.submit(context, "first task")
     assert context.success is True
     assert context.task_model_calls == 1
+    context.task_failure_fingerprint = "previous-task"
+    context.task_failure_repeat_count = 2
+    context.task_saturated_invalid_calls = 1
 
     runner.submit(context, "second task")
 
@@ -117,6 +120,13 @@ def test_each_interactive_task_gets_an_independent_model_call_budget(tmp_path: P
     assert context.task_model_calls == 1
     assert context.turn_count == 2
     assert model.calls == 2
+    assert context.task_failure_fingerprint is None
+    assert context.task_failure_repeat_count == 0
+    assert context.task_saturated_invalid_calls == 0
+
+
+def test_default_model_call_budget_allows_complex_single_tasks() -> None:
+    assert RunConfig().max_turns == 40
 
 
 def test_submit_records_task_boundary_and_task_cost(tmp_path: Path) -> None:
@@ -139,7 +149,7 @@ def test_submit_records_task_boundary_and_task_cost(tmp_path: Path) -> None:
     assert "## Session Cost\ncalls=1" in report
 
 
-def test_report_keeps_recovered_tool_failures(tmp_path: Path) -> None:
+def test_report_keeps_tool_failures(tmp_path: Path) -> None:
     model = FakeModelClient([final_response("## Summary\ndone")])
     runner = make_runner(tmp_path, model)
     context = runner.start_interactive()
@@ -152,6 +162,6 @@ def test_report_keeps_recovered_tool_failures(tmp_path: Path) -> None:
 
     report = context.report_writer.write(context).read_text(encoding="utf-8")
 
-    assert "## Recovered Failures\n- turn 3 bash: command exited 22" in report
+    assert "## Tool Failures\n- turn 3 bash: command exited 22" in report
     assert "## Summary\ndone" in report
     assert "## Summary\n## Summary" not in report

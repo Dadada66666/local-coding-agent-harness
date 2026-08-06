@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from runtime.observability.console import print_model_call_start
 from runtime.observability.readable_trace_writer import ReadableTraceWriter
 
 
@@ -20,6 +21,11 @@ def user_prompt_submit_hook(task: str, context) -> None:
         print(f"[workdir] {context.repo_path}")
         context.run_banner_printed = True
 
+    return None
+
+
+def model_call_start_hook(context, task_model_call: int) -> None:
+    print_model_call_start(task_model_call, context.config.max_turns)
     return None
 
 
@@ -97,4 +103,3 @@ def _write_stop_artifact(context, name: str, writer):
 def _print_artifact_path(label: str, path) -> None:
     if path is not None:
         print(f"[{label}] {path}")
-
