@@ -17,22 +17,21 @@ dev = [
 ]
 
 [project.scripts]
-agent = "cli.main:app"
-lcah = "cli.main:app"
+agent = "cli.app:app"
+lcah = "cli.app:app"
 
 [build-system]
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["agent*", "tools*", "runtime*", "cli*"]
-exclude = ["examples*"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "examples/demo_repo/tests"]
-pythonpath = [".", "examples/demo_repo"]
+testpaths = ["tests"]
 

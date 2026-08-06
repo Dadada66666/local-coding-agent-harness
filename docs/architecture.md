@@ -1,0 +1,84 @@
+# Architecture
+
+Local Coding Agent Harness is a small composition-oriented runtime. Its package
+layout keeps orchestration, policy, tools, and output concerns separate without
+adding a framework or dynamic plugin layer.
+
+## Dependency Direction
+
+```text
+cli -> agent -> runtime
+               ^
+tools ---------+
+```
+
+- `cli` translates command-line arguments into `RunConfig` and starts the agent.
+- `agent` owns model interaction, Anthropic message shape, and the agent loop.
+- `runtime` owns session state, execution policy, hooks, context management, and
+  observability.
+- `tools` depend only on low-level runtime operation and security types. They do
+  not import the agent.
+- `runtime.bootstrap` is the composition root for concrete tools, hooks, the
+  executor, context manager, and recovery policy.
+
+Runtime subpackages do not import `cli` or `agent`. `session_factory` receives
+the already-rendered system prompt and initial messages from the agent layer,
+which keeps runtime assembly independent from prompt construction.
+
+## Main Paths
+
+### Agent Loop
+
+`src/agent/loop.py` sends the full Anthropic-compatible request, processes
+assistant text and `tool_use` blocks, returns matching `tool_result` blocks, and
+handles bounded recovery and stop-reason completion rules.
+
+### Runtime Composition
+
+`src/runtime/bootstrap.py` registers tools and hooks in explicit order.
+`src/runtime/session_factory.py` creates the run directory and composes the
+session's security and observability services.
+
+### Tool Registration And Execution
+
+`src/runtime/bootstrap.py::build_tool_registry` registers every concrete tool.
+`src/runtime/executor.py` validates and executes one tool call through the hook
+pipeline. Tool implementations remain one file per tool under `src/tools/`.
+
+### Permission Decisions
+
+`src/runtime/security/risk_classifier.py` classifies Bash effects.
+`src/runtime/security/permission_gate.py` combines the operation, access policy,
+permission mode, session rules, sandbox status, and approval response. The data
+objects shared by these modules live in `permission_models.py`.
+
+### Context Management
+
+`src/runtime/context/manager.py` delegates token measurement, runtime checkpoint
+construction, and tool-result projection to the neighboring context modules.
+The existing layered compaction and bounded overflow recovery behavior remains
+unchanged.
+
+### Traces And Reports
+
+`src/runtime/hooks/` records lifecycle, policy, mutation, verification, and tool
+events. Writers and stores under `src/runtime/observability/` generate
+`trace.jsonl`, `readable_trace.md`, `report.md`, `diff.patch`, `cost.json`, and
+large-output artifacts in `<WORKDIR>/.agent/runs/<run_id>/`.
+
+## Package Layout
+
+```text
+src/
+|-- agent/
+|-- cli/
+|-- runtime/
+|   |-- context/
+|   |-- hooks/
+|   |-- observability/
+|   `-- security/
+`-- tools/
+```
+
+The `src` directory is a source root, not a Python package. Installed imports
+remain `agent.*`, `runtime.*`, `tools.*`, and `cli.*`.
