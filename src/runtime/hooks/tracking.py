@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from runtime.observability.console import print_tool_call
+from runtime.observability.console import print_tool_call, print_tool_validation_failure
 from runtime.observability.text_preview import head_tail_preview
 from runtime.security import BashRisk
 from tools.bash import DEFAULT_TIMEOUT_SECONDS
@@ -202,6 +202,9 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
             "metadata": result.metadata,
         }
     )
+
+    if result.metadata.get("validation_error") or result.metadata.get("unknown_tool"):
+        print_tool_validation_failure(tool_call.name, result.error or "invalid tool call")
 
     return None
 

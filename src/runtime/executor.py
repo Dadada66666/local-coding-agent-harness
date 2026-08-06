@@ -31,7 +31,7 @@ class ToolExecutor:
                 ok=False,
                 content=f"Invalid tool arguments: {exc}",
                 error=str(exc),
-                metadata={"validation_error": True},
+                metadata={"validation_error": True, "track_mutation_failure": False},
             )
             self._trigger_post_tool_use(tool_call, tool, result, context)
             return result

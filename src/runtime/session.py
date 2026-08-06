@@ -63,6 +63,9 @@ class AgentContext:
     task_id: str | None = None
     task_cost_start: dict[str, int] = field(default_factory=dict)
     task_tool_failures: list[dict[str, Any]] = field(default_factory=list)
+    task_failure_fingerprint: str | None = None
+    task_failure_repeat_count: int = 0
+    task_saturated_invalid_calls: int = 0
     repair_attempts: int = 0
     last_test_result: dict | None = None
     task_test_result: dict | None = None
@@ -154,6 +157,9 @@ class AgentContext:
         self.task_start_mutation_version = self.mutation_version
         self.task_model_calls = 0
         self.task_tool_rounds = 0
+        self.task_failure_fingerprint = None
+        self.task_failure_repeat_count = 0
+        self.task_saturated_invalid_calls = 0
         self.repair_attempts = 0
         self.context_recovery_attempts = 0
         self.context_compaction_failures = 0

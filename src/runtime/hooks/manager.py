@@ -7,6 +7,7 @@ from typing import Any
 
 class HookEvent:
     USER_PROMPT_SUBMIT = "UserPromptSubmit"
+    MODEL_CALL_START = "ModelCallStart"
     PRE_TOOL_USE = "PreToolUse"
     POST_TOOL_USE = "PostToolUse"
     STOP = "Stop"

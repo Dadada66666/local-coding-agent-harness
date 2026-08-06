@@ -442,7 +442,7 @@ def test_accept_edits_allows_normal_write_file(tmp_path: Path) -> None:
     assert decision.behavior == PermissionBehavior.ALLOW
 
 
-def test_existing_file_is_tool_failure_not_permission_denial(tmp_path: Path) -> None:
+def test_unsnapshotted_existing_file_is_tool_failure_not_permission_denial(tmp_path: Path) -> None:
     (tmp_path / "normal.py").write_text("x = 1\n", encoding="utf-8")
     runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
     context = runner.create_context("write file", include_initial_message=True)
@@ -453,7 +453,9 @@ def test_existing_file_is_tool_failure_not_permission_denial(tmp_path: Path) -> 
 
     assert decision.behavior == PermissionBehavior.ALLOW
     assert result.ok is False
-    assert result.error == "file exists"
+    assert result.error == "file not read"
+    assert result.metadata["recovery_tool"] == "read_file"
+    assert result.metadata["delete_not_required"] is True
     assert context.denied_permission_scopes == set()
 
 

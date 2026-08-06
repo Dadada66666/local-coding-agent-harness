@@ -106,7 +106,7 @@ agent replay <run_id>
 - `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
 - `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
 - `read_artifact`：通过当前 run 内有效的不透明 ID，分页读取大工具结果；不接受文件系统路径。
-- `write_file`：写入新的 UTF-8 文件。文件已存在属于工具语义失败，不是权限拒绝；已有文件应使用 `edit_file`。成功写入会更新文件 snapshot。
+- `write_file`：写入完整的 UTF-8 文件。新文件使用排他创建；已有文件必须具备完整且最新的 snapshot，并通过原子替换写入。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
 - `delete_file`：删除一个已有 snapshot 的普通文件。`accept_edits` 下可自动清理当前任务创建的文件；删除预先存在的文件需要审批。不支持目录和符号链接。
 - `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；预期整体返回非零状态时可设置 `exit_expectation="nonzero"`。shell patch 会被路由到结构化文件工具。
@@ -122,7 +122,7 @@ agent replay <run_id>
 - 成功编辑会刷新 snapshot，所以同一文件多次编辑不需要无意义地重新读取。
 - no-op edit 会成功返回，但不会标记文件已变更。
 - 交互会话会区分 whole-run 状态和 current-task 状态。上一轮 prompt 的失败验证或 changed files 不会污染下一轮 prompt 的 success inference。
-- `max_turns` 限制每个任务的模型调用次数；交互运行中的 trace turn ID 仍保持全局唯一。
+- `max_turns` 限制每个任务的模型调用次数（默认 40 次）；交互运行中的 trace turn ID 仍保持全局唯一。
 - runtime 会记录并校验模型 `stop_reason`。截断、拒绝或协议不一致的响应不能被报告为成功；未提供 `stop_reason` 的兼容 provider 仍使用内容块判断。
 - 并行工具调用会在一个 user message 中返回全部匹配的 `tool_result`。terminal deny 后未执行的调用会得到显式 cancelled result，保持消息历史合法。
 - 成功验证会绑定当前 mutation version。验证后的文件修改会让证据变为 stale，直到重新运行验证。

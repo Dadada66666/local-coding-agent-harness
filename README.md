@@ -125,9 +125,9 @@ Available tools:
   exception.
 - `read_artifact`: retrieve a bounded slice of a large tool result through an
   opaque ID scoped to the current run; it does not accept filesystem paths.
-- `write_file`: write a new UTF-8 file. Existing files fail as tool semantics,
-  not as permission denials; use `edit_file` for existing files. Successful
-  writes update the file snapshot.
+- `write_file`: write a complete UTF-8 file. Missing files are created exclusively;
+  existing files require a complete, current snapshot and are replaced atomically.
+  Successful writes refresh the file snapshot.
 - `edit_file`: replace exact text in a previously known file snapshot. It
   supports one replacement with `old_text` / `new_text`, or multiple
   replacements with `edits`. Repeated matches remain ambiguous by default;
@@ -159,7 +159,7 @@ Important runtime properties:
 - Interactive sessions separate whole-run state from current-task state. A
   previous prompt's failed verification or changed files cannot poison the next
   prompt's success inference.
-- `max_turns` limits model calls per task, while trace turn IDs remain unique
+- `max_turns` limits model calls per task (40 by default), while trace turn IDs remain unique
   across an interactive run.
 - Model `stop_reason` is recorded and validated. Truncated, refused, or
   protocol-invalid responses cannot be reported as successful completion;

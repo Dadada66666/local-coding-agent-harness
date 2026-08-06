@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from runtime.context.manager import ContextManager
-from runtime.hooks.lifecycle import stop_report_hook, user_prompt_submit_hook
+from runtime.hooks.lifecycle import model_call_start_hook, stop_report_hook, user_prompt_submit_hook
 from runtime.hooks.policy import large_output_hook, permission_hook, secret_redaction_hook
 from runtime.hooks.tracking import (
     failure_history_hook,
@@ -16,6 +16,7 @@ from runtime.hooks.tracking import (
 )
 from runtime.executor import ToolExecutor
 from runtime.hooks import HookEvent, HookManager
+from runtime.progress import ToolProgressPolicy
 from runtime.recovery import RecoveryPolicy
 from tools.bash import BashTool
 from tools.delete_file import DeleteFileTool
@@ -36,6 +37,7 @@ class RuntimeBundle:
     context_manager: ContextManager
     hooks: HookManager
     recovery_policy: RecoveryPolicy
+    progress_policy: ToolProgressPolicy
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -56,6 +58,7 @@ def build_hooks() -> HookManager:
     hooks = HookManager()
 
     hooks.register(HookEvent.USER_PROMPT_SUBMIT, user_prompt_submit_hook)
+    hooks.register(HookEvent.MODEL_CALL_START, model_call_start_hook)
 
     hooks.register(HookEvent.PRE_TOOL_USE, pre_tool_trace_hook)
     hooks.register(HookEvent.PRE_TOOL_USE, permission_hook)
@@ -83,4 +86,5 @@ def build_runtime() -> RuntimeBundle:
         context_manager=ContextManager(),
         hooks=hooks,
         recovery_policy=RecoveryPolicy(),
+        progress_policy=ToolProgressPolicy(),
     )

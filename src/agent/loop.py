@@ -143,6 +143,11 @@ class AgentLoop:
                     "context_soft_limit": preparation.measurement.soft_limit_tokens,
                 }
             )
+            self.runtime.hooks.trigger(
+                HookEvent.MODEL_CALL_START,
+                context=context,
+                task_model_call=context.task_model_calls,
+            )
             request_message_count = len(context.messages)
             model_started = time.monotonic()
             try:
@@ -286,6 +291,7 @@ class AgentLoop:
             tool_batch_started = time.monotonic()
 
             tool_results: list[tuple[str, str, bool]] = []
+            executions = []
             cancelled_count = 0
             for tool_call in response.tool_calls:
                 if context.finished:
@@ -301,6 +307,7 @@ class AgentLoop:
                     continue
 
                 result = self.runtime.executor.execute(tool_call, context)
+                executions.append((tool_call, result))
                 tool_results.append((tool_call.id, result.content, not result.ok))
 
             context.add_tool_results(tool_results)
@@ -317,6 +324,20 @@ class AgentLoop:
                     "message_count": len(context.messages),
                 }
             )
+
+            if not context.finished:
+                progress = self.runtime.progress_policy.evaluate(
+                    context,
+                    response,
+                    executions,
+                    max_output_tokens=max_output_tokens,
+                )
+                if progress.action != "continue":
+                    self._log_tool_progress(context, turn_id, progress, response)
+                if progress.action == "retry" and progress.message:
+                    context.add_runtime_message({"role": "user", "content": progress.message})
+                elif progress.action == "stop":
+                    self._stop_for_tool_stall(context, progress)
 
             if not context.finished and self.runtime.recovery_policy.should_inject_retry(context):
                 retry_message = self.runtime.recovery_policy.build_retry_message(context)
@@ -472,6 +493,37 @@ class AgentLoop:
                 "task_model_calls": getattr(context, "task_model_calls", 0),
                 "message_count": len(context.messages),
             }
+        )
+
+    def _log_tool_progress(self, context, turn_id: int, progress, response) -> None:
+        context.trace.log(
+            {
+                "type": (
+                    "tool_progress_retry"
+                    if progress.action == "retry"
+                    else "tool_progress_stalled"
+                ),
+                "turn_id": turn_id,
+                "reason": progress.reason,
+                "fingerprint": progress.fingerprint,
+                "repeat_count": progress.repeat_count,
+                "saturated_invalid_calls": progress.saturated_invalid_calls,
+                "output_budget_saturated": progress.output_budget_saturated,
+                "output_tokens": getattr(response.usage, "output_tokens", None),
+                "max_output_tokens": int(getattr(self.model_client, "max_tokens", 4096)),
+                "tools": list(progress.tools),
+                "errors": list(progress.errors),
+            }
+        )
+
+    def _stop_for_tool_stall(self, context, progress) -> None:
+        tool = progress.tools[0] if progress.tools else "tool"
+        error = progress.errors[0] if progress.errors else "invalid arguments"
+        context.finished = True
+        context.success = False
+        context.abort_reason = "repeated_tool_failure"
+        context.final_text = (
+            f"Stopped: repeated invalid {tool} calls made no progress ({error})."
         )
 
     def _fail_model_call(

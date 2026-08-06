@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class RunConfig:
-    max_turns: int = 30
+    max_turns: int = 40
     max_repair_attempts: int = 3
     max_tool_result_chars: int = 8000
     max_tool_round_tokens: int = 6000
@@ -69,4 +69,3 @@ class RunConfig:
             raise ValueError("max_context_compaction_failures must be > 0")
         if self.artifact_read_max_chars <= 0:
             raise ValueError("artifact_read_max_chars must be > 0")
-
