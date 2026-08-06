@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from agent.messages import ModelResponse, TokenUsage, ToolCall
 
 
-DEFAULT_MAX_TOKENS = 4096
+DEFAULT_MAX_TOKENS = 16000
 DEFAULT_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 CONTEXT_OVERFLOW_MARKERS = (
     "context length",
