@@ -15,9 +15,16 @@ class ToolRegistry:
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
-    def schemas(self) -> list[dict]:
-        return [tool.schema() for tool in self._tools.values()]
+    def schemas(self, context=None) -> list[dict]:
+        return [
+            tool.schema()
+            for tool in self._tools.values()
+            if tool.is_available(context)
+        ]
 
-    def names(self) -> list[str]:
-        return list(self._tools.keys())
-
+    def names(self, context=None) -> list[str]:
+        return [
+            tool.name
+            for tool in self._tools.values()
+            if tool.is_available(context)
+        ]

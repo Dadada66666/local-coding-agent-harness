@@ -8,6 +8,7 @@ import typer
 
 from agent.factory import build_agent_runner
 from runtime.config import RunConfig
+from runtime.plan import PlanError, PlanPolicy
 from runtime.security import PermissionMode
 
 PROMPT_CYAN = "\033[36m"
@@ -32,7 +33,8 @@ def run_interactive(
     typer.echo(f"WORKDIR: {workdir.resolve()}")
     typer.echo(f"Permission: {permission_mode}")
     typer.echo(f"Sandbox: {context.sandbox.prompt_status() if context.sandbox else 'disabled'}")
-    typer.echo("Enter a task and press Enter. Type q or exit to quit.")
+    typer.echo(f"Plan mode: {config.plan_policy.value}")
+    typer.echo("Enter a task and press Enter. Type q or exit to quit; use /plan-status for plans.")
 
     try:
         while True:
@@ -46,6 +48,11 @@ def run_interactive(
             if query.lower() in {"q", "quit", "exit"}:
                 break
             if not query:
+                continue
+
+            if handle_interactive_command(query, runner, context):
+                if context.abort_reason and context.abort_reason != "plan_cancelled":
+                    break
                 continue
 
             runner.submit(context, query)
@@ -120,3 +127,92 @@ def validate_permission(permission: str) -> None:
     }
     if permission not in allowed:
         raise typer.BadParameter(f"permission must be one of: {', '.join(sorted(allowed))}")
+
+
+def handle_interactive_command(query: str, runner, context) -> bool:
+    if not query.startswith("/"):
+        return False
+
+    command, _, argument = query.partition(" ")
+    argument = argument.strip()
+    try:
+        if command == "/plan-mode":
+            if not argument:
+                raise PlanError("usage: /plan-mode auto|required|off")
+            try:
+                policy = PlanPolicy(argument.lower())
+            except ValueError as exc:
+                raise PlanError("plan mode must be auto, required, or off") from exc
+            context.config.plan_policy = policy
+            typer.echo(
+                f"Plan mode for future tasks: {policy.value}. "
+                "The current task state was not rewritten."
+            )
+            return True
+
+        if command == "/plan-status":
+            typer.echo(context.plan_controller.status_text())
+            return True
+
+        if command == "/plan":
+            if argument:
+                raise PlanError("usage: /plan")
+            if context.task_id is None:
+                raise PlanError("there is no current task; use /plan-mode required first")
+            context.plan_controller.force_plan(
+                reason="User forced plan mode from the interactive CLI.",
+                has_mutations=context.has_task_mutations(),
+            )
+            runner.resume(
+                context,
+                "Runtime notice: the user forced plan mode for this task. Inspect the "
+                "repository read-only and submit a structured plan.",
+            )
+            _echo_current_result(context)
+            return True
+
+        if command == "/approve":
+            if argument:
+                raise PlanError("usage: /approve")
+            context.plan_controller.approve()
+            runner.resume(
+                context,
+                "Runtime notice: the user approved the current plan version. Execute it, "
+                "update step status, and verify the result.",
+            )
+            _echo_current_result(context)
+            return True
+
+        if command == "/revise":
+            if not argument:
+                raise PlanError("usage: /revise <feedback>")
+            context.plan_controller.revise(argument)
+            runner.resume(
+                context,
+                "Runtime notice: the user requested a plan revision. Stay read-only and "
+                f"update the structured plan using this feedback: {argument}",
+            )
+            _echo_current_result(context)
+            return True
+
+        if command == "/cancel-plan":
+            if argument:
+                raise PlanError("usage: /cancel-plan")
+            context.plan_controller.cancel("Cancelled by the user from the interactive CLI.")
+            context.finished = True
+            context.success = False
+            context.abort_reason = "plan_cancelled"
+            context.final_text = "Stopped: the current plan was cancelled by the user."
+            typer.echo(context.final_text)
+            return True
+
+        typer.echo(f"Unknown command: {command}")
+        return True
+    except PlanError as exc:
+        typer.echo(f"Plan command failed: {exc}", err=True)
+        return True
+
+
+def _echo_current_result(context) -> None:
+    if context.final_text:
+        typer.echo(context.final_text)

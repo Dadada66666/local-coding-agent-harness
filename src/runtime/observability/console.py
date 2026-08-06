@@ -29,3 +29,19 @@ def print_model_call_start(call_number: int, max_calls: int) -> None:
     line.append("[model]", style="bold cyan")
     line.append(f" call {call_number}/{max_calls} waiting for response...")
     CONSOLE.print(line)
+
+
+def print_plan_progress(
+    action: str,
+    phase: str,
+    version: int,
+    *,
+    step_id: str | None = None,
+    step_status: str | None = None,
+) -> None:
+    line = Text()
+    line.append("[plan]", style="bold green")
+    line.append(f" {action} -> {phase} v{version}")
+    if step_id and step_status:
+        line.append(f" ({step_id}: {step_status})")
+    CONSOLE.print(line)

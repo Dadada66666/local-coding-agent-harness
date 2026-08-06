@@ -24,6 +24,21 @@ class ToolExecutor:
             self._trigger_post_tool_use(tool_call, self._unknown_tool(tool_call), result, context)
             return result
 
+        if not tool.is_available(context):
+            message = f"Tool is not available in the current runtime state: {tool_call.name}"
+            result = ToolResult(
+                ok=False,
+                content=message,
+                error=message,
+                metadata={
+                    "unavailable_tool": True,
+                    "blocked_by": "tool_availability",
+                    "track_mutation_failure": False,
+                },
+            )
+            self._trigger_post_tool_use(tool_call, tool, result, context)
+            return result
+
         try:
             tool.validate(tool_call.arguments, context)
         except Exception as exc:

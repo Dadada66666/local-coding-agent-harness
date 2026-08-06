@@ -21,6 +21,7 @@ Local Coding Agent Harness 是一个本地 Coding Agent Runtime。它让模型�
 
 - `src/agent/`：agent loop、提示词、模型客户端和消息转换
 - `src/runtime/`：会话状态、工具执行、失败恢复和运行时装配
+- `src/runtime/plan/`：计划策略、生命周期控制器、门禁和审计快照
 - `src/runtime/context/`：上下文预算、检查点、压缩和工具结果投影
 - `src/runtime/security/`：访问策略、权限 Gate、风险分析和 Sandbox
 - `src/runtime/hooks/`：生命周期、策略和状态追踪 Hooks
@@ -96,6 +97,58 @@ agent replay <run_id>
 - `accept_edits`：允许普通文件编辑和安全命令；风险命令仍会被 gate。
 - `manual_approval`：编辑和命令执行前都询问用户。
 
+## Plan Mode
+
+Plan Mode 是可选的 Runtime 能力，包含三种策略：
+
+- `off`：保持原有 agent loop。不会注入计划提示词，不暴露计划工具，不执行计划门禁，也不写入
+  `plan.json`。为保证向后兼容，这是默认值。
+- `auto`：模型可以先使用只读工具检查仓库，但在执行 Bash 或修改仓库前，必须通过
+  `select_execution_mode` 结构化选择 `direct` 或 `plan`。选择 direct 后沿用原流程；选择 plan
+  后保持只读，提交结构化计划后由 Runtime 策略授权该版本并直接执行，不额外等待用户审批。
+- `required`：任务直接进入只读规划。模型提交计划后暂停在 `awaiting_approval`，只有用户能够批准。
+
+启动参数：
+
+```bash
+agent --plan-mode auto
+agent --plan-mode required
+agent --plan-mode off
+agent --plan       # 等价于 --plan-mode required
+agent --no-plan    # 等价于 --plan-mode off
+```
+
+冲突参数会明确报错，不会静默覆盖。交互模式还支持：
+
+```text
+/plan-mode auto|required|off
+/plan
+/approve
+/revise <feedback>
+/cancel-plan
+/plan-status
+```
+
+`/approve` 和 `/revise` 会恢复同一个任务，不会调用 `begin_task()`；模型调用次数、mutation、
+verification、recovery 和上下文预算都保持连续。Auto 模式不使用关键词或 prompt 长度规则判断复杂度，
+而是由模型结合任务与实际仓库，通过可追踪的工具调用作出选择。
+
+Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以及 required 等待批准时，Plan Gate
+会在权限判断前阻止 Bash 和仓库副作用；direct 或已授权执行阶段则把调用交回现有 Permission Gate。
+计划状态本身不会自动批准任何文件或命令权限。
+
+计划工具按状态动态可见：
+
+- `auto + undecided`：显示 `select_execution_mode`
+- `plan + planning/executing`：显示 `update_plan`
+- `off`、direct、completed 和 cancelled：不显示计划工具
+
+活跃计划会原子写入 `<WORKDIR>/.agent/runs/<run_id>/plan.json`，记录策略、模型选择理由、
+计划版本、授权来源、阶段和步骤进度。快照不保存环境数据，并在落盘前脱敏。`plan.json` 是计划决策与
+执行状态的审计快照，不等同于完整会话恢复。
+
+计划子系统明确不实现 SQLite、多 Worker、分布式调度、租约、心跳、后台执行、任意崩溃点恢复或 Web UI。
+
 ## 工具
 
 工具通过 `ToolRegistry` 注册，并由统一的 `ToolExecutor` 执行。每个工具自己负责参数校验、操作分类和工具语义；权限检查、trace 记录、大输出落盘、验证结果追踪等 runtime 逻辑由 hooks 处理。
@@ -111,6 +164,8 @@ agent replay <run_id>
 - `delete_file`：删除一个已有 snapshot 的普通文件。`accept_edits` 下可自动清理当前任务创建的文件；删除预先存在的文件需要审批。不支持目录和符号链接。
 - `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；预期整体返回非零状态时可设置 `exit_expectation="nonzero"`。shell patch 会被路由到结构化文件工具。
 - `view_diff`：在 git 仓库中查看 diff；非 git 目录会返回干净的 "diff unavailable" 结果。
+- `select_execution_mode`：仅在 auto 未决策阶段动态可见，记录模型选择 direct 或 plan 的具体理由。
+- `update_plan`：仅在计划生命周期相关阶段动态可见；维护版本和步骤状态，但不能批准 required 计划。
 
 文件工具由 `AgentContext.safe_path()` 约束，读写不能逃逸 `WORKDIR`。
 
@@ -152,6 +207,7 @@ agent replay <run_id>
 - `report.md`：task/session 成本、变更文件、验证等级、已恢复失败、sandbox 和 artifact
 - `diff.patch`：git diff，非 git 目录会写入清晰占位内容
 - `cost.json`：模型 usage 和每轮 token breakdown 估算
+- `plan.json`：按需生成的计划决策与执行状态审计快照
 - `artifacts/`：完整大工具输出，可在当前 run 内通过不透明 ID 恢复
 
 `cost.json` 会把模型输入/输出拆成 system prompt、tool schemas、user messages、assistant tool calls、tool results、compacted history、assistant text、tool calls 等类别。这个 breakdown 是本地优化估算；provider 返回的 usage 才是计费真实来源。

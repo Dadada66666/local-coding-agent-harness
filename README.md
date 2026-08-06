@@ -25,6 +25,7 @@ Core directories:
 
 - `src/agent/`: agent loop, prompts, model client, and message conversion
 - `src/runtime/`: session state, execution, recovery, and runtime composition
+- `src/runtime/plan/`: plan policy, lifecycle controller, gate, and audit snapshots
 - `src/runtime/context/`: context budgets, checkpoints, compaction, and projection
 - `src/runtime/security/`: access policy, permission gate, risk analysis, and sandbox
 - `src/runtime/hooks/`: lifecycle, policy, and tracking hooks
@@ -107,6 +108,71 @@ Permission modes:
   still gated.
 - `manual_approval`: ask before edits and command execution.
 
+## Plan Mode
+
+Plan mode is an optional runtime capability with three policies:
+
+- `off`: preserve the original loop. Plan prompts, schemas, gates, and
+  `plan.json` are omitted. This is the default for backward compatibility.
+- `auto`: the model may inspect with read-only tools, then must call
+  `select_execution_mode` before Bash or repository mutations. A direct choice
+  continues normally; a plan choice stays read-only until a structured plan is
+  submitted, then the runtime authorizes that version and executes it without
+  a separate user approval.
+- `required`: planning starts immediately and remains read-only. A submitted
+  plan pauses at `awaiting_approval`; only the user can approve it.
+
+Configure a run with:
+
+```bash
+agent --plan-mode auto
+agent --plan-mode required
+agent --plan-mode off
+agent --plan       # alias for --plan-mode required
+agent --no-plan    # alias for --plan-mode off
+```
+
+Conflicting plan options fail instead of silently overriding each other.
+Interactive mode also recognizes:
+
+```text
+/plan-mode auto|required|off
+/plan
+/approve
+/revise <feedback>
+/cancel-plan
+/plan-status
+```
+
+`/approve` and `/revise` resume the same task and preserve its model-call,
+mutation, verification, recovery, and context budgets. They do not create a new
+task. Auto mode does not use a keyword or prompt-length heuristic: the model's
+choice is a structured, traced tool call based on the task and inspected
+repository.
+
+The Plan Gate and Permission Gate have separate responsibilities. Before mode
+selection, while planning, and while required approval is pending, the Plan
+Gate blocks Bash and repository mutation tools before permission evaluation.
+During direct or authorized execution it yields control to the existing
+Permission Gate; plan state never grants filesystem or command permission.
+
+Plan tool visibility is state-aware:
+
+- `auto + undecided`: `select_execution_mode`
+- `plan + planning/executing`: `update_plan`
+- `off`, direct execution, completed plans, and cancelled plans: no plan tools
+
+Each active plan writes an atomic audit snapshot to
+`<WORKDIR>/.agent/runs/<run_id>/plan.json`. It records policy, the model's
+selection reason, plan version, authorization source, phase, and step progress.
+It excludes environment data and is redacted before persistence. `plan.json` is
+a plan decision and execution-state audit snapshot, not a complete session
+recovery mechanism.
+
+The plan subsystem intentionally does not implement SQLite, multi-worker or
+distributed scheduling, leases, heartbeats, background execution, arbitrary
+crash-point recovery, or a Web UI.
+
 ## Tools
 
 Tools are registered through `ToolRegistry` and executed through a shared
@@ -143,6 +209,10 @@ Available tools:
   overall status. Shell patching is routed to the structured file tools.
 - `view_diff`: show git diff when `WORKDIR` is a git repository; non-git
   directories return a clean "diff unavailable" result.
+- `select_execution_mode`: dynamically visible in undecided auto mode; records
+  the model's direct-or-plan choice and reason.
+- `update_plan`: dynamically visible during plan lifecycle work; updates plan
+  versions and step status but cannot approve a required plan.
 
 File tools are constrained by `AgentContext.safe_path()`, so reads and writes
 cannot escape `WORKDIR`; protected-path checks also apply to deletions.
@@ -213,6 +283,7 @@ Artifacts:
   failures, sandbox, and artifacts
 - `diff.patch`: git diff, or a clean non-git placeholder
 - `cost.json`: model usage plus estimated per-turn token breakdown
+- `plan.json`: conditional plan decision and execution-state audit snapshot
 - `artifacts/`: complete large tool outputs, recoverable in-run by opaque ID
 
 `cost.json` breaks model input/output into categories such as system prompt,

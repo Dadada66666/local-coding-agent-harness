@@ -20,6 +20,9 @@ tools ---------+
   not import the agent.
 - `runtime.bootstrap` is the composition root for concrete tools, hooks, the
   executor, context manager, and recovery policy.
+- `runtime.plan` owns the optional plan state machine, lifecycle transitions,
+  pre-permission side-effect gate, and atomic audit snapshot. It does not own
+  filesystem permission decisions.
 
 Runtime subpackages do not import `cli` or `agent`. `session_factory` receives
 the already-rendered system prompt and initial messages from the agent layer,
@@ -52,6 +55,45 @@ pipeline. Tool implementations remain one file per tool under `src/tools/`.
 permission mode, session rules, sandbox status, and approval response. The data
 objects shared by these modules live in `permission_models.py`.
 
+### Plan Decisions
+
+`src/runtime/plan/models.py` separates user policy (`off`, `auto`, `required`),
+the model-selected execution path (`undecided`, `direct`, `plan`), and plan
+lifecycle phase. `controller.py` is the only writer of `PlanState`; tools and
+CLI commands are thin adapters around its checked transitions.
+
+`ToolRegistry.schemas(context)` filters plan tools for the current state.
+`select_execution_mode` is visible only in undecided auto mode, while
+`update_plan` is visible while planning or executing. Existing tools keep their
+default availability.
+
+The pre-tool path is deliberately ordered as:
+
+```text
+validation -> trace -> Plan Gate -> Permission Gate -> Tool.call -> post hooks
+```
+
+Validation remains tool-owned. The Plan Gate only decides whether the current
+plan phase permits side effects; when it yields, the existing Permission Gate
+still evaluates paths, command risk, user rules, and sandbox state. A blocked
+plan call returns a structured `ToolResult`, records trace metadata, and is not
+counted as a mutation, verification attempt, repair failure, or deterministic
+invalid-call loop.
+
+| State | Plan Gate behavior |
+| --- | --- |
+| `off` | Disabled; original tool flow is unchanged. |
+| `auto + undecided` | Allows repository reads and mode selection; blocks Bash and mutations. |
+| `planning` | Allows repository reads and plan updates; blocks Bash and mutations. |
+| `awaiting_approval` | Allows bounded reads; blocks side effects until a user command approves. |
+| `direct` | Yields to the existing Permission Gate. |
+| `executing` | Yields to Permission Gate; plan state never auto-allows the call. |
+
+`src/runtime/plan/store.py` atomically replaces `plan.json` after each active
+state transition. In-memory `context.plan_state` remains authoritative during
+the run. The JSON file is a bounded, redacted audit snapshot, not an arbitrary
+crash-point or full conversation recovery format.
+
 ### Context Management
 
 `src/runtime/context/manager.py` delegates token measurement, runtime checkpoint
@@ -76,6 +118,7 @@ src/
 |   |-- context/
 |   |-- hooks/
 |   |-- observability/
+|   |-- plan/
 |   `-- security/
 `-- tools/
 ```

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from runtime.observability.console import print_tool_call, print_tool_validation_failure
+from runtime.observability.console import (
+    print_plan_progress,
+    print_tool_call,
+    print_tool_validation_failure,
+)
 from runtime.observability.text_preview import head_tail_preview
 from runtime.security import BashRisk
 from tools.bash import DEFAULT_TIMEOUT_SECONDS
@@ -27,6 +31,8 @@ def pre_tool_trace_hook(tool_call, tool, context) -> None:
 
 
 def record_tool_budget_hook(tool_call, tool, result, context) -> None:
+    if result.metadata.get("blocked_by") == "plan_gate":
+        return None
     budget = context.tool_budget
     name = tool_call.name
 
@@ -83,7 +89,11 @@ def mutation_result_hook(tool_call, tool, result, context) -> None:
 
 
 def failure_history_hook(tool_call, tool, result, context) -> None:
-    if result.ok or result.metadata.get("denied"):
+    if (
+        result.ok
+        or result.metadata.get("denied")
+        or result.metadata.get("blocked_by") == "plan_gate"
+    ):
         return None
     failures = getattr(context, "task_tool_failures", None)
     if failures is None:
@@ -206,6 +216,20 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
     if result.metadata.get("validation_error") or result.metadata.get("unknown_tool"):
         print_tool_validation_failure(tool_call.name, result.error or "invalid tool call")
 
+    return None
+
+
+def plan_progress_hook(tool_call, tool, result, context) -> None:
+    action = result.metadata.get("plan_action")
+    if not result.ok or not action:
+        return None
+    print_plan_progress(
+        str(action),
+        str(result.metadata.get("plan_phase", "unknown")),
+        int(result.metadata.get("plan_version", 0) or 0),
+        step_id=result.metadata.get("step_id"),
+        step_status=result.metadata.get("step_status"),
+    )
     return None
 
 

@@ -9,6 +9,7 @@ from agent.factory import build_agent_runner
 from cli.interactive import resolve_permission, run_interactive
 from cli.replay import render_replay
 from runtime.config import RunConfig
+from runtime.plan import PlanPolicy
 
 
 app = typer.Typer(
@@ -44,6 +45,21 @@ def main(
         "--bash-env",
         help="Explicit non-secret environment variable name to pass to Bash. Repeat as needed.",
     ),
+    plan_mode: str | None = typer.Option(
+        None,
+        "--plan-mode",
+        help="Plan policy: off, auto, or required. Defaults to off for compatibility.",
+    ),
+    force_plan: bool = typer.Option(
+        False,
+        "--plan",
+        help="Require a user-approved plan before execution.",
+    ),
+    no_plan: bool = typer.Option(
+        False,
+        "--no-plan",
+        help="Disable plan capabilities.",
+    ),
 ) -> None:
     configure_stdio()
     if ctx.invoked_subcommand is not None:
@@ -57,6 +73,7 @@ def main(
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings=sandbox_settings,
         bash_env=bash_env,
+        plan_policy=resolve_plan_policy(plan_mode, force_plan, no_plan),
     )
 
 
@@ -86,11 +103,19 @@ def run(
         "--bash-env",
         help="Explicit non-secret environment variable name to pass to Bash. Repeat as needed.",
     ),
+    plan_mode: str | None = typer.Option(
+        None,
+        "--plan-mode",
+        help="Plan policy: off, auto, or required. Defaults to off for compatibility.",
+    ),
+    force_plan: bool = typer.Option(False, "--plan", help="Require plan mode."),
+    no_plan: bool = typer.Option(False, "--no-plan", help="Disable plan mode."),
 ) -> None:
     configure_stdio()
     workdir = Path.cwd()
     if task:
         mode = resolve_permission(permission)
+        policy = resolve_plan_policy(plan_mode, force_plan, no_plan)
         config = build_run_config(
             mode,
             sandbox,
@@ -98,6 +123,7 @@ def run(
             sandbox_fail_if_unavailable,
             sandbox_settings,
             bash_env,
+            policy,
         )
         runner = build_agent_runner(repo_path=workdir, permission_mode=mode, config=config)
         context = runner.run(task)
@@ -112,6 +138,7 @@ def run(
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings=sandbox_settings,
         bash_env=bash_env,
+        plan_policy=resolve_plan_policy(plan_mode, force_plan, no_plan),
     )
 
 
@@ -150,6 +177,7 @@ def build_run_config(
     sandbox_fail_if_unavailable: bool,
     sandbox_settings: Path | None,
     bash_env: list[str] | None = None,
+    plan_policy: PlanPolicy | str = PlanPolicy.OFF,
 ) -> RunConfig:
     return RunConfig(
         permission_mode=permission_mode,
@@ -158,6 +186,7 @@ def build_run_config(
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings_path=str(sandbox_settings) if sandbox_settings else None,
         bash_env_allowlist=tuple(bash_env or ()),
+        plan_policy=plan_policy,
     )
 
 
@@ -170,6 +199,7 @@ def start_interactive(
     sandbox_fail_if_unavailable: bool,
     sandbox_settings: Path | None,
     bash_env: list[str] | None,
+    plan_policy: PlanPolicy = PlanPolicy.OFF,
 ) -> None:
     mode = resolve_permission(permission)
     config = build_run_config(
@@ -179,8 +209,33 @@ def start_interactive(
         sandbox_fail_if_unavailable,
         sandbox_settings,
         bash_env,
+        plan_policy,
     )
     run_interactive(workdir=workdir, permission_mode=mode, config=config)
+
+
+def resolve_plan_policy(
+    plan_mode: str | None,
+    force_plan: bool = False,
+    no_plan: bool = False,
+) -> PlanPolicy:
+    if force_plan and no_plan:
+        raise typer.BadParameter("--plan and --no-plan cannot be used together")
+    if plan_mode is not None and (force_plan or no_plan):
+        raise typer.BadParameter(
+            "--plan-mode cannot be combined with --plan or --no-plan"
+        )
+    if force_plan:
+        return PlanPolicy.REQUIRED
+    if no_plan:
+        return PlanPolicy.OFF
+    if plan_mode is None:
+        return PlanPolicy.OFF
+    try:
+        return PlanPolicy(plan_mode.strip().lower())
+    except ValueError as exc:
+        allowed = ", ".join(policy.value for policy in PlanPolicy)
+        raise typer.BadParameter(f"plan mode must be one of: {allowed}") from exc
 
 
 if __name__ == "__main__":
