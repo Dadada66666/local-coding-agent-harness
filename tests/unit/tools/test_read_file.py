@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from agent.messages import ToolCall
@@ -59,6 +60,109 @@ def test_repeated_source_segment_returns_a_non_blocking_hint(tmp_path: Path) -> 
     assert first.metadata["repeated_segment"] is False
     assert second.metadata["repeated_segment"] is True
     assert "already returned unchanged" in second.content
+
+
+def test_paginated_scan_merges_coverage_for_a_951_line_source(tmp_path: Path) -> None:
+    path = tmp_path / "game.js"
+    path.write_text(
+        "\n".join(f"const line{index} = {index};" for index in range(951)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    tool = ReadFileTool()
+
+    offset = 0
+    while offset < 951:
+        result = tool.call({"path": "game.js", "offset": offset, "limit": 200}, context)
+        offset = result.metadata["next_offset"] or 951
+
+    state = context.read_file_segments[str(path)]
+    assert state.covered_ranges == [(0, 951)]
+    assert state.fully_scanned is True
+    assert context.read_file_state[str(path)].partial is False
+
+
+def test_read_file_reports_overlap_before_source_is_fully_scanned(tmp_path: Path) -> None:
+    (tmp_path / "game.js").write_text(
+        "\n".join(f"line {index}" for index in range(951)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    tool = ReadFileTool()
+    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    tool.call({"path": "game.js", "offset": 200, "limit": 200}, context)
+
+    overlap = tool.call({"path": "game.js", "offset": 100, "limit": 200}, context)
+
+    assert overlap.ok is True
+    assert overlap.metadata["already_seen_lines"] == 200
+    assert overlap.metadata["new_lines"] == 0
+    assert overlap.metadata["overlap_ratio"] == 1.0
+
+
+def test_unchanged_fully_scanned_source_uses_lightweight_reread_response(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "game.js").write_text(
+        "\n".join(f"line {index}" for index in range(951)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    tool = ReadFileTool()
+    for offset in range(0, 951, 200):
+        tool.call({"path": "game.js", "offset": offset, "limit": 200}, context)
+
+    redundant = tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    forced = tool.call(
+        {"path": "game.js", "offset": 0, "limit": 200, "force": True},
+        context,
+    )
+
+    assert redundant.ok is True
+    assert redundant.metadata["redundant_source"] is True
+    assert redundant.metadata["returned_lines"] == 0
+    assert "already fully scanned" in redundant.content
+    assert len(redundant.content) < 600
+    assert forced.metadata["redundant_source"] is False
+    assert forced.metadata["returned_lines"] == 200
+
+
+def test_source_mutation_invalidates_coverage(tmp_path: Path) -> None:
+    path = tmp_path / "game.js"
+    path.write_text("\n".join(f"line {index}" for index in range(400)), encoding="utf-8")
+    context = make_context(tmp_path)
+    tool = ReadFileTool()
+    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    tool.call({"path": "game.js", "offset": 200, "limit": 200}, context)
+    old_sha = context.read_file_segments[str(path)].sha256
+
+    path.write_text("changed\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    result = tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+
+    state = context.read_file_segments[str(path)]
+    assert state.sha256 != old_sha
+    assert state.fully_scanned is False
+    assert state.covered_ranges == [(0, 200)]
+    assert result.metadata["overlap_ratio"] == 0.0
+    assert result.metadata["redundant_source"] is False
+
+
+def test_known_write_recomputes_hash_when_stat_signature_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "game.js"
+    path.write_text("one\n", encoding="utf-8")
+    context = make_context(tmp_path)
+    original_stat = path.stat()
+    before = context.record_file_snapshot(path, path.read_bytes(), partial=False)
+
+    path.write_text("two\n", encoding="utf-8")
+    os.utime(path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+    after = context.record_file_snapshot(path, path.read_bytes(), partial=False)
+
+    assert path.stat().st_size == original_stat.st_size
+    assert path.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert after.sha256 != before.sha256
 
 
 def test_adjacent_pages_form_a_complete_edit_snapshot(tmp_path: Path) -> None:

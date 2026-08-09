@@ -77,3 +77,43 @@ def test_plan_and_task_waiting_state_cannot_split(tmp_path) -> None:
 
     with pytest.raises(TaskTransitionError, match="requires task status waiting_user"):
         context.validate_lifecycle_invariants()
+
+
+def test_cancelling_task_also_cancels_nonterminal_plan(tmp_path) -> None:
+    context, runner = make_context(tmp_path)
+    context.begin_task("refactor the game")
+    context.plan_controller.replace_plan(
+        [{"id": "step-1", "description": "Refactor the game module"}]
+    )
+    context.plan_controller.submit_for_execution()
+    context.plan_controller.approve()
+
+    runner.abort(
+        context,
+        reason="interrupted",
+        message="Stopped: interrupted by user (Ctrl+C).",
+        exc=KeyboardInterrupt(),
+    )
+
+    assert context.task_status is TaskStatus.CANCELLED
+    assert context.plan_state.phase is PlanPhase.CANCELLED
+    context.validate_lifecycle_invariants()
+
+
+def test_source_working_set_is_task_local(tmp_path) -> None:
+    source = tmp_path / "demo.py"
+    source.write_text("one\ntwo\n", encoding="utf-8")
+    context, _ = make_context(tmp_path, policy=PlanPolicy.OFF)
+    context.begin_task("inspect source")
+    context.source_read_state(
+        source,
+        requested_path="demo.py",
+        sha256="a" * 64,
+        total_lines=2,
+    ).record_range(0, 2, observation_chars=8, turn_id=1)
+    context.transition_task(TaskStatus.COMPLETED, trigger="test_complete")
+
+    context.begin_task("new task")
+
+    assert context.read_file_segments == {}
+    assert context.source_read_metrics.read_file_calls == 0

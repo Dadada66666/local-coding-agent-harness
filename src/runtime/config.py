@@ -15,7 +15,8 @@ class RunConfig:
     compact_threshold_chars: int = 120000
     context_window_tokens: int | None = None
     context_target_tokens: int | None = 32000
-    context_eager_projection_tokens: int = 12000
+    context_eager_projection_tokens: int | None = 0
+    source_working_set_max_tokens: int | None = None
     context_soft_limit_ratio: float = 0.8
     context_safety_margin_tokens: int = 4096
     context_recent_target_tokens: int = 8000
@@ -64,8 +65,16 @@ class RunConfig:
             raise ValueError("context_window_tokens must be > 0")
         if self.context_target_tokens is not None and self.context_target_tokens <= 0:
             raise ValueError("context_target_tokens must be > 0")
-        if self.context_eager_projection_tokens < 0:
+        if (
+            self.context_eager_projection_tokens is not None
+            and self.context_eager_projection_tokens < 0
+        ):
             raise ValueError("context_eager_projection_tokens must be >= 0")
+        if (
+            self.source_working_set_max_tokens is not None
+            and self.source_working_set_max_tokens <= 0
+        ):
+            raise ValueError("source_working_set_max_tokens must be > 0 when set")
         if not 0 < self.context_soft_limit_ratio <= 1:
             raise ValueError("context_soft_limit_ratio must be between 0 and 1")
         if self.context_safety_margin_tokens < 0:

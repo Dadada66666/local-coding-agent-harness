@@ -27,6 +27,7 @@ class RuntimeCheckpointBuilder:
             "current_task": self._clip(str(getattr(context, "task", "")), 2000),
             "runtime_state": self._runtime_state(context, path_limit=40, include_command=True),
             "recent_file_snapshots": self._file_snapshots(context, limit=10),
+            "source_context": self._source_context(context, limit=12),
             "earlier_user_context": user_context,
             "recent_assistant_notes": assistant_notes,
             "recent_tool_calls": tool_calls,
@@ -56,6 +57,7 @@ class RuntimeCheckpointBuilder:
                     include_command=False,
                 ),
                 "recent_file_snapshots": payload["recent_file_snapshots"][-3:],
+                "source_context": payload["source_context"][-3:],
             }
             rendered = self._compact_json(minimal)
         if len(prefix) + len(rendered) > max_chars:
@@ -319,6 +321,13 @@ class RuntimeCheckpointBuilder:
                 }
             )
         return snapshots
+
+    def _source_context(self, context, *, limit: int) -> list[dict[str, Any]]:
+        manifest = getattr(context, "source_context_manifest", None)
+        if not callable(manifest):
+            return []
+        values = manifest(limit=limit)
+        return values if isinstance(values, list) else []
 
     def _bounded_strings(
         self,

@@ -165,7 +165,12 @@ Gate blocks Bash and repository mutation tools before permission evaluation.
 During direct or authorized execution it yields control to the existing
 Permission Gate; plan state never grants filesystem or command permission.
 
-Plan tool visibility is state-aware:
+Tool visibility is state-aware. Planning exposes only inspection tools and the
+phase-specific plan contract; pending approval with fresh input exposes only
+`resolve_plan_response`. The Plan Gate remains the enforcement boundary for
+forged or stale calls.
+
+Plan tool visibility follows the same capability projection:
 
 - `auto + undecided`: `select_execution_mode`
 - `plan + planning/executing`: `update_plan`
@@ -199,9 +204,10 @@ Available tools:
   metadata.
 - `read_file`: read UTF-8 text with line numbers and record a file snapshot.
   Pages include total lines, returned range, `next_offset`, and `has_more`.
-  Normal source pages are bounded before generic artifact offloading, and an
-  unchanged repeated range receives a non-blocking hint. Non-UTF-8 files return
-  a normal tool failure instead of an unhandled decode exception.
+  Task-local, SHA-bound interval coverage identifies overlap and complete scans.
+  Broad rereads of an unchanged fully scanned source return a small notice;
+  `force=true` explicitly requests a refresh. Non-UTF-8 files return a normal
+  tool failure instead of an unhandled decode exception.
 - `read_artifact`: retrieve a bounded slice of a large tool result through an
   opaque ID scoped to the current run; it does not accept filesystem paths.
 - `write_file`: write a complete UTF-8 file. Missing files are created exclusively;
@@ -271,11 +277,13 @@ Important runtime properties:
   output, and a safety margin. Provider usage anchors the local estimator when
   available. Capacity pressure and the default 32K economic context target use
   the lower limit; a character threshold remains the compatibility fallback.
-- Context reduction is layered: aggregate tool-result budgets persist large
-  observations first, consumed old observations become provenance-preserving
-  retrieval references once the context reaches the eager projection threshold,
-  and full compaction writes a bounded runtime checkpoint while preserving
-  complete recent API rounds. The append-only conversation audit is unchanged.
+- Context reduction is layered. The eager watermark is derived from the economic
+  target by default and uses hysteresis. A bounded active source working set is
+  retained until a paginated scan is coherent and consumed; hard context safety
+  still takes priority. Consumed source slices become line-based source stubs
+  without generic artifacts, while Bash, grep, and log output retain recoverable
+  artifact references. Full compaction includes a bounded source manifest. The
+  append-only conversation audit is unchanged.
 - Interactive task boundaries compact completed history above a token threshold
   into a deterministic checkpoint before the next task starts. The current
   prompt and the append-only audit remain intact.

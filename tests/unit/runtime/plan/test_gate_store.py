@@ -73,9 +73,15 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
         ToolCall("bash-2", "bash", {"command": "echo hello"}),
         context,
     )
+    forged_read = runtime.executor.execute(
+        ToolCall("read-while-waiting", "read_file", {"path": "missing.py"}),
+        context,
+    )
 
     assert planning_result.metadata["plan_phase"] == "planning"
     assert awaiting_result.metadata["plan_phase"] == "awaiting_approval"
+    assert forged_read.metadata["blocked_by"] == "plan_gate"
+    assert forged_read.metadata["plan_phase"] == "awaiting_approval"
     assert context.mutation_version == 0
     assert context.task_unresolved_mutation_failure is False
     assert context.task_tool_failures == []

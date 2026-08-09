@@ -18,6 +18,7 @@ COMPACTABLE_TOOL_RESULTS = {
 }
 PERSISTED_OUTPUT_PREFIX = "<persisted-output>"
 CLEARED_OUTPUT_PREFIX = "[Old tool observation cleared;"
+SOURCE_OUTPUT_PREFIX = "[Source observation compacted;"
 MIN_PROJECTION_SAVINGS_TOKENS = 32
 
 
@@ -51,6 +52,7 @@ class ToolResultProjector:
                 and block.get("type") == "tool_result"
                 and isinstance(block.get("content"), str)
                 and not block["content"].startswith(CLEARED_OUTPUT_PREFIX)
+                and not block["content"].startswith(SOURCE_OUTPUT_PREFIX)
             ]
             total = sum(estimate_value_tokens(block) for block in candidates)
             if total <= limit:
@@ -65,13 +67,30 @@ class ToolResultProjector:
                 before_tokens = estimate_value_tokens(block)
                 tool_name = names.get(tool_use_id, "unknown")
                 source = provenance.get(tool_use_id)
+                metadata = self._result_metadata(context, tool_use_id)
                 minimum_candidate = dict(block)
-                minimum_candidate["content"] = self._persisted_stub(
-                    "artifact_0000000000000000",
-                    tool_name,
-                    source,
-                )
+                if self._is_source_result(tool_name, metadata):
+                    minimum_candidate["content"] = self._source_stub(
+                        context,
+                        metadata,
+                        provenance=source,
+                    )
+                else:
+                    minimum_candidate["content"] = self._persisted_stub(
+                        "artifact_0000000000000000",
+                        tool_name,
+                        source,
+                    )
                 if estimate_value_tokens(minimum_candidate) >= before_tokens:
+                    continue
+                if self._is_source_result(tool_name, metadata):
+                    block["content"] = minimum_candidate["content"]
+                    after_tokens = estimate_value_tokens(block)
+                    reduction = max(before_tokens - after_tokens, 0)
+                    total -= reduction
+                    saved_tokens += reduction
+                    replacement_count += 1
+                    self._mark_source_projected(context, tool_use_id, metadata)
                     continue
                 artifact_id = self.persist_tool_result(context, tool_use_id, original)
                 if artifact_id is None:
@@ -153,6 +172,7 @@ class ToolResultProjector:
         context,
         *,
         compact_before: int,
+        protect_active_sources: bool = True,
     ) -> ToolResultProjection:
         if compact_before <= 0:
             return ToolResultProjection()
@@ -172,6 +192,28 @@ class ToolResultProjector:
                 tool_use_id = str(block["tool_use_id"])
                 tool_name = names.get(tool_use_id, "unknown")
                 source = provenance.get(tool_use_id)
+                metadata = self._result_metadata(context, tool_use_id)
+                if self._is_source_result(tool_name, metadata):
+                    if protect_active_sources and self._protect_source(context, metadata):
+                        metrics = getattr(context, "source_read_metrics", None)
+                        if metrics is not None:
+                            metrics.source_projection_protections += 1
+                        continue
+                    original = str(block["content"])
+                    before_tokens = estimate_value_tokens(block)
+                    block["content"] = self._source_stub(
+                        context,
+                        metadata,
+                        provenance=source,
+                    )
+                    reduction = max(before_tokens - estimate_value_tokens(block), 0)
+                    if reduction < MIN_PROJECTION_SAVINGS_TOKENS:
+                        block["content"] = original
+                        continue
+                    saved_tokens += reduction
+                    compacted_ids.append(tool_use_id)
+                    self._mark_source_projected(context, tool_use_id, metadata)
+                    continue
                 before_tokens = estimate_value_tokens(block)
                 preview_block = deepcopy(block)
                 preview_block["content"] = self._cleared_output(
@@ -309,6 +351,8 @@ class ToolResultProjector:
             return False
         if content.startswith(CLEARED_OUTPUT_PREFIX):
             return False
+        if content.startswith(SOURCE_OUTPUT_PREFIX):
+            return False
         tool_use_id = str(block.get("tool_use_id", ""))
         return names.get(tool_use_id) in COMPACTABLE_TOOL_RESULTS
 
@@ -327,6 +371,63 @@ class ToolResultProjector:
 
     def head_tail(self, text: str, max_chars: int) -> str:
         return head_tail_preview(text, max_chars)
+
+    def _result_metadata(self, context, tool_use_id: str) -> dict[str, Any]:
+        values = getattr(context, "tool_result_metadata", {})
+        value = values.get(tool_use_id, {})
+        return value if isinstance(value, dict) else {}
+
+    def _is_source_slice(self, metadata: dict[str, Any]) -> bool:
+        return metadata.get("projection_kind") == "source_slice"
+
+    def _is_source_result(self, tool_name: str, metadata: dict[str, Any]) -> bool:
+        return tool_name == "read_file" and metadata.get("projection_kind") != "source_notice"
+
+    def _protect_source(self, context, metadata: dict[str, Any]) -> bool:
+        checker = getattr(context, "should_protect_source_observation", None)
+        return bool(checker(metadata)) if callable(checker) else False
+
+    def _mark_source_projected(
+        self,
+        context,
+        tool_use_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        marker = getattr(context, "mark_source_observation_projected", None)
+        if callable(marker):
+            marker(tool_use_id, metadata)
+
+    def _source_stub(
+        self,
+        context,
+        metadata: dict[str, Any],
+        *,
+        provenance: str | None = None,
+    ) -> str:
+        if not metadata:
+            source = provenance or "source metadata unavailable"
+            return (
+                f"{SOURCE_OUTPUT_PREFIX} {source}; "
+                "reopen=read_file with the recorded line cursor]"
+            )
+        path = str(metadata.get("source_path") or metadata.get("resolved_path") or "unknown")
+        sha = str(metadata.get("source_sha256") or "")[:16] or "unknown"
+        start = metadata.get("returned_line_start")
+        end = metadata.get("returned_line_end")
+        offset = max(int(start or 1) - 1, 0)
+        resolved_path = str(metadata.get("resolved_path") or "")
+        state = getattr(context, "read_file_segments", {}).get(resolved_path)
+        unchanged = bool(state is not None and state.sha256 == metadata.get("source_sha256"))
+        fully_scanned = bool(unchanged and state.fully_scanned)
+        recovery = (
+            f"reopen=read_file(path={path}, offset={offset})"
+            if unchanged
+            else "historical=true; current source version changed"
+        )
+        return (
+            f"{SOURCE_OUTPUT_PREFIX} path={path}; sha={sha}; lines={start}-{end}; "
+            f"fully_scanned={str(fully_scanned).lower()}; {recovery}]"
+        )
 
     def mark_context_changed(self, context) -> None:
         marker = getattr(context, "mark_context_changed", None)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 from runtime.operation import Operation
 from runtime.plan import PlanError, PlanStepStatus
 from runtime.plan.capabilities import context_plan_capabilities
@@ -102,6 +104,20 @@ class UpdatePlanTool(BaseTool):
     dangerous = False
     concurrency_safe = False
 
+    def schema(self, context=None) -> dict:
+        schema = super().schema(context)
+        if context is None:
+            return schema
+        actions = context_plan_capabilities(context).update_plan_actions
+        schema["input_schema"] = {
+            "oneOf": [
+                deepcopy(contract)
+                for contract in self.input_schema["oneOf"]
+                if contract["properties"]["action"]["const"] in actions
+            ]
+        }
+        return schema
+
     def is_available(self, context) -> bool:
         if context is None:
             return False
@@ -135,6 +151,13 @@ class UpdatePlanTool(BaseTool):
         action = args.get("action")
         if action not in PLAN_ACTIONS:
             raise ToolValidationError(f"invalid update_plan action: {action}")
+        available_actions = context_plan_capabilities(context).update_plan_actions
+        if action not in available_actions:
+            allowed = ", ".join(sorted(available_actions)) or "none"
+            raise ToolValidationError(
+                f"update_plan action {action} is unavailable in the current phase; "
+                f"allowed actions: {allowed}"
+            )
         action_fields = {
             "replace_plan": {
                 "action",
@@ -184,6 +207,8 @@ class UpdatePlanTool(BaseTool):
     def call(self, args: dict, context) -> ToolResult:
         action = args["action"]
         controller = context.plan_controller
+        before_phase = controller.state.phase
+        before_path = controller.state.execution_path
         try:
             if action == "replace_plan":
                 controller.replace_plan(
@@ -211,6 +236,10 @@ class UpdatePlanTool(BaseTool):
             )
 
         state = controller.state
+        control_plane_transition = (
+            state.phase is not before_phase
+            or state.execution_path is not before_path
+        )
         return ToolResult(
             ok=True,
             content=(
@@ -226,6 +255,7 @@ class UpdatePlanTool(BaseTool):
                 "step_id": args.get("step_id"),
                 "step_status": args.get("status"),
                 "changed": False,
+                "control_plane_transition": control_plane_transition,
             },
         )
 

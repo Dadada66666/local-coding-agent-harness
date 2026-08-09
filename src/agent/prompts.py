@@ -50,6 +50,7 @@ def build_system_prompt(
     plan_state=None,
     *,
     has_user_continuation: bool = False,
+    source_context: list[str] | None = None,
 ) -> str:
     base = BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
@@ -60,9 +61,17 @@ def build_system_prompt(
         plan_state,
         has_user_continuation=has_user_continuation,
     )
-    if not plan_instructions:
-        return base
-    return f"{base.rstrip()}\n\n{plan_instructions}\n"
+    sections = [base.rstrip()]
+    if plan_instructions:
+        sections.append(plan_instructions)
+    if source_context and getattr(plan_state, "phase", None) is not PlanPhase.AWAITING_APPROVAL:
+        entries = "\n".join(f"- {value[:300]}" for value in source_context[:5])
+        sections.append(
+            "Source context:\n"
+            f"{entries}\n"
+            "Avoid restarting a full scan of unchanged files; use grep or narrow reads."
+        )
+    return "\n\n".join(sections) + "\n"
 
 
 def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) -> str:
@@ -91,6 +100,7 @@ def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) 
         return f"""Plan phase: planning (read-only).
 - Inspect actual files and modules; do not modify files or run Bash.
 - Maintain an executable, verifiable structured plan with update_plan.
+- When the plan is complete, prefer replace_plan with submit=true in one call.
 - Use stable unique step ids and concrete repository references.
 - Submit only after the plan is complete. {approval_rule}
 - Do not assume approval or describe a natural-language plan as submitted.{revision}"""

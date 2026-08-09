@@ -221,6 +221,9 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
 
 
 def _record_result_provenance(tool_call, result, context) -> None:
+    metadata_recorder = getattr(context, "record_tool_result_metadata", None)
+    if callable(metadata_recorder):
+        metadata_recorder(tool_call.id, result.metadata or {})
     recorder = getattr(context, "record_tool_result_provenance", None)
     if not callable(recorder):
         return

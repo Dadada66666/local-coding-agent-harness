@@ -27,6 +27,8 @@ __all__ = [
     "ToolResultProjection",
 ]
 PROVIDER_SAVINGS_DISCOUNT = 0.8
+AUTO_EAGER_HIGH_RATIO = 0.72
+EAGER_LOW_RATIO = 0.84
 
 
 @dataclass(frozen=True)
@@ -86,16 +88,24 @@ class ContextManager:
             provider_context_tokens=self._adjusted_provider_anchor(before, projection),
         )
 
-        eager_threshold = int(
-            getattr(context.config, "context_eager_projection_tokens", 0)
-        )
+        eager_threshold, eager_lower = self._eager_watermarks(context.config)
+        eager_active = bool(getattr(context, "eager_projection_active", False))
+        if not eager_active and eager_threshold > 0 and current.used_tokens >= eager_threshold:
+            context.eager_projection_active = True
+            eager_active = True
+        elif eager_active and current.used_tokens <= eager_lower:
+            context.eager_projection_active = False
+            eager_active = False
         if (
             not force
             and not current.should_compact
-            and eager_threshold > 0
-            and current.used_tokens >= eager_threshold
+            and eager_active
+            and current.used_tokens > eager_lower
         ):
-            eager_projection = self._project_consumed_results(context)
+            eager_projection = self._project_consumed_results(
+                context,
+                protect_active_sources=True,
+            )
             if eager_projection.count:
                 after_eager = self._measure(
                     context,
@@ -107,6 +117,8 @@ class ContextManager:
                         eager_projection,
                     ),
                 )
+                if after_eager.used_tokens <= eager_lower:
+                    context.eager_projection_active = False
                 context.context_compaction_failures = 0
                 return self._finish_preparation(
                     context,
@@ -115,7 +127,10 @@ class ContextManager:
                     after_eager,
                     compacted=False,
                     microcompacted=True,
-                    projection=projection,
+                    projection=self._combine_projections(
+                        projection,
+                        eager_projection,
+                    ),
                     reason="eager_tool_result_projection",
                 )
 
@@ -152,7 +167,10 @@ class ContextManager:
 
         microcompacted = False
         try:
-            microprojection = self._project_consumed_results(context)
+            microprojection = self._project_consumed_results(
+                context,
+                protect_active_sources=False,
+            )
             microcompacted = microprojection.count > 0
             after_micro = self._measure(
                 context,
@@ -173,7 +191,10 @@ class ContextManager:
                     after_micro,
                     compacted=False,
                     microcompacted=microcompacted,
-                    projection=projection,
+                    projection=self._combine_projections(
+                        projection,
+                        microprojection,
+                    ),
                     reason=reason or current.trigger_reason or "automatic",
                 )
 
@@ -190,7 +211,10 @@ class ContextManager:
                 after,
                 compacted=compacted,
                 microcompacted=microcompacted,
-                projection=projection,
+                projection=self._combine_projections(
+                    projection,
+                    microprojection,
+                ),
                 reason=reason or current.trigger_reason or "forced",
             )
         except Exception as exc:
@@ -334,6 +358,16 @@ class ContextManager:
         conservative_savings = int(projection.saved_tokens * PROVIDER_SAVINGS_DISCOUNT)
         return max(measurement.provider_tokens - conservative_savings, 0)
 
+    def _combine_projections(
+        self,
+        first: ToolResultProjection,
+        second: ToolResultProjection,
+    ) -> ToolResultProjection:
+        return ToolResultProjection(
+            count=first.count + second.count,
+            saved_tokens=first.saved_tokens + second.saved_tokens,
+        )
+
     def _provider_context_anchor(self, context) -> int | None:
         usage = getattr(context, "last_model_usage", None)
         response_index = getattr(context, "last_model_usage_message_index", None)
@@ -355,15 +389,23 @@ class ContextManager:
         return logical_input + response_output + estimate_messages_tokens(appended)
 
     def _log_measurement(self, context, measurement: ContextMeasurement, *, phase: str) -> None:
-        context.trace.log(
-            {
-                "type": "context_measurement",
-                "phase": phase,
-                **asdict(measurement),
-                "message_count": len(context.messages),
-                "context_generation": getattr(context, "context_generation", 0),
-            }
-        )
+        event = {
+            "type": "context_measurement",
+            "phase": phase,
+            **asdict(measurement),
+            "message_count": len(context.messages),
+            "context_generation": getattr(context, "context_generation", 0),
+        }
+        snapshot = getattr(context, "source_working_set_snapshot", None)
+        if callable(snapshot):
+            working_set = snapshot()
+            event["active_source_files"] = working_set.get("active_source_files", 0)
+            event["active_source_tokens"] = working_set.get("active_source_tokens", 0)
+            event["source_observations_pinned"] = working_set.get(
+                "source_observations_pinned",
+                0,
+            )
+        context.trace.log(event)
 
     def _compact_history(self, context) -> bool:
         groups = self._group_messages_by_api_round(context.messages)
@@ -457,7 +499,12 @@ class ContextManager:
     def _microcompact_consumed_results(self, context) -> bool:
         return self._project_consumed_results(context).count > 0
 
-    def _project_consumed_results(self, context) -> ToolResultProjection:
+    def _project_consumed_results(
+        self,
+        context,
+        *,
+        protect_active_sources: bool = True,
+    ) -> ToolResultProjection:
         consumed_count = min(
             max(int(getattr(context, "last_model_consumed_message_count", 0)), 0),
             len(context.messages),
@@ -472,7 +519,18 @@ class ContextManager:
         return self.projector.compact_consumed_results(
             context,
             compact_before=compact_before,
+            protect_active_sources=protect_active_sources,
         )
+
+    def _eager_watermarks(self, config) -> tuple[int, int]:
+        explicit = getattr(config, "context_eager_projection_tokens", 0)
+        if explicit is not None and int(explicit) > 0:
+            high = int(explicit)
+        else:
+            target = getattr(config, "context_target_tokens", None)
+            high = int(target * AUTO_EAGER_HIGH_RATIO) if target else 0
+        low = int(high * EAGER_LOW_RATIO) if high else 0
+        return high, low
 
     # These small delegates preserve the existing ContextManager extension surface.
     def _enforce_tool_round_budget(self, context) -> ToolResultProjection:

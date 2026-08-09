@@ -70,7 +70,10 @@ Plan decision policy (`off`, `auto`, `required`) and approval policy (`manual`,
 projection in `capabilities.py` is shared by tool visibility and the Plan Gate,
 while the controller remains the authority for state transitions.
 
-`ToolRegistry.schemas(context)` filters plan tools for the current state.
+`ToolRegistry.schemas(context)` applies the same plan-capability projection used
+by Plan Gate. Planning hides mutation tools, approval resolution is exclusive
+after fresh user input, and `update_plan` emits a phase-specific action schema.
+Visibility improves the model contract; Plan Gate remains authoritative.
 `select_execution_mode` is visible only in undecided auto mode, while
 `update_plan` is visible while planning or executing. `resolve_plan_response`
 is visible only while approval is pending and a fresh real-user continuation
@@ -116,6 +119,11 @@ archived before `start_task` creates a new task. Runtime notices use
 
 `src/runtime/context/manager.py` delegates token measurement, runtime checkpoint
 construction, and tool-result projection to the neighboring context modules.
+Task-local source state merges SHA-bound line intervals and supplies a bounded
+active working set. Source slices compact to reconstructible line-coordinate
+stubs rather than per-call artifacts; ephemeral command and search output keeps
+the generic ArtifactStore path. Hard context limits can always override source
+working-set retention.
 Consumed observations are projected before full pressure once the eager token
 threshold is reached, while recent API rounds remain intact. Read-file
 projections retain source path and line provenance. Full compaction and bounded
