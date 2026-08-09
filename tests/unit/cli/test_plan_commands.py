@@ -5,10 +5,16 @@ from types import SimpleNamespace
 import pytest
 import typer
 
-from cli.app import resolve_plan_policy
+from cli.app import resolve_plan_approval_policy, resolve_plan_policy
 from cli.interactive import handle_interactive_command
 from runtime.config import RunConfig
-from runtime.plan import PlanController, PlanPhase, PlanPolicy, PlanState
+from runtime.plan import (
+    PlanApprovalPolicy,
+    PlanController,
+    PlanPhase,
+    PlanPolicy,
+    PlanState,
+)
 
 
 class FakeRunner:
@@ -19,6 +25,9 @@ class FakeRunner:
         self.resume_calls.append(message)
         context.finished = True
         return context
+
+    def resume_runtime(self, context, message: str):
+        return self.resume(context, message)
 
 
 def make_context(policy: PlanPolicy = PlanPolicy.REQUIRED):
@@ -64,6 +73,13 @@ def test_plan_policy_alias_conflicts_are_rejected() -> None:
         resolve_plan_policy("guess", False, False)
 
 
+def test_resolve_plan_approval_policy() -> None:
+    assert resolve_plan_approval_policy("manual") is PlanApprovalPolicy.MANUAL
+    assert resolve_plan_approval_policy("AUTO") is PlanApprovalPolicy.AUTO
+    with pytest.raises(typer.BadParameter, match="plan approval"):
+        resolve_plan_approval_policy("sometimes")
+
+
 def test_approve_resumes_same_task_without_beginning_another() -> None:
     context = make_context()
     context.plan_controller.replace_plan(
@@ -104,6 +120,16 @@ def test_plan_mode_command_changes_future_policy_only() -> None:
 
     assert context.config.plan_policy is PlanPolicy.AUTO
     assert context.plan_state.policy is PlanPolicy.OFF
+
+
+def test_plan_approval_command_changes_future_policy_only() -> None:
+    context = make_context(PlanPolicy.REQUIRED)
+    runner = FakeRunner()
+
+    handle_interactive_command("/plan-approval auto", runner, context)
+
+    assert context.config.plan_approval_policy is PlanApprovalPolicy.AUTO
+    assert context.plan_state.approval_policy is PlanApprovalPolicy.MANUAL
 
 
 def test_cancel_plan_does_not_call_model() -> None:

@@ -12,6 +12,11 @@ class PlanPolicy(StrEnum):
     REQUIRED = "required"
 
 
+class PlanApprovalPolicy(StrEnum):
+    MANUAL = "manual"
+    AUTO = "auto"
+
+
 class ExecutionPath(StrEnum):
     UNDECIDED = "undecided"
     DIRECT = "direct"
@@ -110,6 +115,7 @@ class PlanState:
     execution_path: ExecutionPath
     phase: PlanPhase
     goal: str
+    approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.MANUAL
     steps: list[PlanStep] = field(default_factory=list)
     version: int = 0
     approved_version: int | None = None
@@ -120,11 +126,23 @@ class PlanState:
     updated_at: str = field(default_factory=utc_now)
 
     @classmethod
-    def initial(cls, policy: PlanPolicy | str, goal: str) -> PlanState:
+    def initial(
+        cls,
+        policy: PlanPolicy | str,
+        goal: str,
+        *,
+        approval_policy: PlanApprovalPolicy | str = PlanApprovalPolicy.MANUAL,
+    ) -> PlanState:
         try:
             normalized_policy = PlanPolicy(policy)
         except ValueError as exc:
             raise PlanValidationError(f"invalid plan policy: {policy}") from exc
+        try:
+            normalized_approval_policy = PlanApprovalPolicy(approval_policy)
+        except ValueError as exc:
+            raise PlanValidationError(
+                f"invalid plan approval policy: {approval_policy}"
+            ) from exc
 
         if normalized_policy is PlanPolicy.OFF:
             execution_path = ExecutionPath.DIRECT
@@ -141,6 +159,7 @@ class PlanState:
             execution_path=execution_path,
             phase=phase,
             goal=str(goal).strip(),
+            approval_policy=normalized_approval_policy,
         )
         state.validate()
         return state
@@ -148,6 +167,7 @@ class PlanState:
     def validate(self) -> None:
         try:
             self.policy = PlanPolicy(self.policy)
+            self.approval_policy = PlanApprovalPolicy(self.approval_policy)
             self.execution_path = ExecutionPath(self.execution_path)
             self.phase = PlanPhase(self.phase)
         except ValueError as exc:
@@ -199,8 +219,11 @@ class PlanState:
             } and not self.steps:
                 raise PlanValidationError("an active or completed plan must contain steps")
 
-        if self.phase is PlanPhase.AWAITING_APPROVAL and self.policy is not PlanPolicy.REQUIRED:
-            raise PlanValidationError("only required policy waits for user approval")
+        if (
+            self.phase is PlanPhase.AWAITING_APPROVAL
+            and self.approval_policy is not PlanApprovalPolicy.MANUAL
+        ):
+            raise PlanValidationError("only manual approval policy waits for user approval")
         if self.phase in {PlanPhase.PLANNING, PlanPhase.AWAITING_APPROVAL}:
             if self.approved_version is not None or self.approval_source is not None:
                 raise PlanValidationError("planning phases cannot retain plan authorization")
@@ -208,11 +231,15 @@ class PlanState:
             raise PlanValidationError("executing requires the current plan version to be authorized")
         if self.phase is PlanPhase.EXECUTING:
             expected_source = (
-                "auto_policy" if self.policy is PlanPolicy.AUTO else "user"
+                "auto_policy"
+                if self.approval_policy is PlanApprovalPolicy.AUTO
+                else "user"
             )
             if self.approval_source != expected_source:
                 raise PlanValidationError(
-                    f"executing under {self.policy.value} requires {expected_source} authorization"
+                    "executing under "
+                    f"{self.approval_policy.value} approval requires "
+                    f"{expected_source} authorization"
                 )
         if self.phase is PlanPhase.COMPLETED:
             if self.approved_version != self.version:
@@ -223,6 +250,7 @@ class PlanState:
     def to_dict(self) -> dict[str, Any]:
         return {
             "policy": self.policy.value,
+            "approval_policy": self.approval_policy.value,
             "execution_path": self.execution_path.value,
             "phase": self.phase.value,
             "goal": self.goal,
@@ -250,6 +278,7 @@ class PlanState:
         ][:pending_limit]
         return {
             "policy": self.policy.value,
+            "approval_policy": self.approval_policy.value,
             "execution_path": self.execution_path.value,
             "phase": self.phase.value,
             "version": self.version,

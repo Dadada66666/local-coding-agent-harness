@@ -9,7 +9,7 @@ from agent.factory import build_agent_runner
 from cli.interactive import resolve_permission, run_interactive
 from cli.replay import render_replay
 from runtime.config import RunConfig
-from runtime.plan import PlanPolicy
+from runtime.plan import PlanApprovalPolicy, PlanPolicy
 
 
 app = typer.Typer(
@@ -53,12 +53,17 @@ def main(
     force_plan: bool = typer.Option(
         False,
         "--plan",
-        help="Require a user-approved plan before execution.",
+        help="Require plan mode before execution.",
     ),
     no_plan: bool = typer.Option(
         False,
         "--no-plan",
         help="Disable plan capabilities.",
+    ),
+    plan_approval: str = typer.Option(
+        "manual",
+        "--plan-approval",
+        help="Plan approval policy: manual or auto.",
     ),
 ) -> None:
     configure_stdio()
@@ -74,6 +79,7 @@ def main(
         sandbox_settings=sandbox_settings,
         bash_env=bash_env,
         plan_policy=resolve_plan_policy(plan_mode, force_plan, no_plan),
+        plan_approval_policy=resolve_plan_approval_policy(plan_approval),
     )
 
 
@@ -110,6 +116,11 @@ def run(
     ),
     force_plan: bool = typer.Option(False, "--plan", help="Require plan mode."),
     no_plan: bool = typer.Option(False, "--no-plan", help="Disable plan mode."),
+    plan_approval: str = typer.Option(
+        "manual",
+        "--plan-approval",
+        help="Plan approval policy: manual or auto.",
+    ),
 ) -> None:
     configure_stdio()
     workdir = Path.cwd()
@@ -124,6 +135,7 @@ def run(
             sandbox_settings,
             bash_env,
             policy,
+            resolve_plan_approval_policy(plan_approval),
         )
         runner = build_agent_runner(repo_path=workdir, permission_mode=mode, config=config)
         context = runner.run(task)
@@ -139,6 +151,7 @@ def run(
         sandbox_settings=sandbox_settings,
         bash_env=bash_env,
         plan_policy=resolve_plan_policy(plan_mode, force_plan, no_plan),
+        plan_approval_policy=resolve_plan_approval_policy(plan_approval),
     )
 
 
@@ -178,6 +191,7 @@ def build_run_config(
     sandbox_settings: Path | None,
     bash_env: list[str] | None = None,
     plan_policy: PlanPolicy | str = PlanPolicy.OFF,
+    plan_approval_policy: PlanApprovalPolicy | str = PlanApprovalPolicy.MANUAL,
 ) -> RunConfig:
     return RunConfig(
         permission_mode=permission_mode,
@@ -187,6 +201,7 @@ def build_run_config(
         sandbox_settings_path=str(sandbox_settings) if sandbox_settings else None,
         bash_env_allowlist=tuple(bash_env or ()),
         plan_policy=plan_policy,
+        plan_approval_policy=plan_approval_policy,
     )
 
 
@@ -200,6 +215,7 @@ def start_interactive(
     sandbox_settings: Path | None,
     bash_env: list[str] | None,
     plan_policy: PlanPolicy = PlanPolicy.OFF,
+    plan_approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.MANUAL,
 ) -> None:
     mode = resolve_permission(permission)
     config = build_run_config(
@@ -210,8 +226,17 @@ def start_interactive(
         sandbox_settings,
         bash_env,
         plan_policy,
+        plan_approval_policy,
     )
     run_interactive(workdir=workdir, permission_mode=mode, config=config)
+
+
+def resolve_plan_approval_policy(value: str) -> PlanApprovalPolicy:
+    try:
+        return PlanApprovalPolicy(value.strip().lower())
+    except ValueError as exc:
+        allowed = ", ".join(policy.value for policy in PlanApprovalPolicy)
+        raise typer.BadParameter(f"plan approval must be one of: {allowed}") from exc
 
 
 def resolve_plan_policy(

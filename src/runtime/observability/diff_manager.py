@@ -8,10 +8,12 @@ class DiffManager:
     def __init__(self, repo_path: Path, run_dir: Path) -> None:
         self.repo_path = repo_path
         self.path = run_dir / "diff.patch"
+        self.availability = "unknown"
+        self.reason = "not generated"
 
     def write_patch(self, context=None) -> Path:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self._is_git_work_tree():
+        if self.probe_availability() != "available":
             self.path.write_text("No git repository; diff unavailable.\n", encoding="utf-8")
             return self.path
 
@@ -25,8 +27,12 @@ class DiffManager:
             check=False,
         )
         if completed.returncode == 0:
+            self.availability = "available"
+            self.reason = "git diff completed"
             content = completed.stdout
         else:
+            self.availability = "failed"
+            self.reason = f"git diff exited with {completed.returncode}"
             content = (
                 f"git diff failed with exit code {completed.returncode}.\n\n"
                 f"{completed.stderr or completed.stdout or ''}"
@@ -36,6 +42,17 @@ class DiffManager:
             content = redactor.redact(content)
         self.path.write_text(content, encoding="utf-8")
         return self.path
+
+    def probe_availability(self) -> str:
+        if self.availability != "unknown":
+            return self.availability
+        if self._is_git_work_tree():
+            self.availability = "available"
+            self.reason = "git repository detected"
+        else:
+            self.availability = "unavailable"
+            self.reason = "workdir is not a git repository"
+        return self.availability
 
     def _is_git_work_tree(self) -> bool:
         completed = subprocess.run(

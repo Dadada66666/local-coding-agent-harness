@@ -17,12 +17,18 @@ class ReportWriter:
         lines = [
             "# Agent Run Report",
             "",
+            "## Session",
+            f"Run ID: {context.run_id}",
+            f"Status: {self._task_status(context)}",
+            "",
             "## Task",
             self._task_summary(context),
             f"ID: {getattr(context, 'task_id', None) or 'N/A'}",
+            f"Status: {self._task_status(context)}",
+            f"Waiting reason: {getattr(context, 'task_waiting_reason', None) or 'N/A'}",
             "",
             "## Status",
-            f"Success: {str(context.success).lower()}",
+            f"Success: {self._success_status(context)}",
             "",
             *self._plan_section(context),
             "## Changed Files",
@@ -61,6 +67,10 @@ class ReportWriter:
             "## Tool Efficiency",
             *self._tool_efficiency(context),
             "",
+            "## Diff",
+            *self._diff_summary(context),
+            "",
+            *self._completed_tasks_section(context),
             "## Summary",
             self._final_summary(context),
             "",
@@ -113,6 +123,8 @@ class ReportWriter:
         return context.last_test_result or {}
 
     def _failure_summary(self, context: AgentContext, test_result: dict) -> str:
+        if self._task_status(context) == "waiting_user":
+            return "N/A (task is waiting for user input)"
         if context.success is True:
             return "N/A"
         if test_result.get("error"):
@@ -141,6 +153,36 @@ class ReportWriter:
 
     def _task_summary(self, context: AgentContext) -> str:
         return context.task
+
+    def _task_status(self, context: AgentContext) -> str:
+        return getattr(getattr(context, "task_status", None), "value", "unknown")
+
+    def _success_status(self, context: AgentContext) -> str:
+        if self._task_status(context) == "waiting_user":
+            return "pending"
+        return str(context.success).lower()
+
+    def _completed_tasks_section(self, context: AgentContext) -> list[str]:
+        tasks = getattr(context, "completed_tasks", [])
+        if not tasks:
+            return []
+        lines = ["## Completed Tasks"]
+        for task in tasks[-5:]:
+            lines.append(
+                f"- {task.get('task_id', 'N/A')} [{task.get('status', 'unknown')}]: "
+                f"{task.get('task', '')}"
+            )
+        return [*lines, ""]
+
+    def _diff_summary(self, context: AgentContext) -> list[str]:
+        manager = context.diff_manager
+        probe = getattr(manager, "probe_availability", None)
+        if callable(probe):
+            probe()
+        return [
+            f"- availability: {getattr(manager, 'availability', 'unknown')}",
+            f"- reason: {getattr(manager, 'reason', 'unknown')}",
+        ]
 
     def _changed_files(self, context: AgentContext) -> list[str]:
         changed_files = getattr(context, "task_changed_files", context.changed_files)
@@ -260,6 +302,7 @@ class ReportWriter:
         lines = [
             "## Plan",
             f"- policy: {state.policy.value}",
+            f"- approval_policy: {state.approval_policy.value}",
             f"- execution_path: {state.execution_path.value}",
             f"- phase: {state.phase.value}",
             f"- version: {state.version}",

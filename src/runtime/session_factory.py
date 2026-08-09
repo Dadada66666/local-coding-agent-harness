@@ -17,6 +17,7 @@ from runtime.security.environment_policy import EnvironmentPolicy
 from runtime.security.redaction import SecretRedactor
 from runtime.security.sandbox import SandboxRuntime
 from runtime.session import AgentContext
+from runtime.task import TaskStatus
 
 
 def make_run_id() -> str:
@@ -62,7 +63,11 @@ def create_agent_session(
         raise RuntimeError(f"Sandbox requested but unavailable: {sandbox.status.reason}")
 
     trace = TraceLogger(run_dir, run_id=run_id, redactor=redactor)
-    plan_state = PlanState.initial(session_config.plan_policy, task)
+    plan_state = PlanState.initial(
+        session_config.plan_policy,
+        task,
+        approval_policy=session_config.plan_approval_policy,
+    )
     plan_store = PlanStore(run_dir, run_id, trace=trace, redactor=redactor)
     plan_controller = PlanController(plan_state, store=plan_store, trace=trace)
 
@@ -94,6 +99,14 @@ def create_agent_session(
     if include_initial_message:
         context.task_sequence = 1
         context.task_id = "task-1"
+        context.transition_task(
+            TaskStatus.RUNNING,
+            trigger="initial_task",
+            new_task=True,
+            persist_plan_snapshot=False,
+        )
+    plan_controller.set_transition_listener(context.on_plan_transition)
+    plan_store.bind_context(context)
     if include_initial_message:
         plan_controller.record_initial_state()
     return context

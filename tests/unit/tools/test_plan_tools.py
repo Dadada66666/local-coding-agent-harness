@@ -37,6 +37,7 @@ def test_plan_tool_discoverability_tracks_context_state(tmp_path) -> None:
     assert "update_plan" not in schema_names(runtime, auto)
     assert "select_execution_mode" not in schema_names(runtime, required)
     assert "update_plan" in schema_names(runtime, required)
+    assert "resolve_plan_response" not in schema_names(runtime, required)
     assert "read_file" in schema_names(runtime, off)
     assert "write_file" in schema_names(runtime, required)
     assert "select_execution_mode" not in schema_names(runtime)
@@ -124,7 +125,7 @@ def test_update_plan_combines_replace_and_submission(tmp_path) -> None:
                         "description": "Add the state controller",
                     }
                 ],
-                "ready_for_approval": True,
+                "submit": True,
             },
         ),
         context,
@@ -133,6 +134,44 @@ def test_update_plan_combines_replace_and_submission(tmp_path) -> None:
     assert result.ok is True
     assert context.plan_state.phase is PlanPhase.AWAITING_APPROVAL
     assert context.plan_state.approved_version is None
+
+
+def test_update_plan_schema_uses_action_specific_contracts() -> None:
+    schema = build_runtime().tool_registry.get("update_plan").input_schema
+
+    assert "oneOf" in schema
+    assert len(schema["oneOf"]) == 6
+    replace_contract = next(
+        contract
+        for contract in schema["oneOf"]
+        if contract["properties"]["action"].get("const") == "replace_plan"
+    )
+    assert set(replace_contract["required"]) == {"action", "steps"}
+    assert "submit" in replace_contract["properties"]
+
+
+def test_plan_response_tool_requires_fresh_user_continuation(tmp_path) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+    context.begin_task("plan the change")
+    context.plan_controller.replace_plan(
+        [{"id": "step-1", "description": "Implement the change"}]
+    )
+    context.plan_controller.submit_for_execution()
+
+    assert "resolve_plan_response" not in schema_names(runtime, context)
+
+    context.add_user_continuation("approve the plan")
+    assert "resolve_plan_response" in schema_names(runtime, context)
+    result = runtime.executor.execute(
+        ToolCall("resolve", "resolve_plan_response", {"action": "approve"}),
+        context,
+    )
+
+    assert result.ok is True
+    assert context.plan_state.phase is PlanPhase.EXECUTING
+    assert context.has_pending_user_continuation() is False
+    assert "resolve_plan_response" not in schema_names(runtime, context)
 
 
 def test_hidden_plan_tool_cannot_be_invoked_by_name(tmp_path) -> None:

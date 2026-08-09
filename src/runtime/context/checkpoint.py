@@ -117,6 +117,13 @@ class RuntimeCheckpointBuilder:
             verification["command"] = self._clip(str(command), 500) if command else None
 
         state = {
+            "task_id": getattr(context, "task_id", None),
+            "task_status": getattr(
+                getattr(context, "task_status", None),
+                "value",
+                None,
+            ),
+            "waiting_reason": getattr(context, "task_waiting_reason", None),
             "changed_files": changed_files,
             "changed_files_omitted": changed_omitted,
             "created_files": created_files,
@@ -144,6 +151,8 @@ class RuntimeCheckpointBuilder:
             )
             verification = value.get("verification") or {}
             summary = {
+                    "task_id": value.get("task_id"),
+                    "status": value.get("status"),
                     "task": self._clip(str(value.get("task", "")), 500),
                     "result": self._clip(str(value.get("result", "")), 800),
                     "changed_files": changed_files,
@@ -170,6 +179,12 @@ class RuntimeCheckpointBuilder:
         test_result = getattr(context, "task_test_result", None) or {}
         verification_version = getattr(context, "task_verification_version", None)
         state = {
+            "task_id": getattr(context, "task_id", None),
+            "task_status": getattr(
+                getattr(context, "task_status", None),
+                "value",
+                None,
+            ),
             "mutation_version": getattr(context, "mutation_version", 0),
             "unresolved_mutation_failure": bool(
                 getattr(context, "task_unresolved_mutation_failure", False)

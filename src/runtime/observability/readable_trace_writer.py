@@ -17,7 +17,10 @@ class ReadableTraceWriter:
             "# Readable Trace",
             "",
             f"Run: `{context.run_id}`",
-            f"Task: {context.task}",
+            f"Current task: {context.task}",
+            f"Task ID: `{getattr(context, 'task_id', None) or 'N/A'}`",
+            "Task status: "
+            f"`{getattr(getattr(context, 'task_status', None), 'value', 'unknown')}`",
             "",
         ]
 
@@ -57,8 +60,9 @@ class ReadableTraceWriter:
             text = self._user_text(content)
             if text is None:
                 return []
+            heading = "Runtime" if message.get("runtime_origin") else "User"
             return [
-                f"## {index}. User",
+                f"## {index}. {heading}",
                 "",
                 "```text",
                 text,
@@ -240,6 +244,12 @@ class ReadableTraceWriter:
                     f"- plan {event.get('action', 'updated')}: "
                     f"{after.get('execution_path', 'unknown')} / "
                     f"{after.get('phase', 'unknown')} v{after.get('version', 0)}"
+                )
+            elif event_type == "task_transition":
+                notes.append(
+                    f"- task {event.get('task_id', 'N/A')}: "
+                    f"{event.get('before', 'unknown')} -> {event.get('after', 'unknown')} "
+                    f"({event.get('trigger', 'unknown')})"
                 )
             elif event_type == "plan_gate_blocked":
                 notes.append(

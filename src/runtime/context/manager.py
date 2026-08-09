@@ -86,6 +86,39 @@ class ContextManager:
             provider_context_tokens=self._adjusted_provider_anchor(before, projection),
         )
 
+        eager_threshold = int(
+            getattr(context.config, "context_eager_projection_tokens", 0)
+        )
+        if (
+            not force
+            and not current.should_compact
+            and eager_threshold > 0
+            and current.used_tokens >= eager_threshold
+        ):
+            eager_projection = self._project_consumed_results(context)
+            if eager_projection.count:
+                after_eager = self._measure(
+                    context,
+                    system,
+                    tools,
+                    max_output_tokens,
+                    provider_context_tokens=self._adjusted_provider_anchor(
+                        current,
+                        eager_projection,
+                    ),
+                )
+                context.context_compaction_failures = 0
+                return self._finish_preparation(
+                    context,
+                    before,
+                    current,
+                    after_eager,
+                    compacted=False,
+                    microcompacted=True,
+                    projection=projection,
+                    reason="eager_tool_result_projection",
+                )
+
         if not force and not current.should_compact:
             if projection.count:
                 self._log_measurement(context, current, phase="after")

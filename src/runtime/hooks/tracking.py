@@ -198,6 +198,7 @@ def test_result_hook(tool_call, tool, result, context) -> None:
 
 
 def post_tool_trace_hook(tool_call, tool, result, context) -> None:
+    _record_result_provenance(tool_call, result, context)
     context.trace.log(
         {
             "type": "tool_result",
@@ -217,6 +218,28 @@ def post_tool_trace_hook(tool_call, tool, result, context) -> None:
         print_tool_validation_failure(tool_call.name, result.error or "invalid tool call")
 
     return None
+
+
+def _record_result_provenance(tool_call, result, context) -> None:
+    recorder = getattr(context, "record_tool_result_provenance", None)
+    if not callable(recorder):
+        return
+    metadata = result.metadata or {}
+    if tool_call.name == "read_file" and metadata.get("requested_path"):
+        start = metadata.get("returned_line_start")
+        end = metadata.get("returned_line_end")
+        line_range = f"{start}-{end}" if start is not None else "empty"
+        recorder(
+            tool_call.id,
+            f"path={metadata['requested_path']}; lines={line_range}; "
+            f"next_offset={metadata.get('next_offset')}",
+        )
+    elif tool_call.name == "read_artifact" and metadata.get("artifact_id"):
+        recorder(
+            tool_call.id,
+            f"artifact_id={metadata['artifact_id']}; offset={metadata.get('offset')}; "
+            f"next_offset={metadata.get('next_offset')}",
+        )
 
 
 def plan_progress_hook(tool_call, tool, result, context) -> None:

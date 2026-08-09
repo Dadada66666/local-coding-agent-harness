@@ -8,8 +8,9 @@ import typer
 
 from agent.factory import build_agent_runner
 from runtime.config import RunConfig
-from runtime.plan import PlanError, PlanPolicy
+from runtime.plan import PlanApprovalPolicy, PlanError, PlanPolicy
 from runtime.security import PermissionMode
+from runtime.task import TaskStatus
 
 PROMPT_CYAN = "\033[36m"
 PROMPT_RESET = "\033[0m"
@@ -34,6 +35,7 @@ def run_interactive(
     typer.echo(f"Permission: {permission_mode}")
     typer.echo(f"Sandbox: {context.sandbox.prompt_status() if context.sandbox else 'disabled'}")
     typer.echo(f"Plan mode: {config.plan_policy.value}")
+    typer.echo(f"Plan approval: {config.plan_approval_policy.value}")
     typer.echo("Enter a task and press Enter. Type q or exit to quit; use /plan-status for plans.")
 
     try:
@@ -55,7 +57,10 @@ def run_interactive(
                     break
                 continue
 
-            runner.submit(context, query)
+            if context.task_status is TaskStatus.WAITING_USER:
+                runner.continue_task(context, query)
+            else:
+                runner.start_task(context, query)
             if context.final_text:
                 typer.echo(context.final_text)
             if context.abort_reason:
@@ -154,16 +159,32 @@ def handle_interactive_command(query: str, runner, context) -> bool:
             typer.echo(context.plan_controller.status_text())
             return True
 
+        if command == "/plan-approval":
+            if not argument:
+                raise PlanError("usage: /plan-approval manual|auto")
+            try:
+                approval_policy = PlanApprovalPolicy(argument.lower())
+            except ValueError as exc:
+                raise PlanError("plan approval must be manual or auto") from exc
+            context.config.plan_approval_policy = approval_policy
+            typer.echo(
+                f"Plan approval for future tasks: {approval_policy.value}. "
+                "The current task state was not rewritten."
+            )
+            return True
+
         if command == "/plan":
             if argument:
                 raise PlanError("usage: /plan")
             if context.task_id is None:
                 raise PlanError("there is no current task; use /plan-mode required first")
+            if context.task_status is not TaskStatus.RUNNING:
+                raise PlanError("/plan requires a currently running task")
             context.plan_controller.force_plan(
                 reason="User forced plan mode from the interactive CLI.",
                 has_mutations=context.has_task_mutations(),
             )
-            runner.resume(
+            runner.resume_runtime(
                 context,
                 "Runtime notice: the user forced plan mode for this task. Inspect the "
                 "repository read-only and submit a structured plan.",
@@ -175,7 +196,7 @@ def handle_interactive_command(query: str, runner, context) -> bool:
             if argument:
                 raise PlanError("usage: /approve")
             context.plan_controller.approve()
-            runner.resume(
+            runner.resume_runtime(
                 context,
                 "Runtime notice: the user approved the current plan version. Execute it, "
                 "update step status, and verify the result.",
@@ -187,7 +208,7 @@ def handle_interactive_command(query: str, runner, context) -> bool:
             if not argument:
                 raise PlanError("usage: /revise <feedback>")
             context.plan_controller.revise(argument)
-            runner.resume(
+            runner.resume_runtime(
                 context,
                 "Runtime notice: the user requested a plan revision. Stay read-only and "
                 f"update the structured plan using this feedback: {argument}",

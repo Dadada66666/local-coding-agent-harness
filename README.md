@@ -117,10 +117,13 @@ Plan mode is an optional runtime capability with three policies:
 - `auto`: the model may inspect with read-only tools, then must call
   `select_execution_mode` before Bash or repository mutations. A direct choice
   continues normally; a plan choice stays read-only until a structured plan is
-  submitted, then the runtime authorizes that version and executes it without
-  a separate user approval.
-- `required`: planning starts immediately and remains read-only. A submitted
-  plan pauses at `awaiting_approval`; only the user can approve it.
+  submitted.
+- `required`: planning starts immediately and remains read-only.
+
+Execution-path policy and approval policy are independent. Approval defaults to
+`manual`, so a submitted plan pauses at `awaiting_approval` under both `auto`
+and `required`. Use `--plan-approval auto` only when submitted plans should be
+authorized without user input.
 
 Configure a run with:
 
@@ -130,6 +133,8 @@ agent --plan-mode required
 agent --plan-mode off
 agent --plan       # alias for --plan-mode required
 agent --no-plan    # alias for --plan-mode off
+agent --plan-mode auto --plan-approval manual
+agent --plan-mode auto --plan-approval auto
 ```
 
 Conflicting plan options fail instead of silently overriding each other.
@@ -137,6 +142,7 @@ Interactive mode also recognizes:
 
 ```text
 /plan-mode auto|required|off
+/plan-approval manual|auto
 /plan
 /approve
 /revise <feedback>
@@ -148,7 +154,10 @@ Interactive mode also recognizes:
 mutation, verification, recovery, and context budgets. They do not create a new
 task. Auto mode does not use a keyword or prompt-length heuristic: the model's
 choice is a structured, traced tool call based on the task and inspected
-repository.
+repository. Ordinary text entered while a plan is waiting is a continuation of
+that task. A dynamically visible `resolve_plan_response` tool interprets the
+real response as approval, revision, or cancellation; it is unavailable unless
+new user input exists, and the runtime uses no keyword approval table.
 
 The Plan Gate and Permission Gate have separate responsibilities. Before mode
 selection, while planning, and while required approval is pending, the Plan
@@ -160,11 +169,13 @@ Plan tool visibility is state-aware:
 
 - `auto + undecided`: `select_execution_mode`
 - `plan + planning/executing`: `update_plan`
+- `awaiting_approval + fresh user response`: `resolve_plan_response`
 - `off`, direct execution, completed plans, and cancelled plans: no plan tools
 
 Each active plan writes an atomic audit snapshot to
-`<WORKDIR>/.agent/runs/<run_id>/plan.json`. It records policy, the model's
-selection reason, plan version, authorization source, phase, and step progress.
+`<WORKDIR>/.agent/runs/<run_id>/plan.json`. It records decision and approval
+policies, task ID/status, the model's selection reason, plan version,
+authorization source, phase, and step progress.
 It excludes environment data and is redacted before persistence. `plan.json` is
 a plan decision and execution-state audit snapshot, not a complete session
 recovery mechanism.
@@ -187,8 +198,10 @@ Available tools:
 - `grep`: search UTF-8 repository text with match limits and truncation
   metadata.
 - `read_file`: read UTF-8 text with line numbers and record a file snapshot.
-  Non-UTF-8 files return a normal tool failure instead of an unhandled decode
-  exception.
+  Pages include total lines, returned range, `next_offset`, and `has_more`.
+  Normal source pages are bounded before generic artifact offloading, and an
+  unchanged repeated range receives a non-blocking hint. Non-UTF-8 files return
+  a normal tool failure instead of an unhandled decode exception.
 - `read_artifact`: retrieve a bounded slice of a large tool result through an
   opaque ID scoped to the current run; it does not accept filesystem paths.
 - `write_file`: write a complete UTF-8 file. Missing files are created exclusively;
@@ -212,7 +225,10 @@ Available tools:
 - `select_execution_mode`: dynamically visible in undecided auto mode; records
   the model's direct-or-plan choice and reason.
 - `update_plan`: dynamically visible during plan lifecycle work; updates plan
-  versions and step status but cannot approve a required plan.
+  versions and step status. Its action-specific schema supports replacing and
+  submitting a plan in one call but cannot approve a manual plan.
+- `resolve_plan_response`: visible only while a plan awaits approval and a fresh
+  user continuation exists; records approve, revise, or cancel structurally.
 
 File tools are constrained by `AgentContext.safe_path()`, so reads and writes
 cannot escape `WORKDIR`; protected-path checks also apply to deletions.
@@ -229,6 +245,10 @@ Important runtime properties:
 - Interactive sessions separate whole-run state from current-task state. A
   previous prompt's failed verification or changed files cannot poison the next
   prompt's success inference.
+- Task lifecycle is explicit (`idle`, `running`, `waiting_user`, `completed`,
+  `failed`, `cancelled`). `finished` only stops the current loop invocation;
+  waiting tasks are neither archived nor reset. Task-boundary compaction runs
+  only when a new task starts after a terminal task.
 - `max_turns` limits model calls per task (40 by default), while trace turn IDs remain unique
   across an interactive run.
 - Model `stop_reason` is recorded and validated. Truncated, refused, or
@@ -252,7 +272,8 @@ Important runtime properties:
   available. Capacity pressure and the default 32K economic context target use
   the lower limit; a character threshold remains the compatibility fallback.
 - Context reduction is layered: aggregate tool-result budgets persist large
-  observations first, consumed old observations become retrieval references,
+  observations first, consumed old observations become provenance-preserving
+  retrieval references once the context reaches the eager projection threshold,
   and full compaction writes a bounded runtime checkpoint while preserving
   complete recent API rounds. The append-only conversation audit is unchanged.
 - Interactive task boundaries compact completed history above a token threshold

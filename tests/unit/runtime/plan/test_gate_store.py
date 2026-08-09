@@ -10,6 +10,7 @@ from runtime.config import RunConfig
 from runtime.plan import PLAN_SCHEMA_VERSION, PlanPolicy
 from runtime.security.redaction import SecretRedactor
 from runtime.session_factory import create_agent_session
+from runtime.task import TaskStatus
 
 
 def make_context(tmp_path: Path, policy: PlanPolicy):
@@ -145,6 +146,9 @@ def test_plan_snapshot_is_atomic_parseable_and_bounded(tmp_path, monkeypatch) ->
     assert payload["phase"] == "awaiting_approval"
     assert payload["version"] == 1
     assert payload["approved_version"] is None
+    assert payload["approval_policy"] == "manual"
+    assert payload["task_id"] == "task-1"
+    assert payload["task_status"] == "waiting_user"
     assert payload["snapshot_purpose"] == "plan audit; not full session recovery"
     assert replacements
     assert replacements[-1][1] == plan_path
@@ -176,6 +180,7 @@ def test_new_off_task_removes_stale_current_plan_snapshot(tmp_path) -> None:
     assert (context.run_dir / "plan.json").is_file()
 
     context.config.plan_policy = PlanPolicy.OFF
+    context.transition_task(TaskStatus.CANCELLED, trigger="test_task_finished")
     context.begin_task("a direct compatibility task")
 
     assert context.plan_state.policy is PlanPolicy.OFF

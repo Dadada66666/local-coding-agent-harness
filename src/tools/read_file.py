@@ -5,6 +5,7 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
 DEFAULT_LIMIT = 200
+PAGINATION_RESERVE_CHARS = 240
 
 
 class ReadFileTool(BaseTool):
@@ -18,6 +19,7 @@ class ReadFileTool(BaseTool):
             "limit": {"type": "integer"},
         },
         "required": ["path"],
+        "additionalProperties": False,
     }
 
     read_only = True
@@ -72,14 +74,39 @@ class ReadFileTool(BaseTool):
                 metadata={"encoding": "utf-8", "reason": str(exc)},
             )
         selected = lines[offset : offset + limit]
-        rendered = [f"{offset + index + 1:>4} | {line}" for index, line in enumerate(selected)]
+        rendered, page_limited = self._render_bounded_page(
+            selected,
+            offset=offset,
+            max_chars=int(context.config.max_tool_result_chars),
+        )
+        returned_count = len(rendered)
+        returned_end_offset = offset + returned_count
+        remaining = max(len(lines) - returned_end_offset, 0)
+        has_more = remaining > 0
+        next_offset = returned_end_offset if has_more else None
 
-        remaining = max(len(lines) - (offset + len(selected)), 0)
-        if remaining:
-            rendered.append(f"... {remaining} remaining lines")
+        snapshot = context.record_file_snapshot(target, raw, partial=True)
+        segment = (offset, returned_end_offset, snapshot.sha256)
+        segment_store = getattr(context, "read_file_segments", None)
+        if segment_store is None:
+            segment_store = {}
+            context.read_file_segments = segment_store
+        seen = segment_store.setdefault(str(target), set())
+        repeated_segment = segment in seen
+        seen.add(segment)
+        partial = not self._covers_file(seen, snapshot.sha256, len(lines))
+        snapshot = context.record_file_snapshot(target, raw, partial=partial)
 
-        partial = offset != 0 or remaining > 0
-        context.record_file_snapshot(target, raw, partial=partial)
+        if repeated_segment:
+            rendered.append(
+                "[read_file hint: this line segment was already returned unchanged; "
+                "use next_offset, grep, or a narrower range when possible]"
+            )
+        rendered.append(
+            "[read_file pagination: "
+            f"returned={returned_count} lines; total_lines={len(lines)}; "
+            f"next_offset={next_offset}; has_more={str(has_more).lower()}]"
+        )
 
         return ToolResult(
             ok=True,
@@ -91,7 +118,57 @@ class ReadFileTool(BaseTool):
                 "offset": offset,
                 "limit": limit,
                 "total_lines": len(lines),
+                "returned_lines": returned_count,
+                "returned_line_start": offset + 1 if returned_count else None,
+                "returned_line_end": returned_end_offset if returned_count else None,
                 "remaining_lines": remaining,
+                "next_offset": next_offset,
+                "has_more": has_more,
+                "pagination": "lines",
+                "page_limited_by_chars": page_limited,
+                "repeated_segment": repeated_segment,
+                "snapshot_sha256": snapshot.sha256,
                 "partial": partial,
             },
         )
+
+    def _render_bounded_page(
+        self,
+        lines: list[str],
+        *,
+        offset: int,
+        max_chars: int,
+    ) -> tuple[list[str], bool]:
+        budget = max(max_chars - PAGINATION_RESERVE_CHARS, 1)
+        rendered: list[str] = []
+        used = 0
+        for index, line in enumerate(lines):
+            value = f"{offset + index + 1:>4} | {line}"
+            added = len(value) + (1 if rendered else 0)
+            if rendered and used + added > budget:
+                break
+            if not rendered and added > budget:
+                # Preserve the full source line so the generic artifact path remains
+                # available for unusual minified or generated files.
+                rendered.append(value)
+                return rendered, len(lines) > 1
+            rendered.append(value)
+            used += added
+        return rendered, len(rendered) < len(lines)
+
+    def _covers_file(
+        self,
+        segments: set[tuple[int, int, str]],
+        sha256: str,
+        total_lines: int,
+    ) -> bool:
+        if total_lines == 0:
+            return True
+        covered_until = 0
+        for start, end, segment_sha in sorted(segments):
+            if segment_sha != sha256 or start > covered_until:
+                continue
+            covered_until = max(covered_until, end)
+            if covered_until >= total_lines:
+                return True
+        return False

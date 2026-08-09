@@ -24,6 +24,10 @@ class PlanStore:
         self.run_id = run_id
         self.trace = trace
         self.redactor = redactor
+        self.context = None
+
+    def bind_context(self, context) -> None:
+        self.context = context
 
     def save(self, state: PlanState, *, task: str) -> bool:
         if state.policy is PlanPolicy.OFF:
@@ -94,6 +98,13 @@ class PlanStore:
             "run_id": self.run_id,
             "task": self._clip(str(task), MAX_GOAL_CHARS),
             "policy": state.policy.value,
+            "approval_policy": state.approval_policy.value,
+            "task_id": getattr(self.context, "task_id", None),
+            "task_status": getattr(
+                getattr(self.context, "task_status", None),
+                "value",
+                None,
+            ),
             "execution_path": state.execution_path.value,
             "selection_reason": self._optional_text(state.selection_reason),
             "phase": state.phase.value,
