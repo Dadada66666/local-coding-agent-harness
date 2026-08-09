@@ -23,6 +23,9 @@ tools ---------+
 - `runtime.plan` owns the optional plan state machine, lifecycle transitions,
   pre-permission side-effect gate, and atomic audit snapshot. It does not own
   filesystem permission decisions.
+- `runtime.task` owns task lifecycle independently from loop-invocation
+  control. A plan transition listener synchronizes only cross-domain
+  invariants, without making the plan controller depend on the agent or CLI.
 
 Runtime subpackages do not import `cli` or `agent`. `session_factory` receives
 the already-rendered system prompt and initial messages from the agent layer,
@@ -62,10 +65,16 @@ the model-selected execution path (`undecided`, `direct`, `plan`), and plan
 lifecycle phase. `controller.py` is the only writer of `PlanState`; tools and
 CLI commands are thin adapters around its checked transitions.
 
+Plan decision policy (`off`, `auto`, `required`) and approval policy (`manual`,
+`auto`) are separate axes. Approval defaults to manual. A small capability
+projection in `capabilities.py` is shared by tool visibility and the Plan Gate,
+while the controller remains the authority for state transitions.
+
 `ToolRegistry.schemas(context)` filters plan tools for the current state.
 `select_execution_mode` is visible only in undecided auto mode, while
-`update_plan` is visible while planning or executing. Existing tools keep their
-default availability.
+`update_plan` is visible while planning or executing. `resolve_plan_response`
+is visible only while approval is pending and a fresh real-user continuation
+exists. Existing tools keep their default availability.
 
 The pre-tool path is deliberately ordered as:
 
@@ -85,7 +94,7 @@ invalid-call loop.
 | `off` | Disabled; original tool flow is unchanged. |
 | `auto + undecided` | Allows repository reads and mode selection; blocks Bash and mutations. |
 | `planning` | Allows repository reads and plan updates; blocks Bash and mutations. |
-| `awaiting_approval` | Allows bounded reads; blocks side effects until a user command approves. |
+| `awaiting_approval` | Allows bounded reads and blocks side effects; fresh user input enables only the response resolver. |
 | `direct` | Yields to the existing Permission Gate. |
 | `executing` | Yields to Permission Gate; plan state never auto-allows the call. |
 
@@ -94,12 +103,23 @@ state transition. In-memory `context.plan_state` remains authoritative during
 the run. The JSON file is a bounded, redacted audit snapshot, not an arbitrary
 crash-point or full conversation recovery format.
 
+### Task Lifecycle
+
+`TaskStatus` distinguishes `idle`, `running`, `waiting_user`, `completed`,
+`failed`, and `cancelled`. Agent-loop `finished` is deliberately narrower: it
+ends one invocation and may be true while the task remains `waiting_user`.
+Interactive ordinary text continues a waiting task; only terminal tasks may be
+archived before `start_task` creates a new task. Runtime notices use
+`resume_runtime` and cannot masquerade as user authorization.
+
 ### Context Management
 
 `src/runtime/context/manager.py` delegates token measurement, runtime checkpoint
 construction, and tool-result projection to the neighboring context modules.
-The existing layered compaction and bounded overflow recovery behavior remains
-unchanged.
+Consumed observations are projected before full pressure once the eager token
+threshold is reached, while recent API rounds remain intact. Read-file
+projections retain source path and line provenance. Full compaction and bounded
+overflow recovery remain the final layers.
 
 ### Traces And Reports
 

@@ -8,6 +8,12 @@ from typing import Any
 from runtime.config import RunConfig
 from runtime.security.access_policy import AccessPolicy
 from runtime.security.permission_rules import PermissionRuleStore
+from runtime.task import (
+    TaskStatus,
+    TaskTransitionError,
+    is_terminal_task_status,
+    validate_task_transition,
+)
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,12 @@ class AgentContext:
     task_tool_rounds: int = 0
     task_sequence: int = 0
     task_id: str | None = None
+    task_status: TaskStatus = TaskStatus.IDLE
+    task_waiting_reason: str | None = None
+    task_archived: bool = False
+    user_continuation_sequence: int = 0
+    pending_user_continuation_id: int | None = None
+    pending_user_continuation: str | None = None
     task_cost_start: dict[str, int] = field(default_factory=dict)
     task_tool_failures: list[dict[str, Any]] = field(default_factory=list)
     task_failure_fingerprint: str | None = None
@@ -86,6 +98,7 @@ class AgentContext:
     access_policy: AccessPolicy = field(default_factory=AccessPolicy)
     permission_rules: PermissionRuleStore = field(default_factory=PermissionRuleStore)
     read_file_state: dict[str, ReadFileSnapshot] = field(default_factory=dict)
+    read_file_segments: dict[str, set[tuple[int, int, str]]] = field(default_factory=dict)
     tool_budget: ToolBudget = field(default_factory=ToolBudget)
     sandbox_auto_allowed_unknown_bash_count: int = 0
     context_generation: int = 0
@@ -97,6 +110,7 @@ class AgentContext:
     last_model_usage_generation: int | None = None
     last_model_consumed_message_count: int = 0
     tool_result_artifacts: dict[str, str] = field(default_factory=dict)
+    tool_result_provenance: dict[str, str] = field(default_factory=dict)
     completed_tasks: list[dict[str, Any]] = field(default_factory=list)
 
     def add_user_message(self, message: dict) -> None:
@@ -117,10 +131,15 @@ class AgentContext:
             sha256=hashlib.sha256(raw).hexdigest(),
             partial=partial,
         )
-        self.read_file_state[str(target)] = snapshot
+        key = str(target)
+        previous = self.read_file_state.get(key)
+        if previous is not None and previous.sha256 != snapshot.sha256:
+            self.read_file_segments.pop(key, None)
+        self.read_file_state[key] = snapshot
         return snapshot
 
     def record_changed_file(self, path: str) -> None:
+        self.read_file_segments.pop(str((self.repo_path / path).resolve()), None)
         self.changed_files.add(path)
         self.task_changed_files.add(path)
         self.record_mutation()
@@ -131,7 +150,9 @@ class AgentContext:
         self.record_changed_file(path)
 
     def record_deleted_file(self, path: str) -> None:
-        self.read_file_state.pop(str(self.repo_path / path), None)
+        resolved = str((self.repo_path / path).resolve())
+        self.read_file_state.pop(resolved, None)
+        self.read_file_segments.pop(resolved, None)
 
         if path in self.task_created_files:
             self.task_created_files.discard(path)
@@ -172,13 +193,153 @@ class AgentContext:
         self.task_tool_failures.clear()
         self.task_changed_files.clear()
         self.task_created_files.clear()
+        self.pending_user_continuation_id = None
+        self.pending_user_continuation = None
 
     def begin_task(self, task: str) -> None:
+        if self.task_id is not None and not is_terminal_task_status(self.task_status):
+            raise TaskTransitionError(
+                f"task {self.task_id} is still active ({self.task_status.value})"
+            )
+        self.archive_terminal_task()
         self.task = task
         self.task_sequence += 1
         self.task_id = f"task-{self.task_sequence}"
+        self.task_archived = False
         self.reset_task_state()
-        self.plan_controller.reset(goal=task, policy=self.config.plan_policy)
+        self.transition_task(
+            TaskStatus.RUNNING,
+            trigger="task_started",
+            new_task=True,
+            persist_plan_snapshot=False,
+        )
+        self.plan_controller.reset(
+            goal=task,
+            policy=self.config.plan_policy,
+            approval_policy=self.config.plan_approval_policy,
+        )
+
+    def transition_task(
+        self,
+        status: TaskStatus | str,
+        *,
+        trigger: str,
+        waiting_reason: str | None = None,
+        new_task: bool = False,
+        persist_plan_snapshot: bool = True,
+    ) -> None:
+        before, after = validate_task_transition(
+            self.task_status,
+            status,
+            new_task=new_task,
+        )
+        if before is after and self.task_waiting_reason == waiting_reason:
+            return
+        self.task_status = after
+        self.task_waiting_reason = (
+            waiting_reason if after is TaskStatus.WAITING_USER else None
+        )
+        self.trace.log(
+            {
+                "type": "task_transition",
+                "task_id": self.task_id,
+                "before": before.value,
+                "after": after.value,
+                "trigger": trigger,
+                "waiting_reason": self.task_waiting_reason,
+                "plan_phase": getattr(getattr(self, "plan_state", None), "phase", None).value
+                if getattr(getattr(self, "plan_state", None), "phase", None) is not None
+                else None,
+            }
+        )
+        if persist_plan_snapshot and getattr(self, "plan_store", None) is not None:
+            self.plan_store.save(self.plan_state, task=self.task)
+
+    def on_plan_transition(self, action: str, before: dict | None, after: dict) -> None:
+        if self.task_id is None:
+            return
+        phase = after.get("phase")
+        if phase == "awaiting_approval":
+            self.transition_task(
+                TaskStatus.WAITING_USER,
+                trigger=action,
+                waiting_reason="plan_approval",
+                persist_plan_snapshot=False,
+            )
+        elif phase in {"planning", "executing"} and self.task_status is TaskStatus.WAITING_USER:
+            self.transition_task(
+                TaskStatus.RUNNING,
+                trigger=action,
+                persist_plan_snapshot=False,
+            )
+        elif phase == "cancelled" and not is_terminal_task_status(self.task_status):
+            self.transition_task(
+                TaskStatus.CANCELLED,
+                trigger=action,
+                persist_plan_snapshot=False,
+            )
+        self.validate_lifecycle_invariants()
+
+    def validate_lifecycle_invariants(self) -> None:
+        if self.task_id is None:
+            return
+        phase = getattr(getattr(self, "plan_state", None), "phase", None)
+        phase_value = getattr(phase, "value", phase)
+        if (
+            phase_value == "awaiting_approval"
+            and self.task_status is not TaskStatus.WAITING_USER
+            and not is_terminal_task_status(self.task_status)
+        ):
+            raise TaskTransitionError(
+                "an awaiting-approval plan requires task status waiting_user"
+            )
+        if self.task_status is TaskStatus.WAITING_USER and phase_value != "awaiting_approval":
+            raise TaskTransitionError(
+                "task status waiting_user requires an awaiting-approval plan"
+            )
+
+    def add_user_continuation(self, text: str) -> int:
+        if self.task_status is not TaskStatus.WAITING_USER:
+            raise ValueError("the current task is not waiting for user input")
+        normalized = str(text).strip()
+        if not normalized:
+            raise ValueError("user continuation must not be empty")
+        self.user_continuation_sequence += 1
+        self.pending_user_continuation_id = self.user_continuation_sequence
+        self.pending_user_continuation = normalized
+        self.add_user_message({"role": "user", "content": normalized})
+        self.trace.log(
+            {
+                "type": "user_continuation",
+                "task_id": self.task_id,
+                "continuation_id": self.pending_user_continuation_id,
+                "waiting_reason": self.task_waiting_reason,
+                "content_preview": normalized[:500],
+            }
+        )
+        return self.pending_user_continuation_id
+
+    def has_pending_user_continuation(self) -> bool:
+        return bool(
+            self.pending_user_continuation_id is not None
+            and self.pending_user_continuation
+        )
+
+    def consume_user_continuation(self, continuation_id: int | None = None) -> None:
+        if not self.has_pending_user_continuation():
+            raise ValueError("there is no pending user continuation")
+        if continuation_id is not None and continuation_id != self.pending_user_continuation_id:
+            raise ValueError("the user continuation is no longer current")
+        consumed_id = self.pending_user_continuation_id
+        self.pending_user_continuation_id = None
+        self.pending_user_continuation = None
+        self.trace.log(
+            {
+                "type": "user_continuation_consumed",
+                "task_id": self.task_id,
+                "continuation_id": consumed_id,
+            }
+        )
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)
@@ -207,7 +368,9 @@ class AgentContext:
 
     def add_runtime_message(self, message: dict) -> None:
         self.messages.append(message)
-        self.conversation_messages.append(message)
+        audit_message = dict(message)
+        audit_message["runtime_origin"] = True
+        self.conversation_messages.append(audit_message)
 
     def mark_context_changed(self) -> None:
         self.context_generation += 1
@@ -223,14 +386,26 @@ class AgentContext:
         self.last_model_usage_message_index = response_message_index
         self.last_model_usage_generation = self.context_generation
 
-    def capture_completed_task(self) -> None:
-        if self.task_model_calls <= 0:
+    def record_tool_result_provenance(self, tool_call_id: str, value: str | None) -> None:
+        if not value:
             return
+        self.tool_result_provenance[str(tool_call_id)] = str(value)[:500]
+        while len(self.tool_result_provenance) > 100:
+            self.tool_result_provenance.pop(next(iter(self.tool_result_provenance)))
+
+    def archive_terminal_task(self) -> bool:
+        if (
+            self.task_id is None
+            or self.task_archived
+            or not is_terminal_task_status(self.task_status)
+        ):
+            return False
 
         test_result = self.task_test_result or {}
         summary = {
             "task_id": self.task_id,
             "task": self.task,
+            "status": self.task_status.value,
             "result": (self.final_text or "")[:2000],
             "changed_files": sorted(self.task_changed_files),
             "verification": {
@@ -250,3 +425,8 @@ class AgentContext:
             summary["plan"] = plan_summary
         self.completed_tasks.append(summary)
         del self.completed_tasks[:-5]
+        self.task_archived = True
+        return True
+
+    def capture_completed_task(self) -> None:
+        self.archive_terminal_task()

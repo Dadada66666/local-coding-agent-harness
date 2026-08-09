@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from runtime.operation import Operation
-from runtime.plan import ExecutionPath, PlanError, PlanPolicy
+from runtime.plan import ExecutionPath, PlanError
+from runtime.plan.capabilities import context_plan_capabilities
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -28,12 +29,7 @@ class SelectExecutionModeTool(BaseTool):
     def is_available(self, context) -> bool:
         if context is None:
             return False
-        state = getattr(context, "plan_state", None)
-        return bool(
-            state is not None
-            and state.policy is PlanPolicy.AUTO
-            and state.execution_path is ExecutionPath.UNDECIDED
-        )
+        return bool(context_plan_capabilities(context).can_select_execution_mode)
 
     def classify_operation(self, args: dict, context) -> Operation:
         return Operation(

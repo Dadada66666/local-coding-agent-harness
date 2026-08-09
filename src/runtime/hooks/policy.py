@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from runtime.observability.text_preview import head_tail_preview
 from tools.base import ToolResult
+from runtime.task import TaskStatus, is_terminal_task_status
 
 
 def permission_hook(tool_call, tool, context):
@@ -168,7 +169,13 @@ def _cancel_task_for_terminal_deny(tool_call, decision, context) -> None:
 
     context.finished = True
     context.success = False
+    context.abort_reason = "permission_denied"
     context.final_text = _permission_cancelled_summary(decision, context)
+    transition = getattr(context, "transition_task", None)
+    if callable(transition) and not is_terminal_task_status(
+        getattr(context, "task_status", TaskStatus.IDLE)
+    ):
+        transition(TaskStatus.CANCELLED, trigger="permission_denied")
     context.trace.log(
         {
             "type": "task_cancelled",
@@ -271,4 +278,3 @@ def _permission_changed(first, second) -> bool:
         or first.terminal_on_deny != second.terminal_on_deny
         or first.decision_reason != second.decision_reason
     )
-

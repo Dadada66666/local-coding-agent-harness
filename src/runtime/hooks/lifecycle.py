@@ -72,6 +72,12 @@ def stop_report_hook(context) -> None:
         {
             "type": "stop",
             "success": context.success,
+            "task_id": getattr(context, "task_id", None),
+            "task_status": getattr(
+                getattr(context, "task_status", None),
+                "value",
+                None,
+            ),
             "report_path": str(report_path) if report_path else None,
             "diff_path": str(diff_path) if diff_path else None,
             "cost_path": str(cost_path) if cost_path else None,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from runtime.plan.models import ExecutionPath, PlanPhase, PlanPolicy
+from runtime.plan.capabilities import context_plan_capabilities
+from runtime.plan.models import ExecutionPath, PlanApprovalPolicy, PlanPhase, PlanPolicy
 from tools.base import ToolResult
 
 
@@ -20,25 +21,24 @@ class PlanGate:
         state = getattr(context, "plan_state", None)
         if state is None or state.policy is PlanPolicy.OFF:
             return None
-        if state.execution_path is ExecutionPath.DIRECT:
-            return None
-        if state.phase is PlanPhase.EXECUTING:
+        capabilities = context_plan_capabilities(context)
+        if capabilities.can_execute_side_effects:
             return None
 
         allowed = set(READ_ONLY_PLAN_TOOLS)
-        if state.execution_path is ExecutionPath.UNDECIDED:
+        if capabilities.can_select_execution_mode:
             allowed.add("select_execution_mode")
-        elif state.phase is PlanPhase.PLANNING:
+        if capabilities.can_update_plan:
             allowed.add("update_plan")
-        elif state.phase is PlanPhase.AWAITING_APPROVAL:
-            allowed.add("update_plan")
+        if capabilities.can_resolve_plan_response:
+            allowed.add("resolve_plan_response")
 
         if tool_call.name in allowed:
             return None
 
         requires_selection = state.execution_path is ExecutionPath.UNDECIDED
         requires_approval = (
-            state.policy is PlanPolicy.REQUIRED
+            state.approval_policy is PlanApprovalPolicy.MANUAL
             and state.phase in {PlanPhase.PLANNING, PlanPhase.AWAITING_APPROVAL}
         )
         if requires_selection:

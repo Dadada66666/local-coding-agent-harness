@@ -3,7 +3,13 @@ from __future__ import annotations
 import platform
 from pathlib import Path
 
-from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy, PlanStepStatus
+from runtime.plan import (
+    ExecutionPath,
+    PlanApprovalPolicy,
+    PlanPhase,
+    PlanPolicy,
+    PlanStepStatus,
+)
 
 
 BASE_SYSTEM_PROMPT = """You are a local coding agent working inside {workdir}.
@@ -39,19 +45,27 @@ def detect_shell_name() -> str:
     return "/bin/sh via subprocess shell=False"
 
 
-def build_system_prompt(workdir: Path, plan_state=None) -> str:
+def build_system_prompt(
+    workdir: Path,
+    plan_state=None,
+    *,
+    has_user_continuation: bool = False,
+) -> str:
     base = BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
         os_name=platform.system(),
         shell_name=detect_shell_name(),
     )
-    plan_instructions = build_plan_instructions(plan_state)
+    plan_instructions = build_plan_instructions(
+        plan_state,
+        has_user_continuation=has_user_continuation,
+    )
     if not plan_instructions:
         return base
     return f"{base.rstrip()}\n\n{plan_instructions}\n"
 
 
-def build_plan_instructions(plan_state) -> str:
+def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) -> str:
     if plan_state is None or plan_state.policy is PlanPolicy.OFF:
         return ""
 
@@ -66,7 +80,7 @@ def build_plan_instructions(plan_state) -> str:
     if plan_state.phase is PlanPhase.PLANNING:
         approval_rule = (
             "A submitted plan will wait for explicit user approval."
-            if plan_state.policy is PlanPolicy.REQUIRED
+            if plan_state.approval_policy is PlanApprovalPolicy.MANUAL
             else "A submitted plan is authorized by auto policy and execution continues immediately."
         )
         revision = (
@@ -82,9 +96,14 @@ def build_plan_instructions(plan_state) -> str:
 - Do not assume approval or describe a natural-language plan as submitted.{revision}"""
 
     if plan_state.phase is PlanPhase.AWAITING_APPROVAL:
+        if has_user_continuation:
+            return """Plan phase: awaiting user approval; a fresh user response is available.
+- Interpret only that real user response with resolve_plan_response.
+- Choose approve, revise, or cancel according to the user's intent.
+- Do not modify files or run Bash until approval has been resolved."""
         return """Plan phase: awaiting user approval.
 - Do not modify files or run Bash.
-- The model cannot approve its own plan; only the runtime user command can continue execution."""
+- The model cannot approve its own plan; the runtime will pause for real user input."""
 
     if plan_state.phase is PlanPhase.EXECUTING:
         current = next(

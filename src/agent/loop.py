@@ -13,6 +13,7 @@ from runtime.hooks import HookEvent
 from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy, PlanStepStatus
 from runtime.session import AgentContext
 from runtime.session_factory import create_agent_session
+from runtime.task import TaskStatus, TaskTransitionError, is_terminal_task_status
 
 
 MAX_ERROR_CHARS = 1000
@@ -53,13 +54,12 @@ class AgentLoop:
         return context
 
     def submit(self, context: AgentContext, prompt: str) -> AgentContext:
-        context.capture_completed_task()
+        return self.start_task(context, prompt)
+
+    def start_task(self, context: AgentContext, prompt: str) -> AgentContext:
         context.begin_task(prompt)
         context.add_user_message({"role": "user", "content": prompt})
-        context.finished = False
-        context.final_text = ""
-        context.abort_reason = None
-        context.success = False
+        self._prepare_invocation(context)
         try:
             self.runtime.hooks.trigger(
                 HookEvent.USER_PROMPT_SUBMIT,
@@ -72,12 +72,9 @@ class AgentLoop:
             self.abort(context, reason="interrupted", message="Stopped: interrupted by user (Ctrl+C).", exc=exc)
         return context
 
-    def resume(self, context: AgentContext, runtime_text: str) -> AgentContext:
-        context.add_runtime_message({"role": "user", "content": runtime_text})
-        context.finished = False
-        context.final_text = ""
-        context.abort_reason = None
-        context.success = False
+    def continue_task(self, context: AgentContext, user_text: str) -> AgentContext:
+        context.add_user_continuation(user_text)
+        self._prepare_invocation(context)
         try:
             self.run_until_idle(context)
         except KeyboardInterrupt as exc:
@@ -88,6 +85,31 @@ class AgentLoop:
                 exc=exc,
             )
         return context
+
+    def resume_runtime(self, context: AgentContext, runtime_text: str) -> AgentContext:
+        if context.task_id is None or is_terminal_task_status(context.task_status):
+            raise TaskTransitionError("runtime continuation requires an active task")
+        context.add_runtime_message({"role": "user", "content": runtime_text})
+        self._prepare_invocation(context)
+        try:
+            self.run_until_idle(context)
+        except KeyboardInterrupt as exc:
+            self.abort(
+                context,
+                reason="interrupted",
+                message="Stopped: interrupted by user (Ctrl+C).",
+                exc=exc,
+            )
+        return context
+
+    def resume(self, context: AgentContext, runtime_text: str) -> AgentContext:
+        return self.resume_runtime(context, runtime_text)
+
+    def _prepare_invocation(self, context: AgentContext) -> None:
+        context.finished = False
+        context.final_text = ""
+        context.abort_reason = None
+        context.success = False
 
     def finish(self, context: AgentContext) -> None:
         if context.stop_recorded:
@@ -110,6 +132,11 @@ class AgentLoop:
         context.success = False
         context.abort_reason = reason
         context.final_text = message
+        self._transition_task(
+            context,
+            TaskStatus.CANCELLED if reason == "interrupted" else TaskStatus.FAILED,
+            trigger=f"abort:{reason}",
+        )
         context.trace.log(
             {
                 "type": "run_aborted",
@@ -123,6 +150,9 @@ class AgentLoop:
 
     def run_until_idle(self, context: AgentContext) -> None:
         while not context.finished:
+            validator = getattr(context, "validate_lifecycle_invariants", None)
+            if callable(validator):
+                validator()
             if getattr(context, "task_model_calls", 0) >= context.config.max_turns:
                 self._stop_for_model_call_limit(context)
                 break
@@ -142,9 +172,19 @@ class AgentLoop:
                 }
             )
 
+            pending_continuation = getattr(
+                context,
+                "has_pending_user_continuation",
+                None,
+            )
             context.system_prompt = build_system_prompt(
                 self.repo_path,
                 getattr(context, "plan_state", None),
+                has_user_continuation=(
+                    bool(pending_continuation())
+                    if callable(pending_continuation)
+                    else False
+                ),
             )
             tool_schemas = self._tool_schemas(context)
             max_output_tokens = int(getattr(self.model_client, "max_tokens", 4096))
@@ -287,6 +327,11 @@ class AgentLoop:
                 )
                 context.finished = True
                 context.success = self.infer_success(context)
+                self._transition_task(
+                    context,
+                    TaskStatus.COMPLETED if context.success else TaskStatus.FAILED,
+                    trigger="final_response",
+                )
                 context.trace.log(
                     {
                         "type": "final_response",
@@ -425,6 +470,11 @@ class AgentLoop:
                 "All plan steps are complete, but the lifecycle is still executing. "
                 "Call update_plan with action complete before the final response."
             )
+        if state.phase is PlanPhase.AWAITING_APPROVAL and context.has_pending_user_continuation():
+            return (
+                "The task is still awaiting approval. Interpret the latest real user response "
+                "with resolve_plan_response before giving a final response."
+            )
         return None
 
     def _apply_plan_boundary(self, context: AgentContext) -> bool:
@@ -432,6 +482,12 @@ class AgentLoop:
         if state is None or state.policy is PlanPolicy.OFF:
             return False
         if state.phase is PlanPhase.AWAITING_APPROVAL:
+            self._transition_task(
+                context,
+                TaskStatus.WAITING_USER,
+                trigger="plan_awaiting_approval",
+                waiting_reason="plan_approval",
+            )
             context.finished = True
             context.success = False
             context.abort_reason = None
@@ -449,6 +505,11 @@ class AgentLoop:
             )
             return True
         if state.phase is PlanPhase.CANCELLED:
+            self._transition_task(
+                context,
+                TaskStatus.CANCELLED,
+                trigger="plan_cancelled",
+            )
             context.finished = True
             context.success = False
             context.abort_reason = "plan_cancelled"
@@ -563,6 +624,11 @@ class AgentLoop:
         context.success = False
         context.abort_reason = "model_context_overflow"
         context.final_text = "Stopped: model context window exceeded after bounded recovery."
+        self._transition_task(
+            context,
+            TaskStatus.FAILED,
+            trigger="model_context_overflow",
+        )
         context.trace.log(
             {
                 "type": "model_context_overflow",
@@ -584,6 +650,11 @@ class AgentLoop:
         context.success = False
         context.abort_reason = f"model_{action}"
         context.final_text = messages[action]
+        self._transition_task(
+            context,
+            TaskStatus.FAILED,
+            trigger=f"model_response_{action}",
+        )
         context.trace.log(
             {
                 "type": f"model_response_{action}",
@@ -599,6 +670,11 @@ class AgentLoop:
         context.success = False
         context.abort_reason = "max_model_calls_exceeded"
         context.final_text = "Stopped: max model calls per task exceeded."
+        self._transition_task(
+            context,
+            TaskStatus.FAILED,
+            trigger="max_model_calls_exceeded",
+        )
         context.trace.log(
             {
                 "type": "max_turns_exceeded",
@@ -639,6 +715,11 @@ class AgentLoop:
         context.final_text = (
             f"Stopped: repeated invalid {tool} calls made no progress ({error})."
         )
+        self._transition_task(
+            context,
+            TaskStatus.FAILED,
+            trigger="repeated_tool_failure",
+        )
 
     def _fail_model_call(
         self,
@@ -653,6 +734,11 @@ class AgentLoop:
         context.success = False
         context.abort_reason = "model_call_failed"
         context.final_text = message
+        self._transition_task(
+            context,
+            TaskStatus.FAILED,
+            trigger="model_call_failed",
+        )
         context.trace.log(
             {
                 "type": "model_call_error",
@@ -682,6 +768,27 @@ class AgentLoop:
             return text
         omitted = len(text) - MAX_ERROR_CHARS
         return f"{text[:MAX_ERROR_CHARS]}... {omitted} chars omitted"
+
+    def _transition_task(
+        self,
+        context: AgentContext,
+        status: TaskStatus,
+        *,
+        trigger: str,
+        waiting_reason: str | None = None,
+    ) -> None:
+        transition = getattr(context, "transition_task", None)
+        if not callable(transition):
+            return
+        if getattr(context, "task_id", None) is None or is_terminal_task_status(
+            getattr(context, "task_status", TaskStatus.IDLE)
+        ):
+            return
+        transition(
+            status,
+            trigger=trigger,
+            waiting_reason=waiting_reason,
+        )
 
     def create_context(self, task: str, include_initial_message: bool = True) -> AgentContext:
         repo_path = self.repo_path.resolve()

@@ -250,6 +250,42 @@ def test_economic_token_target_triggers_compaction_before_char_fallback() -> Non
     assert before["trigger_reason"] == "token_budget"
 
 
+def test_consumed_tool_results_project_before_full_context_pressure(tmp_path) -> None:
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=compact_config(
+            compact_threshold_chars=1_000_000,
+            context_target_tokens=32_000,
+            context_eager_projection_tokens=100,
+            context_min_recent_rounds=1,
+        ),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.messages = [{"role": "user", "content": "inspect"}]
+    for index in range(4):
+        context.messages.extend(
+            [
+                tool_use_message(f"call_{index}"),
+                tool_result_message(f"call_{index}", "source output\n" * 200),
+            ]
+        )
+    context.last_model_consumed_message_count = len(context.messages) - 2
+
+    preparation = ContextManager().prepare_context(context)
+
+    assert preparation.microcompacted is True
+    assert preparation.compacted is False
+    assert "Old tool observation cleared" in str(context.messages)
+    assert any(
+        event.get("type") == "context_compact"
+        and event.get("reason") == "eager_tool_result_projection"
+        for event in _trace_events(context)
+    )
+
+
 def test_microcompact_only_clears_consumed_old_observations(tmp_path) -> None:
     runner = AgentLoop(
         model_client=object(),

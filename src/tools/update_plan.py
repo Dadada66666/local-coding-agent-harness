@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from runtime.operation import Operation
-from runtime.plan import ExecutionPath, PlanError, PlanPhase, PlanStepStatus
+from runtime.plan import PlanError, PlanStepStatus
+from runtime.plan.capabilities import context_plan_capabilities
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -18,40 +19,83 @@ PLAN_ACTIONS = {
 class UpdatePlanTool(BaseTool):
     name = "update_plan"
     description = (
-        "Create and submit a structured plan, update approved execution-step status, or request "
-        "replanning. This tool cannot approve a required plan."
+        "Create and optionally submit a structured plan in one call, update execution-step "
+        "status, or request replanning. This tool cannot approve a manual plan."
     )
     input_schema = {
-        "type": "object",
-        "properties": {
-            "action": {"type": "string", "enum": sorted(PLAN_ACTIONS)},
-            "explanation": {"type": "string"},
-            "steps": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "minLength": 1},
-                        "description": {"type": "string", "minLength": 1},
-                        "status": {
-                            "type": "string",
-                            "enum": [status.value for status in PlanStepStatus],
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"const": "replace_plan"},
+                    "explanation": {"type": "string"},
+                    "steps": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": {"type": "string", "minLength": 1},
+                                "description": {"type": "string", "minLength": 1},
+                                "status": {
+                                    "type": "string",
+                                    "enum": [status.value for status in PlanStepStatus],
+                                },
+                            },
+                            "required": ["id", "description"],
+                            "additionalProperties": False,
                         },
                     },
-                    "required": ["id", "description"],
-                    "additionalProperties": False,
+                    "submit": {"type": "boolean"},
                 },
+                "required": ["action", "steps"],
+                "additionalProperties": False,
             },
-            "ready_for_approval": {"type": "boolean"},
-            "step_id": {"type": "string"},
-            "status": {
-                "type": "string",
-                "enum": [status.value for status in PlanStepStatus],
+            {
+                "type": "object",
+                "properties": {"action": {"const": "submit"}},
+                "required": ["action"],
+                "additionalProperties": False,
             },
-            "reason": {"type": "string"},
-        },
-        "required": ["action"],
-        "additionalProperties": False,
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"const": "update_step"},
+                    "step_id": {"type": "string", "minLength": 1},
+                    "status": {
+                        "type": "string",
+                        "enum": [status.value for status in PlanStepStatus],
+                    },
+                },
+                "required": ["action", "step_id", "status"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"const": "request_replan"},
+                    "reason": {"type": "string", "minLength": 1},
+                },
+                "required": ["action", "reason"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "action": {"const": "cancel"},
+                    "reason": {"type": "string", "minLength": 1},
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {"action": {"const": "complete"}},
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        ]
     }
 
     read_only = True
@@ -61,12 +105,7 @@ class UpdatePlanTool(BaseTool):
     def is_available(self, context) -> bool:
         if context is None:
             return False
-        state = getattr(context, "plan_state", None)
-        return bool(
-            state is not None
-            and state.execution_path is ExecutionPath.PLAN
-            and state.phase in {PlanPhase.PLANNING, PlanPhase.EXECUTING}
-        )
+        return bool(context_plan_capabilities(context).can_update_plan)
 
     def classify_operation(self, args: dict, context) -> Operation:
         return Operation(
@@ -85,6 +124,7 @@ class UpdatePlanTool(BaseTool):
             "explanation",
             "steps",
             "ready_for_approval",
+            "submit",
             "step_id",
             "status",
             "reason",
@@ -96,7 +136,13 @@ class UpdatePlanTool(BaseTool):
         if action not in PLAN_ACTIONS:
             raise ToolValidationError(f"invalid update_plan action: {action}")
         action_fields = {
-            "replace_plan": {"action", "explanation", "steps", "ready_for_approval"},
+            "replace_plan": {
+                "action",
+                "explanation",
+                "steps",
+                "submit",
+                "ready_for_approval",
+            },
             "submit": {"action"},
             "update_step": {"action", "step_id", "status"},
             "request_replan": {"action", "reason"},
@@ -119,6 +165,12 @@ class UpdatePlanTool(BaseTool):
                 args["ready_for_approval"], bool
             ):
                 raise ToolValidationError("ready_for_approval must be a boolean")
+            if "submit" in args and not isinstance(args["submit"], bool):
+                raise ToolValidationError("submit must be a boolean")
+            if "submit" in args and "ready_for_approval" in args:
+                raise ToolValidationError(
+                    "use submit; do not combine it with legacy ready_for_approval"
+                )
         elif action == "update_step":
             if not isinstance(args.get("step_id"), str) or not args["step_id"].strip():
                 raise ToolValidationError("update_step requires a non-empty step_id")
@@ -138,7 +190,7 @@ class UpdatePlanTool(BaseTool):
                     args["steps"],
                     explanation=args.get("explanation"),
                 )
-                if args.get("ready_for_approval", False):
+                if args.get("submit", args.get("ready_for_approval", False)):
                     controller.submit_for_execution()
             elif action == "submit":
                 controller.submit_for_execution()

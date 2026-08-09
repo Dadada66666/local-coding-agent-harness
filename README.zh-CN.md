@@ -105,8 +105,11 @@ Plan Mode 是可选的 Runtime 能力，包含三种策略：
   `plan.json`。为保证向后兼容，这是默认值。
 - `auto`：模型可以先使用只读工具检查仓库，但在执行 Bash 或修改仓库前，必须通过
   `select_execution_mode` 结构化选择 `direct` 或 `plan`。选择 direct 后沿用原流程；选择 plan
-  后保持只读，提交结构化计划后由 Runtime 策略授权该版本并直接执行，不额外等待用户审批。
-- `required`：任务直接进入只读规划。模型提交计划后暂停在 `awaiting_approval`，只有用户能够批准。
+  后保持只读，直到提交结构化计划。
+- `required`：任务直接进入只读规划。
+
+执行路径策略与审批策略彼此独立。审批默认是 `manual`，因此 `auto` 和 `required` 下提交的计划都会
+暂停在 `awaiting_approval`。只有显式设置 `--plan-approval auto`，Runtime 才会自动授权已提交版本。
 
 启动参数：
 
@@ -116,12 +119,15 @@ agent --plan-mode required
 agent --plan-mode off
 agent --plan       # 等价于 --plan-mode required
 agent --no-plan    # 等价于 --plan-mode off
+agent --plan-mode auto --plan-approval manual
+agent --plan-mode auto --plan-approval auto
 ```
 
 冲突参数会明确报错，不会静默覆盖。交互模式还支持：
 
 ```text
 /plan-mode auto|required|off
+/plan-approval manual|auto
 /plan
 /approve
 /revise <feedback>
@@ -130,8 +136,10 @@ agent --no-plan    # 等价于 --plan-mode off
 ```
 
 `/approve` 和 `/revise` 会恢复同一个任务，不会调用 `begin_task()`；模型调用次数、mutation、
-verification、recovery 和上下文预算都保持连续。Auto 模式不使用关键词或 prompt 长度规则判断复杂度，
-而是由模型结合任务与实际仓库，通过可追踪的工具调用作出选择。
+verification、recovery 和上下文预算都保持连续。计划等待用户时输入的普通文本同样属于原任务续接。
+仅当存在新的真实用户回复时，模型才会看到 `resolve_plan_response`，并结构化解释为批准、修改或取消；
+Runtime 不使用关键词审批表。Auto 模式也不使用关键词或 prompt 长度规则判断复杂度，而是由模型结合
+任务与实际仓库，通过可追踪的工具调用作出选择。
 
 Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以及 required 等待批准时，Plan Gate
 会在权限判断前阻止 Bash 和仓库副作用；direct 或已授权执行阶段则把调用交回现有 Permission Gate。
@@ -141,10 +149,11 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 
 - `auto + undecided`：显示 `select_execution_mode`
 - `plan + planning/executing`：显示 `update_plan`
+- `awaiting_approval + 新用户回复`：显示 `resolve_plan_response`
 - `off`、direct、completed 和 cancelled：不显示计划工具
 
-活跃计划会原子写入 `<WORKDIR>/.agent/runs/<run_id>/plan.json`，记录策略、模型选择理由、
-计划版本、授权来源、阶段和步骤进度。快照不保存环境数据，并在落盘前脱敏。`plan.json` 是计划决策与
+活跃计划会原子写入 `<WORKDIR>/.agent/runs/<run_id>/plan.json`，记录决策与审批策略、task ID/status、
+模型选择理由、计划版本、授权来源、阶段和步骤进度。快照不保存环境数据，并在落盘前脱敏。`plan.json` 是计划决策与
 执行状态的审计快照，不等同于完整会话恢复。
 
 计划子系统明确不实现 SQLite、多 Worker、分布式调度、租约、心跳、后台执行、任意崩溃点恢复或 Web UI。
@@ -157,7 +166,9 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 
 - `list_dir`：列出可见文件和目录，跳过 `.agent`、`.git`、`.venv`、`node_modules`、`__pycache__` 等 runtime/cache 目录。
 - `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
-- `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
+- `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。每页明确返回总行数、实际行范围、
+  `next_offset` 和 `has_more`；普通源码页会先按字符预算收窄，相同 snapshot 的重复区间只给出提示而不阻断模型。
+  非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
 - `read_artifact`：通过当前 run 内有效的不透明 ID，分页读取大工具结果；不接受文件系统路径。
 - `write_file`：写入完整的 UTF-8 文件。新文件使用排他创建；已有文件必须具备完整且最新的 snapshot，并通过原子替换写入。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
@@ -165,7 +176,9 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 - `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；预期整体返回非零状态时可设置 `exit_expectation="nonzero"`。shell patch 会被路由到结构化文件工具。
 - `view_diff`：在 git 仓库中查看 diff；非 git 目录会返回干净的 "diff unavailable" 结果。
 - `select_execution_mode`：仅在 auto 未决策阶段动态可见，记录模型选择 direct 或 plan 的具体理由。
-- `update_plan`：仅在计划生命周期相关阶段动态可见；维护版本和步骤状态，但不能批准 required 计划。
+- `update_plan`：仅在计划生命周期相关阶段动态可见；使用按 action 区分的 schema，可在一次调用中替换并提交计划，
+  但不能批准 manual 计划。
+- `resolve_plan_response`：仅在等待审批且存在新用户续接时可见，结构化记录批准、修改或取消。
 
 文件工具由 `AgentContext.safe_path()` 约束，读写不能逃逸 `WORKDIR`。
 
@@ -177,6 +190,8 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 - 成功编辑会刷新 snapshot，所以同一文件多次编辑不需要无意义地重新读取。
 - no-op edit 会成功返回，但不会标记文件已变更。
 - 交互会话会区分 whole-run 状态和 current-task 状态。上一轮 prompt 的失败验证或 changed files 不会污染下一轮 prompt 的 success inference。
+- Task 生命周期显式区分 `idle`、`running`、`waiting_user`、`completed`、`failed` 和 `cancelled`。
+  `finished` 只表示当前 loop invocation 已停止；等待用户的任务不会被归档、重置，也不会触发 task-boundary 压缩。
 - `max_turns` 限制每个任务的模型调用次数（默认 40 次）；交互运行中的 trace turn ID 仍保持全局唯一。
 - runtime 会记录并校验模型 `stop_reason`。截断、拒绝或协议不一致的响应不能被报告为成功；未提供 `stop_reason` 的兼容 provider 仍使用内容块判断。
 - 并行工具调用会在一个 user message 中返回全部匹配的 `tool_result`。terminal deny 后未执行的调用会得到显式 cancelled result，保持消息历史合法。
@@ -185,7 +200,9 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 - Shell 风险分析具备引号感知能力，并会记录复合副作用。网络命令如果同时创建目录或写文件，审批会同时展示目标主机和文件路径，不会用单一 `network` 标签隐藏写入行为。
 - 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
 - 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 可作为本地估算的锚点。容量软上限与默认 32K 经济上下文目标取较小值，字符阈值继续作为兼容兜底。
-- 上下文缩减采用分层策略：先按单轮总预算把大 observation 落盘，再把已消费的旧 observation 替换为可恢复引用，最后生成有界 runtime checkpoint，并完整保留最近 API rounds。append-only 审计历史不会被改写。
+- 上下文缩减采用分层策略：先按单轮总预算把大 observation 落盘；达到提前投影阈值后，将已消费的旧
+  observation 替换为保留来源信息的可恢复引用；最后才生成有界 runtime checkpoint，并完整保留最近 API rounds。
+  append-only 审计历史不会被改写。
 - 交互任务切换时，如果已完成历史超过 token 阈值，runtime 会在下一任务开始前生成确定性 checkpoint；当前 prompt 和 append-only 审计链保持完整。
 - provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
 - 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。

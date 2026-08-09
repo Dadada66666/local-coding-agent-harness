@@ -5,6 +5,7 @@ from typing import Any, Iterable
 
 from runtime.plan.models import (
     ExecutionPath,
+    PlanApprovalPolicy,
     PlanPhase,
     PlanPolicy,
     PlanState,
@@ -19,10 +20,21 @@ from runtime.plan.models import (
 class PlanController:
     """The single authority for mutations to a task's PlanState."""
 
-    def __init__(self, state: PlanState, *, store=None, trace=None) -> None:
+    def __init__(
+        self,
+        state: PlanState,
+        *,
+        store=None,
+        trace=None,
+        transition_listener=None,
+    ) -> None:
         self.state = state
         self.store = store
         self.trace = trace
+        self.transition_listener = transition_listener
+
+    def set_transition_listener(self, listener) -> None:
+        self.transition_listener = listener
 
     def record_initial_state(self) -> None:
         self.state.validate()
@@ -30,9 +42,15 @@ class PlanController:
             return
         self._record("initialized", before=None)
 
-    def reset(self, *, goal: str, policy: PlanPolicy | str) -> PlanState:
+    def reset(
+        self,
+        *,
+        goal: str,
+        policy: PlanPolicy | str,
+        approval_policy: PlanApprovalPolicy | str = PlanApprovalPolicy.MANUAL,
+    ) -> PlanState:
         before = self._snapshot()
-        initial = PlanState.initial(policy, goal)
+        initial = PlanState.initial(policy, goal, approval_policy=approval_policy)
         for field_name in initial.__dataclass_fields__:
             setattr(self.state, field_name, deepcopy(getattr(initial, field_name)))
         if self.state.policy is PlanPolicy.OFF:
@@ -134,7 +152,7 @@ class PlanController:
             raise PlanValidationError("the plan must be created before submission")
 
         before = self._snapshot()
-        if self.state.policy is PlanPolicy.AUTO:
+        if self.state.approval_policy is PlanApprovalPolicy.AUTO:
             self.state.approved_version = self.state.version
             self.state.approval_source = "auto_policy"
             self.state.phase = PlanPhase.EXECUTING
@@ -257,6 +275,7 @@ class PlanController:
     def status_text(self) -> str:
         lines = [
             f"policy: {self.state.policy.value}",
+            f"approval_policy: {self.state.approval_policy.value}",
             f"execution_path: {self.state.execution_path.value}",
             f"phase: {self.state.phase.value}",
             f"version: {self.state.version}",
@@ -311,6 +330,9 @@ class PlanController:
     ) -> None:
         self.state.updated_at = utc_now()
         self.state.validate()
+        after = self.state.to_dict()
+        if self.transition_listener is not None:
+            self.transition_listener(action, before, after)
         snapshot_written = True
         if self.store is not None:
             snapshot_written = self.store.save(self.state, task=self.state.goal)
@@ -321,7 +343,7 @@ class PlanController:
                     "action": action,
                     "task": self.state.goal[:500],
                     "before": self._trace_snapshot(before),
-                    "after": self._trace_snapshot(self.state.to_dict()),
+                    "after": self._trace_snapshot(after),
                     "snapshot_written": snapshot_written,
                     **details,
                 }
@@ -333,6 +355,7 @@ class PlanController:
         steps = value.get("steps") or []
         return {
             "policy": value.get("policy"),
+            "approval_policy": value.get("approval_policy"),
             "execution_path": value.get("execution_path"),
             "phase": value.get("phase"),
             "version": value.get("version"),

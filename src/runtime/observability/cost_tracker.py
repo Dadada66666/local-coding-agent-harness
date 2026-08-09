@@ -337,9 +337,21 @@ class CostTracker:
     def _current_task_cost(self, context) -> dict[str, Any] | None:
         if context is None:
             return None
+        plan_state = getattr(context, "plan_state", None)
         return {
             "task_id": getattr(context, "task_id", None),
             "task": getattr(context, "task", ""),
+            "status": getattr(
+                getattr(context, "task_status", None),
+                "value",
+                None,
+            ),
+            "waiting_reason": getattr(context, "task_waiting_reason", None),
+            "plan_phase": getattr(
+                getattr(plan_state, "phase", None),
+                "value",
+                None,
+            ),
             **self.delta(getattr(context, "task_cost_start", None)),
         }
 

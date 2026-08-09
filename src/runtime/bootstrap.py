@@ -27,6 +27,7 @@ from tools.grep import GrepTool
 from tools.list_dir import ListDirTool
 from tools.read_artifact import ReadArtifactTool
 from tools.read_file import ReadFileTool
+from tools.resolve_plan_response import ResolvePlanResponseTool
 from tools.registry import ToolRegistry
 from tools.select_execution_mode import SelectExecutionModeTool
 from tools.update_plan import UpdatePlanTool
@@ -56,6 +57,7 @@ def build_tool_registry() -> ToolRegistry:
     registry.register(BashTool())
     registry.register(ViewDiffTool())
     registry.register(SelectExecutionModeTool())
+    registry.register(ResolvePlanResponseTool())
     registry.register(UpdatePlanTool())
     return registry
 

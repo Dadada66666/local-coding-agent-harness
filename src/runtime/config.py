@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from runtime.plan.models import PlanPolicy
+from runtime.plan.models import PlanApprovalPolicy, PlanPolicy
 
 
 @dataclass
@@ -15,6 +15,7 @@ class RunConfig:
     compact_threshold_chars: int = 120000
     context_window_tokens: int | None = None
     context_target_tokens: int | None = 32000
+    context_eager_projection_tokens: int = 12000
     context_soft_limit_ratio: float = 0.8
     context_safety_margin_tokens: int = 4096
     context_recent_target_tokens: int = 8000
@@ -32,6 +33,7 @@ class RunConfig:
     sandbox_settings_path: str | None = None
     bash_env_allowlist: tuple[str, ...] = ()
     plan_policy: PlanPolicy | str = PlanPolicy.OFF
+    plan_approval_policy: PlanApprovalPolicy | str = PlanApprovalPolicy.MANUAL
 
     def __post_init__(self) -> None:
         try:
@@ -39,6 +41,13 @@ class RunConfig:
         except ValueError as exc:
             allowed = ", ".join(policy.value for policy in PlanPolicy)
             raise ValueError(f"plan_policy must be one of: {allowed}") from exc
+        try:
+            self.plan_approval_policy = PlanApprovalPolicy(self.plan_approval_policy)
+        except ValueError as exc:
+            allowed = ", ".join(policy.value for policy in PlanApprovalPolicy)
+            raise ValueError(
+                f"plan_approval_policy must be one of: {allowed}"
+            ) from exc
         if self.max_turns <= 0:
             raise ValueError("max_turns must be > 0")
         if self.max_repair_attempts < 0:
@@ -55,6 +64,8 @@ class RunConfig:
             raise ValueError("context_window_tokens must be > 0")
         if self.context_target_tokens is not None and self.context_target_tokens <= 0:
             raise ValueError("context_target_tokens must be > 0")
+        if self.context_eager_projection_tokens < 0:
+            raise ValueError("context_eager_projection_tokens must be >= 0")
         if not 0 < self.context_soft_limit_ratio <= 1:
             raise ValueError("context_soft_limit_ratio must be between 0 and 1")
         if self.context_safety_margin_tokens < 0:

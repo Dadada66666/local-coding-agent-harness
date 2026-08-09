@@ -6,6 +6,7 @@ from runtime.config import RunConfig
 from runtime.plan import (
     ExecutionPath,
     PlanController,
+    PlanApprovalPolicy,
     PlanPhase,
     PlanPolicy,
     PlanState,
@@ -15,8 +16,13 @@ from runtime.plan import (
 )
 
 
-def make_controller(policy: PlanPolicy = PlanPolicy.REQUIRED) -> PlanController:
-    return PlanController(PlanState.initial(policy, "implement plan mode"))
+def make_controller(
+    policy: PlanPolicy = PlanPolicy.REQUIRED,
+    approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.MANUAL,
+) -> PlanController:
+    return PlanController(
+        PlanState.initial(policy, "implement plan mode", approval_policy=approval_policy)
+    )
 
 
 @pytest.mark.parametrize(
@@ -36,9 +42,12 @@ def test_initial_state_matches_policy(policy, execution_path, phase) -> None:
 
 def test_run_config_normalizes_and_rejects_plan_policy() -> None:
     assert RunConfig(plan_policy="auto").plan_policy is PlanPolicy.AUTO
+    assert RunConfig(plan_approval_policy="auto").plan_approval_policy is PlanApprovalPolicy.AUTO
 
     with pytest.raises(ValueError, match="plan_policy"):
         RunConfig(plan_policy="sometimes")
+    with pytest.raises(ValueError, match="plan_approval_policy"):
+        RunConfig(plan_approval_policy="sometimes")
 
 
 def test_auto_model_can_select_direct_only_once() -> None:
@@ -61,8 +70,8 @@ def test_auto_model_can_select_direct_only_once() -> None:
         )
 
 
-def test_auto_model_can_select_plan_and_auto_authorize_submission() -> None:
-    controller = make_controller(PlanPolicy.AUTO)
+def test_auto_decision_and_auto_approval_are_independent() -> None:
+    controller = make_controller(PlanPolicy.AUTO, PlanApprovalPolicy.AUTO)
     controller.select_execution_path(
         "plan",
         reason="cross-module runtime work",
@@ -77,6 +86,23 @@ def test_auto_model_can_select_plan_and_auto_authorize_submission() -> None:
     assert controller.state.phase is PlanPhase.EXECUTING
     assert controller.state.approved_version == controller.state.version
     assert controller.state.approval_source == "auto_policy"
+
+
+def test_auto_decision_uses_manual_approval_by_default() -> None:
+    controller = make_controller(PlanPolicy.AUTO)
+    controller.select_execution_path(
+        "plan",
+        reason="cross-module runtime work",
+        has_mutations=False,
+    )
+    controller.replace_plan(
+        [{"id": "step-1", "description": "Implement the controller"}]
+    )
+
+    controller.submit_for_execution()
+
+    assert controller.state.phase is PlanPhase.AWAITING_APPROVAL
+    assert controller.state.approved_version is None
 
 
 def test_required_plan_waits_for_user_approval() -> None:
