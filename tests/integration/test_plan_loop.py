@@ -262,6 +262,73 @@ def test_natural_language_approval_continues_the_same_task(tmp_path) -> None:
     assert snapshot["task_status"] == "completed"
 
 
+def test_waiting_plan_without_fresh_continuation_does_not_call_model(tmp_path) -> None:
+    runner, model = make_runner(
+        tmp_path,
+        PlanPolicy.REQUIRED,
+        [tool_response(replace_plan_call())],
+    )
+    context = runner.start_interactive()
+    runner.start_task(context, "plan the task")
+    calls_before_resume = len(model.calls)
+
+    runner.resume_runtime(context, "Runtime status check only.")
+
+    assert len(model.calls) == calls_before_resume
+    assert context.task_status is TaskStatus.WAITING_USER
+    assert context.plan_state.phase is PlanPhase.AWAITING_APPROVAL
+
+
+def test_control_plane_transition_cancels_remaining_tool_batch(tmp_path) -> None:
+    source = tmp_path / "demo.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    runner, model = make_runner(
+        tmp_path,
+        PlanPolicy.REQUIRED,
+        [
+            tool_response(replace_plan_call()),
+            tool_response(
+                ToolCall("resolve", "resolve_plan_response", {"action": "approve"}),
+                ToolCall("read", "read_file", {"path": "demo.py"}),
+                ToolCall(
+                    "edit",
+                    "edit_file",
+                    {"path": "demo.py", "old_text": "value = 1", "new_text": "value = 2"},
+                ),
+            ),
+            tool_response(
+                ToolCall(
+                    "complete-step",
+                    "update_plan",
+                    {"action": "update_step", "step_id": "step-1", "status": "completed"},
+                )
+            ),
+            tool_response(ToolCall("complete-plan", "update_plan", {"action": "complete"})),
+            final_response("approved plan completed"),
+        ],
+    )
+    context = runner.start_interactive()
+    runner.start_task(context, "plan the task")
+
+    runner.continue_task(context, "approve")
+
+    assert context.success is True
+    assert source.read_text(encoding="utf-8") == "value = 1\n"
+    assert str(source) not in context.read_file_state
+    cancelled = [
+        block
+        for message in context.messages
+        if message.get("role") == "user" and isinstance(message.get("content"), list)
+        for block in message["content"]
+        if isinstance(block, dict)
+        and block.get("type") == "tool_result"
+        and block.get("tool_use_id") in {"read", "edit"}
+    ]
+    assert len(cancelled) == 2
+    assert all("control_plane_transition" in block["content"] for block in cancelled)
+    assert model.calls[2]["tools"] != {"resolve_plan_response"}
+
+
 def test_natural_language_plan_cannot_bypass_structured_submission(tmp_path) -> None:
     runner, _ = make_runner(
         tmp_path,

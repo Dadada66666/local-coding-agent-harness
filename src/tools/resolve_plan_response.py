@@ -118,6 +118,7 @@ class ResolvePlanResponseTool(BaseTool):
                 "approval_source": state.approval_source,
                 "user_continuation_id": continuation_id,
                 "changed": False,
+                "control_plane_transition": True,
             },
         )
 

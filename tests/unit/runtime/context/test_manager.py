@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from types import SimpleNamespace
 
+from agent.messages import ToolCall
 from runtime.config import RunConfig
 from agent.loop import AgentLoop
 from runtime.bootstrap import build_runtime
@@ -12,6 +13,7 @@ from runtime.context.manager import (
     RUNTIME_CHECKPOINT_PREFIX,
     ToolResultProjection,
 )
+from runtime.context.projection import ToolResultProjector
 
 
 class DummyTrace:
@@ -224,6 +226,21 @@ def test_projection_adjusts_provider_anchor_without_reusing_stale_usage() -> Non
     assert adjusted == 800
 
 
+def test_eager_projection_watermarks_derive_from_context_target() -> None:
+    manager = ContextManager()
+
+    automatic = manager._eager_watermarks(RunConfig(context_target_tokens=32_000))
+    explicit = manager._eager_watermarks(
+        RunConfig(
+            context_target_tokens=32_000,
+            context_eager_projection_tokens=12_000,
+        )
+    )
+
+    assert automatic == (23_040, 19_353)
+    assert explicit == (12_000, 10_080)
+
+
 def test_economic_token_target_triggers_compaction_before_char_fallback() -> None:
     messages = [{"role": "user", "content": "initial prompt"}]
     for index in range(5):
@@ -268,7 +285,7 @@ def test_consumed_tool_results_project_before_full_context_pressure(tmp_path) ->
     for index in range(4):
         context.messages.extend(
             [
-                tool_use_message(f"call_{index}"),
+                tool_use_message(f"call_{index}", name="bash"),
                 tool_result_message(f"call_{index}", "source output\n" * 200),
             ]
         )
@@ -286,6 +303,169 @@ def test_consumed_tool_results_project_before_full_context_pressure(tmp_path) ->
     )
 
 
+def test_active_source_scan_survives_eager_projection(tmp_path) -> None:
+    source = tmp_path / "game.js"
+    source.write_text(
+        "\n".join(f"const line{index} = {index};" for index in range(951)),
+        encoding="utf-8",
+    )
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(
+            permission_mode="accept_edits",
+            context_eager_projection_tokens=100,
+            context_min_recent_rounds=1,
+            compact_threshold_chars=1_000_000,
+        ),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.messages = [{"role": "user", "content": "inspect"}]
+    for index, offset in enumerate((0, 200, 400)):
+        call_id = f"source-{index}"
+        context.add_assistant_message(tool_use_message(call_id))
+        result = runner.runtime.executor.execute(
+            ToolCall(call_id, "read_file", {"path": "game.js", "offset": offset, "limit": 200}),
+            context,
+        )
+        context.add_tool_result(call_id, result.content)
+    context.last_model_consumed_message_count = len(context.messages)
+
+    preparation = ContextManager().prepare_context(context)
+
+    state = context.read_file_segments[str(source)]
+    assert state.fully_scanned is False
+    assert preparation.tool_results_projected == 0
+    assert "Source observation compacted" not in str(context.messages)
+    assert not list((context.run_dir / "artifacts").glob("*.txt"))
+
+
+def test_abandoned_partial_source_scan_is_not_pinned_indefinitely(tmp_path) -> None:
+    source = tmp_path / "game.js"
+    source.write_text(
+        "\n".join(f"const line{index} = {index};" for index in range(951)),
+        encoding="utf-8",
+    )
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits"),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.current_turn_id = 1
+    result = runner.runtime.executor.execute(
+        ToolCall("source", "read_file", {"path": "game.js", "limit": 200}),
+        context,
+    )
+    metadata = context.tool_result_metadata["source"]
+
+    context.current_turn_id = 3
+
+    assert context.active_source_states() == []
+    assert context.should_protect_source_observation(metadata) is False
+    assert result.metadata["fully_scanned"] is False
+
+
+def test_completed_source_projection_uses_line_stub_without_artifacts(tmp_path) -> None:
+    source = tmp_path / "game.js"
+    source.write_text(
+        "\n".join(f"const line{index} = {index};" for index in range(400)),
+        encoding="utf-8",
+    )
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits"),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.messages = [{"role": "user", "content": "inspect"}]
+    for index, offset in enumerate((0, 200)):
+        call_id = f"source-{index}"
+        context.current_turn_id = index + 1
+        context.add_assistant_message(tool_use_message(call_id))
+        result = runner.runtime.executor.execute(
+            ToolCall(call_id, "read_file", {"path": "game.js", "offset": offset, "limit": 200}),
+            context,
+        )
+        context.add_tool_result(call_id, result.content)
+    context.current_turn_id = 3
+    context.mark_model_request_consumed(len(context.messages))
+
+    projection = ToolResultProjector().compact_consumed_results(
+        context,
+        compact_before=len(context.messages),
+        protect_active_sources=True,
+    )
+
+    assert projection.count == 2
+    assert "Source observation compacted" in str(context.messages)
+    assert "read_file" in str(context.messages)
+    assert not context.tool_result_artifacts
+    assert not list((context.run_dir / "artifacts").glob("*.txt"))
+
+
+def test_checkpoint_retains_bounded_source_manifest(tmp_path) -> None:
+    source = tmp_path / "game.js"
+    source.write_text("\n".join(f"line {index}" for index in range(400)), encoding="utf-8")
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits"),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    tool = runner.runtime.tool_registry.get("read_file")
+    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    tool.call({"path": "game.js", "offset": 200, "limit": 200}, context)
+
+    checkpoint = ContextManager().checkpoint_builder.build(
+        context,
+        [{"role": "user", "content": "inspect"}],
+    )
+
+    assert '"source_context"' in checkpoint
+    assert '"path": "game.js"' in checkpoint
+    assert '"fully_scanned": true' in checkpoint
+    assert "line 399" not in checkpoint
+
+
+def test_source_efficiency_metrics_are_written_to_report_and_cost(tmp_path) -> None:
+    (tmp_path / "game.js").write_text(
+        "\n".join(f"line {index}" for index in range(400)),
+        encoding="utf-8",
+    )
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits"),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    tool = runner.runtime.tool_registry.get("read_file")
+    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    tool.call({"path": "game.js", "offset": 200, "limit": 200}, context)
+    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+
+    report = context.report_writer.write(context).read_text(encoding="utf-8")
+    cost_path = context.cost_tracker.write(context)
+    cost = json.loads(cost_path.read_text(encoding="utf-8"))
+
+    assert "## Source Read Efficiency" in report
+    assert "read_file_calls: 3" in report
+    assert "redundant_reads_avoided: 1" in report
+    assert cost["source_read_efficiency"]["read_file_calls"] == 3
+    assert cost["source_read_efficiency"]["redundant_reads_avoided"] == 1
+    assert "source_working_set" in cost["context_management"]
+
+
 def test_microcompact_only_clears_consumed_old_observations(tmp_path) -> None:
     runner = AgentLoop(
         model_client=object(),
@@ -299,7 +479,7 @@ def test_microcompact_only_clears_consumed_old_observations(tmp_path) -> None:
     for index in range(3):
         context.messages.extend(
             [
-                tool_use_message(f"call_{index}"),
+                tool_use_message(f"call_{index}", name="bash"),
                 tool_result_message(f"call_{index}", f"output {index}" * 100),
             ]
         )

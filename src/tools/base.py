@@ -37,7 +37,7 @@ class BaseTool(ABC):
         """Return whether this tool should be exposed and callable in the current state."""
         return True
 
-    def schema(self) -> dict:
+    def schema(self, context=None) -> dict:
         return {
             "name": self.name,
             "description": self.description,

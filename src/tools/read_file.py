@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
@@ -17,6 +19,7 @@ class ReadFileTool(BaseTool):
             "path": {"type": "string"},
             "offset": {"type": "integer"},
             "limit": {"type": "integer"},
+            "force": {"type": "boolean"},
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -44,12 +47,15 @@ class ReadFileTool(BaseTool):
             raise ToolValidationError("offset must be >= 0")
         if int(args.get("limit", DEFAULT_LIMIT)) <= 0:
             raise ToolValidationError("limit must be > 0")
+        if "force" in args and not isinstance(args["force"], bool):
+            raise ToolValidationError("force must be a boolean")
 
     def call(self, args: dict, context) -> ToolResult:
         requested_path = args["path"]
         target = context.safe_path(requested_path)
         offset = int(args.get("offset", 0))
         limit = int(args.get("limit", DEFAULT_LIMIT))
+        force = bool(args.get("force", False))
 
         if context.access_policy.is_protected_resolved_read(context.repo_path, target):
             return ToolResult(
@@ -73,6 +79,77 @@ class ReadFileTool(BaseTool):
                 error="decode error",
                 metadata={"encoding": "utf-8", "reason": str(exc)},
             )
+
+        snapshot = context.record_file_snapshot(
+            target,
+            raw,
+            partial=True,
+            reuse_hash=True,
+        )
+        state = context.source_read_state(
+            target,
+            requested_path=requested_path,
+            sha256=snapshot.sha256,
+            total_lines=len(lines),
+        )
+        requested_end = min(offset + limit, len(lines))
+        requested_lines = max(requested_end - offset, 0)
+        already_seen = state.overlap(offset, requested_end)
+        overlap_ratio = already_seen / requested_lines if requested_lines else 0.0
+        broad_read = requested_lines >= self._broad_read_threshold(len(lines))
+        high_overlap = requested_lines > 0 and overlap_ratio >= 0.8
+        metrics = context.source_read_metrics
+        metrics.read_file_calls += 1
+        metrics.files_read.add(state.source_path)
+        if high_overlap:
+            metrics.high_overlap_rereads += 1
+
+        if state.fully_scanned and broad_read and high_overlap and not force:
+            metrics.redundant_reads_avoided += 1
+            context.record_file_snapshot(
+                target,
+                raw,
+                partial=False,
+                reuse_hash=True,
+            )
+            return ToolResult(
+                ok=True,
+                content=(
+                    "This unchanged source file was already fully scanned in the current task.\n"
+                    f"Requested range lines {offset + 1}-{requested_end} is "
+                    f"{overlap_ratio:.0%} previously covered.\n"
+                    "Use grep for symbol discovery, a narrow read_file range for exact edit "
+                    "context, or force=true for an intentional refresh."
+                ),
+                metadata={
+                    **self._source_metadata(
+                        context,
+                        target,
+                        requested_path,
+                        snapshot.sha256,
+                        total_lines=len(lines),
+                    ),
+                    "offset": offset,
+                    "limit": limit,
+                    "returned_lines": 0,
+                    "returned_line_start": None,
+                    "returned_line_end": None,
+                    "remaining_lines": max(len(lines) - offset, 0),
+                    "next_offset": None,
+                    "has_more": False,
+                    "pagination": "lines",
+                    "page_limited_by_chars": False,
+                    "repeated_segment": True,
+                    "redundant_source": True,
+                    "overlap_ratio": round(overlap_ratio, 4),
+                    "already_seen_lines": already_seen,
+                    "new_lines": 0,
+                    "fully_scanned": True,
+                    "partial": False,
+                    "projection_kind": "source_notice",
+                },
+            )
+
         selected = lines[offset : offset + limit]
         rendered, page_limited = self._render_bounded_page(
             selected,
@@ -85,17 +162,30 @@ class ReadFileTool(BaseTool):
         has_more = remaining > 0
         next_offset = returned_end_offset if has_more else None
 
-        snapshot = context.record_file_snapshot(target, raw, partial=True)
-        segment = (offset, returned_end_offset, snapshot.sha256)
-        segment_store = getattr(context, "read_file_segments", None)
-        if segment_store is None:
-            segment_store = {}
-            context.read_file_segments = segment_store
-        seen = segment_store.setdefault(str(target), set())
-        repeated_segment = segment in seen
-        seen.add(segment)
-        partial = not self._covers_file(seen, snapshot.sha256, len(lines))
-        snapshot = context.record_file_snapshot(target, raw, partial=partial)
+        already_seen, new_lines, became_fully_scanned = state.record_range(
+            offset,
+            returned_end_offset,
+            observation_chars=sum(len(value) + 1 for value in rendered),
+            turn_id=getattr(context, "current_turn_id", None),
+        )
+        returned_overlap_ratio = (
+            already_seen / returned_count if returned_count else 0.0
+        )
+        repeated_segment = returned_count > 0 and already_seen == returned_count
+        metrics.unique_source_lines_returned += new_lines
+        metrics.duplicate_source_lines_returned += already_seen
+        if became_fully_scanned:
+            metrics.fully_scanned_files.add(state.source_path)
+        if force and state.fully_scanned and high_overlap:
+            if state.record_forced_rescan(offset, returned_end_offset):
+                metrics.full_rescans += 1
+        partial = not state.fully_scanned
+        snapshot = context.record_file_snapshot(
+            target,
+            raw,
+            partial=partial,
+            reuse_hash=True,
+        )
 
         if repeated_segment:
             rendered.append(
@@ -127,7 +217,16 @@ class ReadFileTool(BaseTool):
                 "pagination": "lines",
                 "page_limited_by_chars": page_limited,
                 "repeated_segment": repeated_segment,
+                "redundant_source": False,
+                "overlap_ratio": round(returned_overlap_ratio, 4),
+                "already_seen_lines": already_seen,
+                "new_lines": new_lines,
                 "snapshot_sha256": snapshot.sha256,
+                "source_sha256": snapshot.sha256,
+                "source_path": state.source_path,
+                "projection_kind": "source_slice",
+                "reconstructible": True,
+                "fully_scanned": state.fully_scanned,
                 "partial": partial,
             },
         )
@@ -156,19 +255,31 @@ class ReadFileTool(BaseTool):
             used += added
         return rendered, len(rendered) < len(lines)
 
-    def _covers_file(
+    def _broad_read_threshold(self, total_lines: int) -> int:
+        if total_lines <= 0:
+            return DEFAULT_LIMIT
+        return max(50, min(DEFAULT_LIMIT, math.ceil(total_lines * 0.15)))
+
+    def _source_metadata(
         self,
-        segments: set[tuple[int, int, str]],
+        context,
+        target,
+        requested_path: str,
         sha256: str,
+        *,
         total_lines: int,
-    ) -> bool:
-        if total_lines == 0:
-            return True
-        covered_until = 0
-        for start, end, segment_sha in sorted(segments):
-            if segment_sha != sha256 or start > covered_until:
-                continue
-            covered_until = max(covered_until, end)
-            if covered_until >= total_lines:
-                return True
-        return False
+    ) -> dict:
+        try:
+            source_path = target.relative_to(context.repo_path).as_posix()
+        except ValueError:
+            source_path = requested_path
+        return {
+            "path": str(target),
+            "requested_path": requested_path,
+            "resolved_path": str(target),
+            "source_path": source_path,
+            "source_sha256": sha256,
+            "snapshot_sha256": sha256,
+            "total_lines": total_lines,
+            "reconstructible": True,
+        }

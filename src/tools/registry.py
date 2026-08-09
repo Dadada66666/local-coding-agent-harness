@@ -17,14 +17,20 @@ class ToolRegistry:
 
     def schemas(self, context=None) -> list[dict]:
         return [
-            tool.schema()
+            tool.schema(context)
             for tool in self._tools.values()
-            if tool.is_available(context)
+            if self._is_available(tool, context)
         ]
 
     def names(self, context=None) -> list[str]:
         return [
             tool.name
             for tool in self._tools.values()
-            if tool.is_available(context)
+            if self._is_available(tool, context)
         ]
+
+    def _is_available(self, tool: BaseTool, context) -> bool:
+        if not tool.is_available(context):
+            return False
+        visibility = getattr(context, "is_tool_visible", None)
+        return bool(visibility(tool.name)) if callable(visibility) else True

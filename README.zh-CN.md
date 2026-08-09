@@ -145,7 +145,10 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 会在权限判断前阻止 Bash 和仓库副作用；direct 或已授权执行阶段则把调用交回现有 Permission Gate。
 计划状态本身不会自动批准任何文件或命令权限。
 
-计划工具按状态动态可见：
+工具可见性按计划状态动态收窄。规划阶段只暴露检查工具和当前阶段合法的计划 action；存在新用户输入的
+待批准阶段只暴露 `resolve_plan_response`。Plan Gate 仍会拦截伪造或过期调用，不把可见性当安全边界。
+
+计划工具使用同一份 capability 投影：
 
 - `auto + undecided`：显示 `select_execution_mode`
 - `plan + planning/executing`：显示 `update_plan`
@@ -167,8 +170,9 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 - `list_dir`：列出可见文件和目录，跳过 `.agent`、`.git`、`.venv`、`node_modules`、`__pycache__` 等 runtime/cache 目录。
 - `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
 - `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。每页明确返回总行数、实际行范围、
-  `next_offset` 和 `has_more`；普通源码页会先按字符预算收窄，相同 snapshot 的重复区间只给出提示而不阻断模型。
-  非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
+  `next_offset` 和 `has_more`；task-local、绑定 SHA 的区间覆盖会识别重叠和完整扫描。未变化且已完整扫描
+  的源码再次被宽范围读取时只返回小型提示，`force=true` 可显式刷新。非 UTF-8 文件会返回普通工具失败，
+  而不是未处理的 decode exception。
 - `read_artifact`：通过当前 run 内有效的不透明 ID，分页读取大工具结果；不接受文件系统路径。
 - `write_file`：写入完整的 UTF-8 文件。新文件使用排他创建；已有文件必须具备完整且最新的 snapshot，并通过原子替换写入。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
@@ -200,9 +204,10 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 - Shell 风险分析具备引号感知能力，并会记录复合副作用。网络命令如果同时创建目录或写文件，审批会同时展示目标主机和文件路径，不会用单一 `network` 标签隐藏写入行为。
 - 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
 - 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 可作为本地估算的锚点。容量软上限与默认 32K 经济上下文目标取较小值，字符阈值继续作为兼容兜底。
-- 上下文缩减采用分层策略：先按单轮总预算把大 observation 落盘；达到提前投影阈值后，将已消费的旧
-  observation 替换为保留来源信息的可恢复引用；最后才生成有界 runtime checkpoint，并完整保留最近 API rounds。
-  append-only 审计历史不会被改写。
+- 上下文缩减采用分层策略。提前投影水位默认按经济上下文目标派生并带滞回；预算允许时，分页源码在
+  完成连贯扫描且被模型消费前暂时保留，硬上下文安全始终优先。已消费源码页转换为保持行坐标的 source
+  stub，不生成通用 artifact；Bash、grep 和日志仍保留可恢复 artifact。完整压缩会写入有界 source
+  manifest，append-only 审计历史不会被改写。
 - 交互任务切换时，如果已完成历史超过 token 阈值，runtime 会在下一任务开始前生成确定性 checkpoint；当前 prompt 和 append-only 审计链保持完整。
 - provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
 - 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。

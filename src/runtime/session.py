@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any
 
 from runtime.config import RunConfig
+from runtime.context.source_state import SourceReadMetrics, SourceReadState
+from runtime.plan import ExecutionPath, PlanPhase
+from runtime.plan.capabilities import context_tool_is_visible
 from runtime.security.access_policy import AccessPolicy
 from runtime.security.permission_rules import PermissionRuleStore
 from runtime.task import (
@@ -98,7 +101,8 @@ class AgentContext:
     access_policy: AccessPolicy = field(default_factory=AccessPolicy)
     permission_rules: PermissionRuleStore = field(default_factory=PermissionRuleStore)
     read_file_state: dict[str, ReadFileSnapshot] = field(default_factory=dict)
-    read_file_segments: dict[str, set[tuple[int, int, str]]] = field(default_factory=dict)
+    read_file_segments: dict[str, SourceReadState] = field(default_factory=dict)
+    source_read_metrics: SourceReadMetrics = field(default_factory=SourceReadMetrics)
     tool_budget: ToolBudget = field(default_factory=ToolBudget)
     sandbox_auto_allowed_unknown_bash_count: int = 0
     context_generation: int = 0
@@ -111,6 +115,8 @@ class AgentContext:
     last_model_consumed_message_count: int = 0
     tool_result_artifacts: dict[str, str] = field(default_factory=dict)
     tool_result_provenance: dict[str, str] = field(default_factory=dict)
+    tool_result_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
+    eager_projection_active: bool = False
     completed_tasks: list[dict[str, Any]] = field(default_factory=list)
 
     def add_user_message(self, message: dict) -> None:
@@ -123,20 +129,211 @@ class AgentContext:
             raise ValueError(f"Path escapes WORKDIR: {path}")
         return resolved
 
-    def record_file_snapshot(self, target: Path, raw: bytes, *, partial: bool) -> ReadFileSnapshot:
+    def record_file_snapshot(
+        self,
+        target: Path,
+        raw: bytes,
+        *,
+        partial: bool,
+        reuse_hash: bool = False,
+    ) -> ReadFileSnapshot:
         stat = target.stat()
+        key = str(target)
+        previous = self.read_file_state.get(key)
+        sha256 = (
+            previous.sha256
+            if reuse_hash
+            and previous is not None
+            and previous.mtime_ns == stat.st_mtime_ns
+            and previous.size == stat.st_size
+            else hashlib.sha256(raw).hexdigest()
+        )
         snapshot = ReadFileSnapshot(
             mtime_ns=stat.st_mtime_ns,
             size=stat.st_size,
-            sha256=hashlib.sha256(raw).hexdigest(),
+            sha256=sha256,
             partial=partial,
         )
-        key = str(target)
-        previous = self.read_file_state.get(key)
         if previous is not None and previous.sha256 != snapshot.sha256:
             self.read_file_segments.pop(key, None)
         self.read_file_state[key] = snapshot
         return snapshot
+
+    def source_read_state(
+        self,
+        target: Path,
+        *,
+        requested_path: str,
+        sha256: str,
+        total_lines: int,
+    ) -> SourceReadState:
+        key = str(target)
+        state = self.read_file_segments.get(key)
+        if (
+            state is None
+            or state.sha256 != sha256
+            or state.total_lines != total_lines
+        ):
+            try:
+                source_path = target.relative_to(self.repo_path).as_posix()
+            except ValueError:
+                source_path = requested_path
+            state = SourceReadState(
+                source_path=source_path,
+                sha256=sha256,
+                total_lines=total_lines,
+            )
+            self.read_file_segments[key] = state
+        return state
+
+    def source_working_set_budget_tokens(self) -> int:
+        explicit = getattr(self.config, "source_working_set_max_tokens", None)
+        if explicit is not None and int(explicit) > 0:
+            return int(explicit)
+        target = getattr(self.config, "context_target_tokens", None)
+        if target is None:
+            target = getattr(self.config, "context_recent_max_tokens", 16000)
+        return max(1000, int(target * 0.45))
+
+    def active_source_states(self) -> list[SourceReadState]:
+        return [
+            state
+            for state in self.read_file_segments.values()
+            if state.active
+            and (
+                state.fully_scanned
+                or state.last_read_turn is None
+                or self.current_turn_id - state.last_read_turn <= 1
+            )
+        ]
+
+    def is_tool_visible(self, tool_name: str) -> bool:
+        return context_tool_is_visible(self, tool_name)
+
+    def active_source_tokens(self) -> int:
+        return sum(state.estimated_tokens for state in self.active_source_states())
+
+    def should_protect_source_observation(self, metadata: dict[str, Any]) -> bool:
+        if metadata.get("projection_kind") != "source_slice":
+            return False
+        resolved_path = str(metadata.get("resolved_path") or "")
+        state = self.read_file_segments.get(resolved_path)
+        if state is None or state.sha256 != metadata.get("source_sha256"):
+            return False
+        budget = self.source_working_set_budget_tokens()
+        active = self.active_source_states()
+        if not any(item is state for item in active):
+            return False
+        if sum(item.estimated_tokens for item in active) <= budget:
+            return True
+        most_recent = max(active, key=lambda item: item.last_read_turn or -1, default=None)
+        return state is most_recent and state.estimated_tokens <= budget
+
+    def record_source_observation(self, tool_call_id: str, metadata: dict[str, Any]) -> None:
+        if metadata.get("projection_kind") != "source_slice":
+            return
+        state = self.read_file_segments.get(str(metadata.get("resolved_path") or ""))
+        if state is None or state.sha256 != metadata.get("source_sha256"):
+            return
+        identifier = str(tool_call_id)
+        if identifier not in state.observation_ids:
+            state.observation_ids.append(identifier)
+
+    def mark_source_observation_projected(
+        self,
+        tool_call_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if metadata.get("projection_kind") != "source_slice":
+            return
+        state = self.read_file_segments.get(str(metadata.get("resolved_path") or ""))
+        identifier = str(tool_call_id)
+        if state is not None:
+            state.projected_observation_ids.add(identifier)
+        self.source_read_metrics.source_observations_projected += 1
+
+    def source_context_manifest(self, *, limit: int = 12) -> list[dict[str, Any]]:
+        states = sorted(
+            self.read_file_segments.values(),
+            key=lambda state: state.last_read_turn or -1,
+        )[-limit:]
+        return [
+            {
+                "path": state.source_path,
+                "sha": state.sha256[:16],
+                "total_lines": state.total_lines,
+                "fully_scanned": state.fully_scanned,
+                "covered_ranges": state.covered_ranges[:8],
+                "ranges_omitted": max(len(state.covered_ranges) - 8, 0),
+            }
+            for state in states
+        ]
+
+    def source_prompt_context(self, *, limit: int = 5) -> list[str]:
+        states = [
+            state
+            for state in self.read_file_segments.values()
+            if state.fully_scanned
+        ]
+        states.sort(key=lambda state: state.last_read_turn or -1)
+        return [
+            f"{state.source_path}: fully scanned, unchanged"
+            for state in states[-limit:]
+        ]
+
+    def source_efficiency_snapshot(self) -> dict[str, Any]:
+        metrics = self.source_read_metrics
+        returned = (
+            metrics.unique_source_lines_returned
+            + metrics.duplicate_source_lines_returned
+        )
+        return {
+            "read_file_calls": metrics.read_file_calls,
+            "unique_files_read": len(metrics.files_read),
+            "unique_source_lines_returned": metrics.unique_source_lines_returned,
+            "duplicate_source_lines_returned": metrics.duplicate_source_lines_returned,
+            "overlap_ratio": round(
+                metrics.duplicate_source_lines_returned / returned,
+                4,
+            )
+            if returned
+            else 0.0,
+            "files_fully_scanned": len(metrics.fully_scanned_files),
+            "full_rescans": metrics.full_rescans,
+            "high_overlap_rereads": metrics.high_overlap_rereads,
+            "redundant_reads_avoided": metrics.redundant_reads_avoided,
+            "generic_artifacts_created_from_source_reads": metrics.source_artifacts_created,
+            "source_snapshots_persisted": metrics.source_snapshots_persisted,
+        }
+
+    def source_working_set_snapshot(self, *, limit: int = 3) -> dict[str, Any]:
+        active = sorted(
+            self.active_source_states(),
+            key=lambda state: state.estimated_tokens,
+            reverse=True,
+        )
+        return {
+            "budget_tokens": self.source_working_set_budget_tokens(),
+            "active_source_files": len(active),
+            "active_source_tokens": sum(state.estimated_tokens for state in active),
+            "source_observations_pinned": sum(
+                state.unprojected_observation_count for state in active
+            ),
+            "source_observations_projected": (
+                self.source_read_metrics.source_observations_projected
+            ),
+            "projection_protection_decisions": (
+                self.source_read_metrics.source_projection_protections
+            ),
+            "top_active_sources": [
+                {
+                    "path": state.source_path,
+                    "estimated_tokens": state.estimated_tokens,
+                    "fully_scanned": state.fully_scanned,
+                }
+                for state in active[:limit]
+            ],
+        }
 
     def record_changed_file(self, path: str) -> None:
         self.read_file_segments.pop(str((self.repo_path / path).resolve()), None)
@@ -193,6 +390,9 @@ class AgentContext:
         self.task_tool_failures.clear()
         self.task_changed_files.clear()
         self.task_created_files.clear()
+        self.read_file_segments.clear()
+        self.source_read_metrics = SourceReadMetrics()
+        self.eager_projection_active = False
         self.pending_user_continuation_id = None
         self.pending_user_continuation = None
 
@@ -252,6 +452,8 @@ class AgentContext:
                 else None,
             }
         )
+        self._synchronize_terminal_plan(after, trigger=trigger)
+        self.validate_lifecycle_invariants()
         if persist_plan_snapshot and getattr(self, "plan_store", None) is not None:
             self.plan_store.save(self.plan_state, task=self.task)
 
@@ -297,6 +499,30 @@ class AgentContext:
             raise TaskTransitionError(
                 "task status waiting_user requires an awaiting-approval plan"
             )
+        if (
+            is_terminal_task_status(self.task_status)
+            and getattr(self.plan_state, "execution_path", None) is ExecutionPath.PLAN
+            and phase_value not in {"completed", "cancelled"}
+        ):
+            raise TaskTransitionError(
+                "a terminal task requires a terminal plan phase"
+            )
+
+    def _synchronize_terminal_plan(self, status: TaskStatus, *, trigger: str) -> None:
+        if status not in {TaskStatus.CANCELLED, TaskStatus.FAILED}:
+            return
+        state = getattr(self, "plan_state", None)
+        if (
+            state is None
+            or state.execution_path is not ExecutionPath.PLAN
+            or state.phase not in {
+                PlanPhase.PLANNING,
+                PlanPhase.AWAITING_APPROVAL,
+                PlanPhase.EXECUTING,
+            }
+        ):
+            return
+        self.plan_controller.cancel(f"Task became {status.value}: {trigger}")
 
     def add_user_continuation(self, text: str) -> int:
         if self.task_status is not TaskStatus.WAITING_USER:
@@ -380,6 +606,8 @@ class AgentContext:
 
     def mark_model_request_consumed(self, message_count: int) -> None:
         self.last_model_consumed_message_count = max(message_count, 0)
+        for state in self.read_file_segments.values():
+            state.mark_consumed(self.current_turn_id)
 
     def record_model_usage(self, usage: Any, response_message_index: int) -> None:
         self.last_model_usage = usage
@@ -392,6 +620,34 @@ class AgentContext:
         self.tool_result_provenance[str(tool_call_id)] = str(value)[:500]
         while len(self.tool_result_provenance) > 100:
             self.tool_result_provenance.pop(next(iter(self.tool_result_provenance)))
+
+    def record_tool_result_metadata(
+        self,
+        tool_call_id: str,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        if not metadata:
+            return
+        allowed = {
+            "projection_kind",
+            "source_path",
+            "source_sha256",
+            "resolved_path",
+            "returned_line_start",
+            "returned_line_end",
+            "total_lines",
+            "fully_scanned",
+            "reconstructible",
+            "next_offset",
+        }
+        bounded = {key: metadata[key] for key in allowed if key in metadata}
+        if not bounded:
+            return
+        identifier = str(tool_call_id)
+        self.tool_result_metadata[identifier] = bounded
+        self.record_source_observation(identifier, bounded)
+        while len(self.tool_result_metadata) > 200:
+            self.tool_result_metadata.pop(next(iter(self.tool_result_metadata)))
 
     def archive_terminal_task(self) -> bool:
         if (

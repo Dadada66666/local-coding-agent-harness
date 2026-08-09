@@ -5,15 +5,6 @@ from runtime.plan.models import ExecutionPath, PlanApprovalPolicy, PlanPhase, Pl
 from tools.base import ToolResult
 
 
-READ_ONLY_PLAN_TOOLS = {
-    "list_dir",
-    "grep",
-    "read_file",
-    "read_artifact",
-    "view_diff",
-}
-
-
 class PlanGate:
     """Block side effects until the plan lifecycle authorizes execution."""
 
@@ -25,15 +16,7 @@ class PlanGate:
         if capabilities.can_execute_side_effects:
             return None
 
-        allowed = set(READ_ONLY_PLAN_TOOLS)
-        if capabilities.can_select_execution_mode:
-            allowed.add("select_execution_mode")
-        if capabilities.can_update_plan:
-            allowed.add("update_plan")
-        if capabilities.can_resolve_plan_response:
-            allowed.add("resolve_plan_response")
-
-        if tool_call.name in allowed:
+        if capabilities.tool_is_visible(tool_call.name):
             return None
 
         requires_selection = state.execution_path is ExecutionPath.UNDECIDED

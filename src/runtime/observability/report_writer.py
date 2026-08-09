@@ -61,6 +61,9 @@ class ReportWriter:
             "## Context Management",
             *self._context_management_summary(context),
             "",
+            "## Source Read Efficiency",
+            *self._source_read_efficiency(context),
+            "",
             "## Sandbox",
             *self._sandbox_summary(context),
             "",
@@ -286,13 +289,51 @@ class ReportWriter:
         tracker = context.cost_tracker
         events = getattr(tracker, "context_events", [])
         saved_tokens = sum(max(int(event.get("saved_tokens", 0)), 0) for event in events)
-        return [
+        lines = [
             "- scope: session",
             f"- window_tokens: {getattr(context.config, 'context_window_tokens', None) or 'unknown'}",
             f"- target_tokens: {getattr(context.config, 'context_target_tokens', None) or 'disabled'}",
             f"- compactions: {getattr(context, 'context_compactions', 0)}",
             f"- overflow_recovery_attempts: {getattr(context, 'context_recovery_attempts', 0)}",
             f"- estimated_tokens_saved: {saved_tokens}",
+        ]
+        snapshot = getattr(context, "source_working_set_snapshot", None)
+        working_set = snapshot() if callable(snapshot) else {}
+        if working_set:
+            lines.extend(
+                [
+                    f"- source_working_set_budget_tokens: {working_set['budget_tokens']}",
+                    f"- active_source_files: {working_set['active_source_files']}",
+                    f"- active_source_tokens: {working_set['active_source_tokens']}",
+                    f"- source_observations_pinned: {working_set['source_observations_pinned']}",
+                    f"- source_observations_projected: {working_set['source_observations_projected']}",
+                ]
+            )
+            for source in working_set.get("top_active_sources", []):
+                lines.append(
+                    "- active_source: "
+                    f"{source['path']} ({source['estimated_tokens']} estimated tokens)"
+                )
+        return lines
+
+    def _source_read_efficiency(self, context: AgentContext) -> list[str]:
+        snapshot = getattr(context, "source_efficiency_snapshot", None)
+        values = snapshot() if callable(snapshot) else {}
+        if not values:
+            return ["- N/A"]
+        return [
+            f"- read_file_calls: {values['read_file_calls']}",
+            f"- unique_files_read: {values['unique_files_read']}",
+            f"- unique_source_lines_returned: {values['unique_source_lines_returned']}",
+            f"- duplicate_source_lines_returned: {values['duplicate_source_lines_returned']}",
+            f"- overlap_ratio: {values['overlap_ratio']:.2%}",
+            f"- files_fully_scanned: {values['files_fully_scanned']}",
+            f"- full_rescans: {values['full_rescans']}",
+            f"- high_overlap_rereads: {values['high_overlap_rereads']}",
+            f"- redundant_reads_avoided: {values['redundant_reads_avoided']}",
+            "- generic_artifacts_created_from_source_reads: "
+            f"{values['generic_artifacts_created_from_source_reads']}",
+            f"- source_snapshots_persisted: {values['source_snapshots_persisted']}",
         ]
 
     def _plan_section(self, context: AgentContext) -> list[str]:

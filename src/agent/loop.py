@@ -149,6 +149,8 @@ class AgentLoop:
         )
 
     def run_until_idle(self, context: AgentContext) -> None:
+        if self._pause_waiting_plan_without_user_input(context):
+            return
         while not context.finished:
             validator = getattr(context, "validate_lifecycle_invariants", None)
             if callable(validator):
@@ -184,6 +186,11 @@ class AgentLoop:
                     bool(pending_continuation())
                     if callable(pending_continuation)
                     else False
+                ),
+                source_context=(
+                    context.source_prompt_context()
+                    if callable(getattr(context, "source_prompt_context", None))
+                    else None
                 ),
             )
             tool_schemas = self._tool_schemas(context)
@@ -374,14 +381,19 @@ class AgentLoop:
             tool_results: list[tuple[str, str, bool]] = []
             executions = []
             cancelled_count = 0
+            control_plane_boundary = False
             for tool_call in response.tool_calls:
-                if context.finished:
+                if context.finished or control_plane_boundary:
                     tool_results.append(
                         self._cancelled_tool_result(
                             context,
                             tool_call,
                             turn_id,
-                            reason="earlier_tool_call_ended_task",
+                            reason=(
+                                "control_plane_transition"
+                                if control_plane_boundary
+                                else "earlier_tool_call_ended_task"
+                            ),
                         )
                     )
                     cancelled_count += 1
@@ -390,6 +402,8 @@ class AgentLoop:
                 result = self.runtime.executor.execute(tool_call, context)
                 executions.append((tool_call, result))
                 tool_results.append((tool_call.id, result.content, not result.ok))
+                if result.ok and result.metadata.get("control_plane_transition"):
+                    control_plane_boundary = True
 
             context.add_tool_results(tool_results)
             context.task_tool_rounds = getattr(context, "task_tool_rounds", 0) + 1
@@ -532,7 +546,10 @@ class AgentLoop:
         *,
         reason: str,
     ) -> tuple[str, str, bool]:
-        content = "Cancelled because the current task cannot safely execute this tool call."
+        content = (
+            "Cancelled because the current task cannot safely execute this tool call "
+            f"after {reason}."
+        )
         context.trace.log(
             {
                 "type": "tool_result",
@@ -547,6 +564,32 @@ class AgentLoop:
             }
         )
         return tool_call.id, content, True
+
+    def _pause_waiting_plan_without_user_input(self, context: AgentContext) -> bool:
+        state = getattr(context, "plan_state", None)
+        pending = getattr(context, "has_pending_user_continuation", None)
+        if (
+            state is None
+            or state.phase is not PlanPhase.AWAITING_APPROVAL
+            or (callable(pending) and pending())
+        ):
+            return False
+        context.finished = True
+        context.success = False
+        context.abort_reason = None
+        context.final_text = (
+            "Plan is awaiting user approval. No repository changes were executed.\n\n"
+            f"{context.plan_controller.status_text()}"
+        )
+        context.trace.log(
+            {
+                "type": "plan_waiting_pause",
+                "task_id": getattr(context, "task_id", None),
+                "plan_version": state.version,
+                "reason": "no_fresh_user_continuation",
+            }
+        )
+        return True
 
     def _response_action(self, response) -> str:
         stop_reason = response.stop_reason

@@ -82,5 +82,6 @@ class SelectExecutionModeTool(BaseTool):
                 "execution_path": state.execution_path.value,
                 "plan_phase": state.phase.value,
                 "changed": False,
+                "control_plane_transition": True,
             },
         )
