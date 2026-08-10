@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from runtime.call_budget import TaskCallBudget
 from runtime.session import AgentContext
 from runtime.plan import PlanPolicy
 
@@ -51,6 +52,9 @@ class ReportWriter:
             "",
             "## Repair Attempts",
             str(context.repair_attempts),
+            "",
+            "## Model Call Budget",
+            *self._call_budget(context),
             "",
             "## Task Cost",
             self._cost_summary(context, task_only=True),
@@ -284,6 +288,19 @@ class ReportWriter:
             f"cache_read_input_tokens={values['cache_read_input_tokens']}, "
             f"output_tokens={values['output_tokens']}"
         )
+
+    def _call_budget(self, context: AgentContext) -> list[str]:
+        budget = TaskCallBudget.from_context(context)
+        progress = getattr(context, "plan_execution_progress", None)
+        return [
+            f"- used: {budget.used_calls}/{budget.max_calls}",
+            f"- remaining: {budget.remaining_calls}",
+            f"- verification_reserve: {budget.verification_reserve_calls}",
+            f"- reserve_active: {str(budget.reserve_active).lower()}",
+            f"- planning_pressure: {budget.planning_pressure}",
+            f"- plan_detail_warning_after: {budget.plan_detail_warning_steps}",
+            f"- active_plan_step: {getattr(progress, 'step_id', None) or 'N/A'}",
+        ]
 
     def _context_management_summary(self, context: AgentContext) -> list[str]:
         tracker = context.cost_tracker

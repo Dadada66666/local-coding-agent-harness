@@ -98,6 +98,7 @@ def test_off_mode_preserves_original_prompt_and_tools(tmp_path) -> None:
 
     assert context.success is True
     assert "Plan policy:" not in model.calls[0]["system"]
+    assert "Call budget:" not in model.calls[0]["system"]
     assert "select_execution_mode" not in model.calls[0]["tools"]
     assert "update_plan" not in model.calls[0]["tools"]
     assert not (context.run_dir / "plan.json").exists()
@@ -122,11 +123,15 @@ def test_required_noninteractive_run_stops_for_approval_without_changes(tmp_path
     assert "2) Revise the plan" in context.final_text
     assert "3) Reject and cancel" in context.final_text
     assert "update_plan" in model.calls[0]["tools"]
+    assert "Call budget: 39/40 remain" in model.calls[0]["system"]
+    assert "choose their count by actual dependencies" in model.calls[0]["system"]
     assert (context.run_dir / "plan.json").is_file()
     report = (context.run_dir / "report.md").read_text(encoding="utf-8")
     assert "Status: waiting_user" in report
     assert "Success: pending" in report
     assert "Waiting reason: plan_approval" in report
+    assert "## Model Call Budget" in report
+    assert "- used: 1/40" in report
 
 
 def test_auto_plan_decision_with_auto_approval_continues_without_user_input(tmp_path) -> None:

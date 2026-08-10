@@ -9,6 +9,7 @@ from runtime.config import RunConfig
 from runtime.context.source_state import SourceReadMetrics, SourceReadState
 from runtime.plan import ExecutionPath, PlanPhase
 from runtime.plan.capabilities import context_tool_is_visible
+from runtime.progress import PlanExecutionProgress
 from runtime.security.access_policy import AccessPolicy
 from runtime.security.permission_rules import PermissionRuleStore
 from runtime.task import (
@@ -85,6 +86,9 @@ class AgentContext:
     task_failure_fingerprint: str | None = None
     task_failure_repeat_count: int = 0
     task_saturated_invalid_calls: int = 0
+    plan_execution_progress: PlanExecutionProgress = field(
+        default_factory=PlanExecutionProgress
+    )
     repair_attempts: int = 0
     last_test_result: dict | None = None
     task_test_result: dict | None = None
@@ -382,6 +386,7 @@ class AgentContext:
         self.task_failure_fingerprint = None
         self.task_failure_repeat_count = 0
         self.task_saturated_invalid_calls = 0
+        self.plan_execution_progress.reset()
         self.repair_attempts = 0
         self.context_recovery_attempts = 0
         self.context_compaction_failures = 0

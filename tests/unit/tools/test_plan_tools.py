@@ -180,6 +180,84 @@ def test_update_plan_schema_is_narrowed_by_plan_phase(tmp_path) -> None:
     assert executing_actions == {"update_step", "request_replan", "cancel", "complete"}
 
 
+def test_update_plan_budget_guidance_does_not_restrict_plan_steps(tmp_path) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+    context.task_model_calls = 9
+
+    planning_schema = next(
+        schema
+        for schema in runtime.tool_registry.schemas(context)
+        if schema["name"] == "update_plan"
+    )["input_schema"]
+    replace_contract = next(
+        contract
+        for contract in planning_schema["oneOf"]
+        if contract["properties"]["action"]["const"] == "replace_plan"
+    )
+
+    assert replace_contract["properties"]["steps"]["maxItems"] == 100
+
+    result = runtime.executor.execute(
+        ToolCall(
+            "detailed-plan",
+            "update_plan",
+            {
+                "action": "replace_plan",
+                "steps": [
+                    {"id": f"step-{index}", "description": f"Work package {index}"}
+                    for index in range(10)
+                ],
+            },
+        ),
+        context,
+    )
+
+    assert result.ok is True
+    assert result.metadata["budget_warning"] is True
+    assert result.metadata["plan_detail_warning_steps"] == 9
+    assert "This is advisory" in result.content
+
+    oversized = runtime.executor.execute(
+        ToolCall(
+            "pathological-plan",
+            "update_plan",
+            {
+                "action": "replace_plan",
+                "steps": [
+                    {"id": f"step-{index}", "description": f"Work package {index}"}
+                    for index in range(101)
+                ],
+            },
+        ),
+        context,
+    )
+
+    assert oversized.ok is False
+    assert oversized.metadata["plan_error"] is True
+    assert "at most 100 steps" in oversized.error
+
+
+def test_submit_does_not_invalidate_an_existing_plan_as_budget_shrinks(tmp_path) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+    context.plan_controller.replace_plan(
+        [
+            {"id": f"step-{index}", "description": f"Work package {index}"}
+            for index in range(7)
+        ]
+    )
+    context.task_model_calls = 30
+
+    result = runtime.executor.execute(
+        ToolCall("submit-over-budget", "update_plan", {"action": "submit"}),
+        context,
+    )
+
+    assert result.ok is True
+    assert context.plan_state.phase is PlanPhase.AWAITING_APPROVAL
+
+
 def test_plan_response_tool_requires_fresh_user_continuation(tmp_path) -> None:
     runtime = build_runtime()
     context = make_context(tmp_path, PlanPolicy.REQUIRED)

@@ -51,6 +51,7 @@ def build_system_prompt(
     *,
     has_user_continuation: bool = False,
     source_context: list[str] | None = None,
+    call_budget=None,
 ) -> str:
     base = BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
@@ -60,6 +61,7 @@ def build_system_prompt(
     plan_instructions = build_plan_instructions(
         plan_state,
         has_user_continuation=has_user_continuation,
+        call_budget=call_budget,
     )
     sections = [base.rstrip()]
     if plan_instructions:
@@ -74,7 +76,12 @@ def build_system_prompt(
     return "\n\n".join(sections) + "\n"
 
 
-def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) -> str:
+def build_plan_instructions(
+    plan_state,
+    *,
+    has_user_continuation: bool = False,
+    call_budget=None,
+) -> str:
     if plan_state is None or plan_state.policy is PlanPolicy.OFF:
         return ""
 
@@ -97,13 +104,16 @@ def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) 
             if plan_state.revision_feedback
             else ""
         )
+        budget = _planning_budget_instructions(call_budget)
         return f"""Plan phase: planning (read-only).
 - Inspect actual files and modules; do not modify files or run Bash.
 - Maintain an executable, verifiable structured plan with update_plan.
+- Scope open-ended tasks to one coherent, high-value outcome and defer optional work.
+- Use coarse work packages rather than a fine-grained todo list; include verification.
 - When the plan is complete, prefer replace_plan with submit=true in one call.
 - Use stable unique step ids and concrete repository references.
 - Submit only after the plan is complete. {approval_rule}
-- Do not assume approval or describe a natural-language plan as submitted.{revision}"""
+- Do not assume approval or describe a natural-language plan as submitted.{budget}{revision}"""
 
     if plan_state.phase is PlanPhase.AWAITING_APPROVAL:
         if has_user_continuation:
@@ -124,18 +134,30 @@ def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) 
             ),
             None,
         )
+        next_pending = next(
+            (step for step in plan_state.steps if step.status is PlanStepStatus.PENDING),
+            None,
+        )
         current_text = (
             f"{current.id}: {current.description[:300]}"
             if current is not None
-            else "none selected"
+            else (
+                f"none selected; next pending is {next_pending.id}: "
+                f"{next_pending.description[:240]}"
+                if next_pending is not None
+                else "none selected"
+            )
         )
+        budget = _execution_budget_instructions(call_budget)
         return f"""Plan phase: executing authorized plan version {plan_state.version}.
 - Follow the approved plan and use update_plan to keep step status current.
 - Current step: {current_text}
+- Start a pending step in the same response as its first substantive tool work.
+- When practical, batch routine step-status updates with substantive work; do not spend a turn only announcing progress.
 - Repository tools still pass through the existing Permission Gate.
 - Run the smallest relevant verification after changes.
 - For a major deviation, request_replan instead of silently replacing the plan.
-- Mark all steps completed, then use update_plan action complete before the final response."""
+- Mark all steps completed, then use update_plan action complete before the final response.{budget}"""
 
     if plan_state.phase is PlanPhase.COMPLETED:
         return "Plan phase: completed. Provide the concise final task report now."
@@ -144,6 +166,37 @@ def build_plan_instructions(plan_state, *, has_user_continuation: bool = False) 
         return "Plan phase: cancelled. Do not perform additional repository work."
 
     return f"Plan phase: {plan_state.phase.value}. Do not start unapproved repository work."
+
+
+def _planning_budget_instructions(call_budget) -> str:
+    if call_budget is None:
+        return ""
+    if call_budget.planning_pressure == "tight":
+        step_guidance = "plan only the minimum implementation and verification path"
+    elif call_budget.planning_pressure == "constrained":
+        step_guidance = "use a compact outcome-level plan"
+    else:
+        step_guidance = "use outcome-level steps and choose their count by actual dependencies"
+    return (
+        "\n- Call budget: "
+        f"{call_budget.remaining_calls}/{call_budget.max_calls} remain; reserve "
+        f"{call_budget.verification_reserve_calls} for verify/finalize; "
+        f"{step_guidance}."
+    )
+
+
+def _execution_budget_instructions(call_budget) -> str:
+    if call_budget is None or not call_budget.nearing_reserve:
+        return ""
+    if call_budget.reserve_active:
+        return (
+            f"\n- Call budget: {call_budget.remaining_calls} remain; verify current "
+            "mutations and finalize now."
+        )
+    return (
+        f"\n- Call budget: {call_budget.remaining_calls} remain; finish current work, "
+        "then verify; avoid optional scope."
+    )
 
 
 SYSTEM_PROMPT = build_system_prompt(Path.cwd())
