@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from runtime.call_budget import TaskCallBudget
 from runtime.operation import Operation
 from runtime.plan import PlanError, PlanStepStatus
 from runtime.plan.capabilities import context_plan_capabilities
@@ -109,13 +110,12 @@ class UpdatePlanTool(BaseTool):
         if context is None:
             return schema
         actions = context_plan_capabilities(context).update_plan_actions
-        schema["input_schema"] = {
-            "oneOf": [
-                deepcopy(contract)
-                for contract in self.input_schema["oneOf"]
-                if contract["properties"]["action"]["const"] in actions
-            ]
-        }
+        contracts = [
+            deepcopy(contract)
+            for contract in self.input_schema["oneOf"]
+            if contract["properties"]["action"]["const"] in actions
+        ]
+        schema["input_schema"] = {"oneOf": contracts}
         return schema
 
     def is_available(self, context) -> bool:
@@ -182,8 +182,6 @@ class UpdatePlanTool(BaseTool):
             steps = args.get("steps")
             if not isinstance(steps, list) or not steps:
                 raise ToolValidationError("replace_plan requires a non-empty steps array")
-            if len(steps) > 100:
-                raise ToolValidationError("a plan may contain at most 100 steps")
             if "ready_for_approval" in args and not isinstance(
                 args["ready_for_approval"], bool
             ):
@@ -236,6 +234,12 @@ class UpdatePlanTool(BaseTool):
             )
 
         state = controller.state
+        budget = TaskCallBudget.from_context(context)
+        step_count = len(state.steps)
+        budget_warning = bool(
+            action == "replace_plan"
+            and step_count > budget.plan_detail_warning_steps
+        )
         control_plane_transition = (
             state.phase is not before_phase
             or state.execution_path is not before_path
@@ -245,6 +249,14 @@ class UpdatePlanTool(BaseTool):
             content=(
                 f"Plan action {action} recorded: phase={state.phase.value}, "
                 f"version={state.version}, approved_version={state.approved_version}."
+                + (
+                    " Plan detail note: this may be finer-grained than the remaining "
+                    "model-call budget warrants. This is advisory; keep the structure "
+                    "when dependencies require it, otherwise combine related work into "
+                    "top-level outcomes."
+                    if budget_warning
+                    else ""
+                )
             ),
             metadata={
                 "plan_action": action,
@@ -254,6 +266,10 @@ class UpdatePlanTool(BaseTool):
                 "approval_source": state.approval_source,
                 "step_id": args.get("step_id"),
                 "step_status": args.get("status"),
+                "step_count": step_count,
+                "budget_warning": budget_warning,
+                "plan_detail_warning_steps": budget.plan_detail_warning_steps,
+                "planning_pressure": budget.planning_pressure,
                 "changed": False,
                 "control_plane_transition": control_plane_transition,
             },

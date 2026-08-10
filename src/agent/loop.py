@@ -8,6 +8,7 @@ from pathlib import Path
 from agent.model_client import ModelClient, ModelContextOverflowError
 from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.bootstrap import RuntimeBundle
+from runtime.call_budget import TaskCallBudget
 from runtime.config import RunConfig
 from runtime.hooks import HookEvent
 from runtime.plan import (
@@ -188,6 +189,7 @@ class AgentLoop:
 
             context.turn_count += 1
             context.task_model_calls = getattr(context, "task_model_calls", 0) + 1
+            call_budget = TaskCallBudget.from_context(context)
             turn_id = context.turn_count
             context.current_turn_id = turn_id
             turn_started = time.monotonic()
@@ -197,6 +199,10 @@ class AgentLoop:
                     "turn_id": turn_id,
                     "task_id": getattr(context, "task_id", None),
                     "task_model_call": context.task_model_calls,
+                    "remaining_model_calls": call_budget.remaining_calls,
+                    "verification_reserve_calls": (
+                        call_budget.verification_reserve_calls
+                    ),
                     "message_count": len(context.messages),
                 }
             )
@@ -228,6 +234,7 @@ class AgentLoop:
                     if callable(getattr(context, "source_prompt_context", None))
                     else None
                 ),
+                call_budget=call_budget,
             )
             tool_schemas = self._tool_schemas(context)
             max_output_tokens = int(getattr(self.model_client, "max_tokens", 4096))
@@ -247,6 +254,11 @@ class AgentLoop:
                     "context_tokens": preparation.measurement.used_tokens,
                     "context_source": preparation.measurement.source,
                     "context_soft_limit": preparation.measurement.soft_limit_tokens,
+                    "remaining_model_calls": call_budget.remaining_calls,
+                    "verification_reserve_calls": (
+                        call_budget.verification_reserve_calls
+                    ),
+                    "verification_reserve_active": call_budget.reserve_active,
                 }
             )
             self.runtime.hooks.trigger(
@@ -960,6 +972,10 @@ class AgentLoop:
                 "max_output_tokens": int(getattr(self.model_client, "max_tokens", 4096)),
                 "tools": list(progress.tools),
                 "errors": list(progress.errors),
+                "current_step_id": progress.current_step_id,
+                "calls_without_progress": progress.calls_without_progress,
+                "remaining_model_calls": progress.remaining_model_calls,
+                "verification_reserve_calls": progress.verification_reserve_calls,
             }
         )
 
