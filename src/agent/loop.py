@@ -10,7 +10,15 @@ from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.bootstrap import RuntimeBundle
 from runtime.config import RunConfig
 from runtime.hooks import HookEvent
-from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy, PlanStepStatus
+from runtime.plan import (
+    PLAN_APPROVAL_CHOICES,
+    ExecutionPath,
+    PlanPhase,
+    PlanPolicy,
+    PlanStepStatus,
+    apply_plan_response,
+    deterministic_plan_response,
+)
 from runtime.session import AgentContext
 from runtime.session_factory import create_agent_session
 from runtime.task import TaskStatus, TaskTransitionError, is_terminal_task_status
@@ -19,6 +27,7 @@ from runtime.task import TaskStatus, TaskTransitionError, is_terminal_task_statu
 MAX_ERROR_CHARS = 1000
 COMPLETE_STOP_REASONS = {"end_turn", "stop_sequence"}
 INCOMPLETE_STOP_REASONS = {"max_tokens", "model_context_window_exceeded"}
+MAX_PLAN_RESPONSE_RETRIES = 1
 
 
 @dataclass
@@ -74,6 +83,23 @@ class AgentLoop:
 
     def continue_task(self, context: AgentContext, user_text: str) -> AgentContext:
         context.add_user_continuation(user_text)
+        if deterministic_plan_response(user_text) == "approve":
+            resolution = apply_plan_response(
+                context,
+                "approve",
+                source="deterministic_exact_match",
+                require_continuation=True,
+            )
+            context.trace.log(
+                {
+                    "type": "plan_response_fast_path",
+                    "task_id": context.task_id,
+                    "continuation_id": resolution.continuation_id,
+                    "action": resolution.action,
+                    "plan_phase": resolution.state.phase.value,
+                    "plan_version": resolution.state.version,
+                }
+            )
         self._prepare_invocation(context)
         try:
             self.run_until_idle(context)
@@ -151,6 +177,7 @@ class AgentLoop:
     def run_until_idle(self, context: AgentContext) -> None:
         if self._pause_waiting_plan_without_user_input(context):
             return
+        plan_response_retries = 0
         while not context.finished:
             validator = getattr(context, "validate_lifecycle_invariants", None)
             if callable(validator):
@@ -173,6 +200,15 @@ class AgentLoop:
                     "message_count": len(context.messages),
                 }
             )
+
+            if self._has_pending_plan_response(context):
+                compact_boundary = getattr(
+                    self.runtime.context_manager,
+                    "compact_control_plane_boundary",
+                    None,
+                )
+                if callable(compact_boundary):
+                    compact_boundary(context)
 
             pending_continuation = getattr(
                 context,
@@ -312,9 +348,86 @@ class AgentLoop:
             context.record_model_usage(response.usage, len(context.messages) - 1)
 
             response_action = self._response_action(response)
+            if self._plan_response_protocol_violation(
+                context,
+                response,
+                response_action=response_action,
+            ):
+                cancelled = [
+                    self._cancelled_tool_result(
+                        context,
+                        tool_call,
+                        turn_id,
+                        reason="plan_response_protocol_violation",
+                        metadata={"model_contract_violation": True},
+                    )
+                    for tool_call in response.tool_calls
+                ]
+                context.add_tool_results(cancelled)
+                context.trace.log(
+                    {
+                        "type": "plan_response_protocol_violation",
+                        "turn_id": turn_id,
+                        "continuation_id": context.pending_user_continuation_id,
+                        "tool_names": [call.name for call in response.tool_calls],
+                        "response_action": response_action,
+                    }
+                )
+                if plan_response_retries < MAX_PLAN_RESPONSE_RETRIES:
+                    plan_response_retries += 1
+                    context.add_runtime_message(
+                        {
+                            "role": "user",
+                            "content": (
+                                "A real user continuation is pending. Call "
+                                "resolve_plan_response exactly once; do not perform repository "
+                                "work in this control-plane turn."
+                            ),
+                        }
+                    )
+                    self._log_plan_response_retry(
+                        context,
+                        turn_id,
+                        retry_count=plan_response_retries,
+                        exhausted=False,
+                        cause="protocol_violation",
+                    )
+                    self._log_turn_end(context, turn_id, turn_started)
+                    continue
+                self._log_plan_response_retry(
+                    context,
+                    turn_id,
+                    retry_count=plan_response_retries,
+                    exhausted=True,
+                    cause="protocol_violation",
+                )
+                self._apply_plan_boundary(context)
+                self._log_turn_end(context, turn_id, turn_started)
+                break
+
             if response_action == "final":
                 plan_retry = self._plan_final_retry(context)
                 if plan_retry:
+                    if self._has_pending_plan_response(context):
+                        if plan_response_retries >= MAX_PLAN_RESPONSE_RETRIES:
+                            self._log_plan_response_retry(
+                                context,
+                                turn_id,
+                                retry_count=plan_response_retries,
+                                exhausted=True,
+                                cause="final_response",
+                            )
+                            self._apply_plan_boundary(context)
+                            self._log_turn_end(context, turn_id, turn_started)
+                            break
+                        plan_response_retries += 1
+                        self._log_plan_response_retry(
+                            context,
+                            turn_id,
+                            retry_count=plan_response_retries,
+                            exhausted=False,
+                            cause="final_response",
+                        )
                     context.add_runtime_message({"role": "user", "content": plan_retry})
                     context.trace.log(
                         {
@@ -420,6 +533,37 @@ class AgentLoop:
                 }
             )
 
+            if not context.finished and self._should_retry_plan_response(context, executions):
+                if plan_response_retries < MAX_PLAN_RESPONSE_RETRIES:
+                    plan_response_retries += 1
+                    context.add_runtime_message(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The latest real user response is still pending. The previous tool "
+                                "call was rejected by the runtime. Call resolve_plan_response "
+                                "exactly once with approve, revise (with feedback), or cancel. Do "
+                                "not call repository tools until it succeeds."
+                            ),
+                        }
+                    )
+                    self._log_plan_response_retry(
+                        context,
+                        turn_id,
+                        retry_count=plan_response_retries,
+                        exhausted=False,
+                        cause="rejected_tool_call",
+                    )
+                    self._log_turn_end(context, turn_id, turn_started)
+                    continue
+                self._log_plan_response_retry(
+                    context,
+                    turn_id,
+                    retry_count=plan_response_retries,
+                    exhausted=True,
+                    cause="rejected_tool_call",
+                )
+
             if not context.finished and self._apply_plan_boundary(context):
                 self._log_turn_end(context, turn_id, turn_started)
                 break
@@ -496,6 +640,7 @@ class AgentLoop:
         if state is None or state.policy is PlanPolicy.OFF:
             return False
         if state.phase is PlanPhase.AWAITING_APPROVAL:
+            pending_response = self._has_pending_plan_response(context)
             self._transition_task(
                 context,
                 TaskStatus.WAITING_USER,
@@ -505,16 +650,26 @@ class AgentLoop:
             context.finished = True
             context.success = False
             context.abort_reason = None
-            context.final_text = (
-                "Plan is awaiting user approval. No repository changes were executed.\n\n"
-                f"{context.plan_controller.status_text()}"
-            )
+            if pending_response:
+                context.final_text = (
+                    "The latest user response could not be resolved by the model. The plan "
+                    "remains awaiting approval and no repository changes were executed. "
+                    "Use /approve, /revise, or /cancel-plan for a deterministic control-plane "
+                    "action.\n\n"
+                    f"{context.plan_controller.status_text()}\n\n{PLAN_APPROVAL_CHOICES}"
+                )
+            else:
+                context.final_text = (
+                    "Plan is awaiting user approval. No repository changes were executed.\n\n"
+                    f"{context.plan_controller.status_text()}\n\n{PLAN_APPROVAL_CHOICES}"
+                )
             context.trace.log(
                 {
                     "type": "plan_awaiting_approval",
                     "turn_id": context.current_turn_id,
                     "version": state.version,
                     "step_count": len(state.steps),
+                    "pending_user_response": pending_response,
                 }
             )
             return True
@@ -538,6 +693,63 @@ class AgentLoop:
             return True
         return False
 
+    def _has_pending_plan_response(self, context: AgentContext) -> bool:
+        state = getattr(context, "plan_state", None)
+        pending = getattr(context, "has_pending_user_continuation", None)
+        return bool(
+            state is not None
+            and state.phase is PlanPhase.AWAITING_APPROVAL
+            and callable(pending)
+            and pending()
+        )
+
+    def _should_retry_plan_response(self, context: AgentContext, executions) -> bool:
+        if not self._has_pending_plan_response(context) or not executions:
+            return False
+        return all(not result.ok for _, result in executions)
+
+    def _plan_response_protocol_violation(
+        self,
+        context: AgentContext,
+        response,
+        *,
+        response_action: str,
+    ) -> bool:
+        if not self._has_pending_plan_response(context):
+            return False
+        if response_action == "final":
+            return False
+        if response_action != "tools":
+            return response_action == "protocol_error"
+        return not (
+            len(response.tool_calls) == 1
+            and response.tool_calls[0].name == "resolve_plan_response"
+        )
+
+    def _log_plan_response_retry(
+        self,
+        context: AgentContext,
+        turn_id: int,
+        *,
+        retry_count: int,
+        exhausted: bool,
+        cause: str,
+    ) -> None:
+        context.trace.log(
+            {
+                "type": (
+                    "plan_response_retry_exhausted"
+                    if exhausted
+                    else "plan_response_retry"
+                ),
+                "turn_id": turn_id,
+                "continuation_id": context.pending_user_continuation_id,
+                "retry_count": retry_count,
+                "max_retries": MAX_PLAN_RESPONSE_RETRIES,
+                "cause": cause,
+            }
+        )
+
     def _cancelled_tool_result(
         self,
         context,
@@ -545,11 +757,13 @@ class AgentLoop:
         turn_id: int,
         *,
         reason: str,
+        metadata: dict | None = None,
     ) -> tuple[str, str, bool]:
         content = (
             "Cancelled because the current task cannot safely execute this tool call "
             f"after {reason}."
         )
+        result_metadata = {"cancelled": True, "reason": reason, **(metadata or {})}
         context.trace.log(
             {
                 "type": "tool_result",
@@ -560,7 +774,7 @@ class AgentLoop:
                 "error": "cancelled",
                 "output_preview": content,
                 "artifact_path": None,
-                "metadata": {"cancelled": True, "reason": reason},
+                "metadata": result_metadata,
             }
         )
         return tool_call.id, content, True
@@ -579,7 +793,7 @@ class AgentLoop:
         context.abort_reason = None
         context.final_text = (
             "Plan is awaiting user approval. No repository changes were executed.\n\n"
-            f"{context.plan_controller.status_text()}"
+            f"{context.plan_controller.status_text()}\n\n{PLAN_APPROVAL_CHOICES}"
         )
         context.trace.log(
             {

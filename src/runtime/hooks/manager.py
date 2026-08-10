@@ -8,6 +8,7 @@ from typing import Any
 class HookEvent:
     USER_PROMPT_SUBMIT = "UserPromptSubmit"
     MODEL_CALL_START = "ModelCallStart"
+    PRE_TOOL_VALIDATE = "PreToolValidate"
     PRE_TOOL_USE = "PreToolUse"
     POST_TOOL_USE = "PostToolUse"
     STOP = "Stop"
@@ -20,6 +21,8 @@ class HookManager:
     Rules:
     - Hook returns None: continue.
     - Hook returns a value: stop current hook chain and return that value.
+    - PreToolValidate is reserved for runtime authorization gates that must run
+      before tool-specific argument validation.
     - PreToolUse can return ToolResult to block tool execution.
     - PostToolUse should mutate ToolResult in place and return None.
     - Stop hooks should not affect final task result.

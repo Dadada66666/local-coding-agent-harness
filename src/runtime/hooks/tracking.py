@@ -31,7 +31,7 @@ def pre_tool_trace_hook(tool_call, tool, context) -> None:
 
 
 def record_tool_budget_hook(tool_call, tool, result, context) -> None:
-    if result.metadata.get("blocked_by") == "plan_gate":
+    if result.metadata.get("blocked_by") in {"plan_gate", "tool_capability"}:
         return None
     budget = context.tool_budget
     name = tool_call.name
@@ -92,7 +92,7 @@ def failure_history_hook(tool_call, tool, result, context) -> None:
     if (
         result.ok
         or result.metadata.get("denied")
-        or result.metadata.get("blocked_by") == "plan_gate"
+        or result.metadata.get("blocked_by") in {"plan_gate", "tool_capability"}
     ):
         return None
     failures = getattr(context, "task_tool_failures", None)

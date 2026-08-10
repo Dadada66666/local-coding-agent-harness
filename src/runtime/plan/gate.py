@@ -24,6 +24,12 @@ class PlanGate:
             state.approval_policy is PlanApprovalPolicy.MANUAL
             and state.phase in {PlanPhase.PLANNING, PlanPhase.AWAITING_APPROVAL}
         )
+        pending_continuation = getattr(context, "has_pending_user_continuation", None)
+        requires_resolution = bool(
+            state.phase is PlanPhase.AWAITING_APPROVAL
+            and callable(pending_continuation)
+            and pending_continuation()
+        )
         if requires_selection:
             message = (
                 f"Plan gate blocked {tool_call.name}: call select_execution_mode before "
@@ -35,9 +41,16 @@ class PlanGate:
                 "Finish the structured plan with update_plan first."
             )
         elif state.phase is PlanPhase.AWAITING_APPROVAL:
-            message = (
-                f"Plan gate blocked {tool_call.name}: the plan is waiting for user approval."
-            )
+            if requires_resolution:
+                message = (
+                    f"Plan gate blocked {tool_call.name}: the latest user response is still "
+                    "unresolved. Call resolve_plan_response with approve, revise, or cancel; "
+                    "repository tools remain unavailable until that succeeds."
+                )
+            else:
+                message = (
+                    f"Plan gate blocked {tool_call.name}: the plan is waiting for user approval."
+                )
         else:
             message = f"Plan gate blocked {tool_call.name} in phase {state.phase.value}."
 
@@ -50,6 +63,7 @@ class PlanGate:
             "tool": tool_call.name,
             "requires_mode_selection": requires_selection,
             "requires_plan_approval": requires_approval,
+            "requires_plan_response_resolution": requires_resolution,
             "track_mutation_failure": False,
         }
         context.trace.log(

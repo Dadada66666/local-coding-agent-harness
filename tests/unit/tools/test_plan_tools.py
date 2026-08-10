@@ -219,3 +219,59 @@ def test_hidden_plan_tool_cannot_be_invoked_by_name(tmp_path) -> None:
 
     assert result.ok is False
     assert result.metadata["unavailable_tool"] is True
+    assert result.metadata["known_tool"] is True
+    assert result.metadata["blocked_by"] == "tool_capability"
+    assert result.metadata["model_contract_violation"] is True
+
+
+def test_registry_schema_and_executor_capabilities_stay_in_sync(tmp_path) -> None:
+    runtime = build_runtime()
+    contexts = [
+        make_context(tmp_path / "off", PlanPolicy.OFF),
+        make_context(tmp_path / "auto", PlanPolicy.AUTO),
+        make_context(tmp_path / "required", PlanPolicy.REQUIRED),
+    ]
+    required = contexts[-1]
+    required.begin_task("plan the change")
+    required.plan_controller.replace_plan(
+        [{"id": "step-1", "description": "Implement the change"}]
+    )
+    required.plan_controller.submit_for_execution()
+    required.add_user_continuation("review the plan response")
+
+    for context in contexts:
+        schema_tools = schema_names(runtime, context)
+        callable_tools = {
+            name
+            for name in runtime.tool_registry.all_names()
+            if runtime.tool_registry.resolve(name, context).available
+        }
+        assert callable_tools == schema_tools
+
+
+def test_hidden_valid_edit_is_rejected_before_tool_validation(tmp_path) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+    context.begin_task("plan the change")
+    context.plan_controller.replace_plan(
+        [{"id": "step-1", "description": "Implement the change"}]
+    )
+    context.plan_controller.submit_for_execution()
+    context.add_user_continuation("review the plan response")
+    target = tmp_path / "demo.py"
+    target.write_text("before\n", encoding="utf-8")
+
+    result = runtime.executor.execute(
+        ToolCall(
+            "hidden-edit",
+            "edit_file",
+            {"path": "demo.py", "old_text": "before", "new_text": "after"},
+        ),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["blocked_by"] == "tool_capability"
+    assert result.metadata["model_contract_violation"] is True
+    assert "validation_error" not in result.metadata
+    assert target.read_text(encoding="utf-8") == "before\n"

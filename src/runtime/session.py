@@ -527,6 +527,10 @@ class AgentContext:
     def add_user_continuation(self, text: str) -> int:
         if self.task_status is not TaskStatus.WAITING_USER:
             raise ValueError("the current task is not waiting for user input")
+        if self.has_pending_user_continuation():
+            raise TaskTransitionError(
+                "the previous user continuation is still pending; resolve or cancel it first"
+            )
         normalized = str(text).strip()
         if not normalized:
             raise ValueError("user continuation must not be empty")

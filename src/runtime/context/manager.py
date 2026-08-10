@@ -279,6 +279,43 @@ class ContextManager:
             tracker.record_context_event(event)
         return True
 
+    def compact_control_plane_boundary(self, context) -> ToolResultProjection:
+        """Project consumed observations before a narrow control-plane decision."""
+        compact_before = min(
+            max(int(getattr(context, "last_model_consumed_message_count", 0)), 0),
+            len(context.messages),
+        )
+        if compact_before <= 0:
+            return ToolResultProjection()
+
+        before_tokens = estimate_messages_tokens(context.messages)
+        projection = self.projector.compact_consumed_results(
+            context,
+            compact_before=compact_before,
+            protect_active_sources=False,
+        )
+        if not projection.count:
+            return projection
+
+        after_tokens = estimate_messages_tokens(context.messages)
+        saved_tokens = max(before_tokens - after_tokens, projection.saved_tokens)
+        event = {
+            "type": "context_compact",
+            "reason": "control_plane_boundary",
+            "mode": "tool_results",
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "saved_tokens": saved_tokens,
+            "total_saved_tokens": saved_tokens,
+            "message_count": len(context.messages),
+            "context_generation": getattr(context, "context_generation", 0),
+        }
+        context.trace.log(event)
+        tracker = getattr(context, "cost_tracker", None)
+        if tracker is not None and hasattr(tracker, "record_context_event"):
+            tracker.record_context_event(event)
+        return projection
+
     def _finish_preparation(
         self,
         context,

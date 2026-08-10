@@ -71,9 +71,13 @@ projection in `capabilities.py` is shared by tool visibility and the Plan Gate,
 while the controller remains the authority for state transitions.
 
 `ToolRegistry.schemas(context)` applies the same plan-capability projection used
-by Plan Gate. Planning hides mutation tools, approval resolution is exclusive
+by `ToolRegistry.resolve(name, context)`, which is also the Executor's source of
+callability. Planning hides mutation tools, approval resolution is exclusive
 after fresh user input, and `update_plan` emits a phase-specific action schema.
-Visibility improves the model contract; Plan Gate remains authoritative.
+A known but hidden tool is rejected before its argument validator. Plan Gate
+remains a defense-in-depth pre-validation authorization hook. Approval resolution
+projects consumed observations at the control-plane boundary and permits one
+bounded retry.
 `select_execution_mode` is visible only in undecided auto mode, while
 `update_plan` is visible while planning or executing. `resolve_plan_response`
 is visible only while approval is pending and a fresh real-user continuation
@@ -82,7 +86,7 @@ exists. Existing tools keep their default availability.
 The pre-tool path is deliberately ordered as:
 
 ```text
-validation -> trace -> Plan Gate -> Permission Gate -> Tool.call -> post hooks
+lookup -> capability resolution -> Plan Gate -> validation -> trace -> Permission Gate -> Tool.call -> post hooks
 ```
 
 Validation remains tool-owned. The Plan Gate only decides whether the current
@@ -91,6 +95,12 @@ still evaluates paths, command risk, user rules, and sandbox state. A blocked
 plan call returns a structured `ToolResult`, records trace metadata, and is not
 counted as a mutation, verification attempt, repair failure, or deterministic
 invalid-call loop.
+
+Manual approval is also a bounded control-plane protocol. Exact approval commands
+use a conservative deterministic matcher, while ambiguous responses expose only
+`resolve_plan_response`. A model response that mixes the resolver with any other
+tool is rejected as a whole. Fast-path, resolver-tool, and CLI transitions share
+one response application function so the pending continuation is consumed once.
 
 | State | Plan Gate behavior |
 | --- | --- |

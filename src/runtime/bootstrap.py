@@ -68,8 +68,8 @@ def build_hooks() -> HookManager:
     hooks.register(HookEvent.USER_PROMPT_SUBMIT, user_prompt_submit_hook)
     hooks.register(HookEvent.MODEL_CALL_START, model_call_start_hook)
 
+    hooks.register(HookEvent.PRE_TOOL_VALIDATE, plan_gate_hook)
     hooks.register(HookEvent.PRE_TOOL_USE, pre_tool_trace_hook)
-    hooks.register(HookEvent.PRE_TOOL_USE, plan_gate_hook)
     hooks.register(HookEvent.PRE_TOOL_USE, permission_hook)
 
     hooks.register(HookEvent.POST_TOOL_USE, secret_redaction_hook)

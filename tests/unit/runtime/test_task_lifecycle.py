@@ -66,6 +66,22 @@ def test_user_continuation_is_auditable_and_consumed_once(tmp_path) -> None:
     assert context.has_pending_user_continuation() is False
 
 
+def test_pending_user_continuation_cannot_be_silently_replaced(tmp_path) -> None:
+    context, _ = make_context(tmp_path)
+    context.begin_task("refactor the game")
+    context.plan_controller.replace_plan(
+        [{"id": "step-1", "description": "Refactor the game module"}]
+    )
+    context.plan_controller.submit_for_execution()
+    continuation_id = context.add_user_continuation("review this response")
+
+    with pytest.raises(TaskTransitionError, match="still pending"):
+        context.add_user_continuation("replacement response")
+
+    assert context.pending_user_continuation_id == continuation_id
+    assert context.pending_user_continuation == "review this response"
+
+
 def test_plan_and_task_waiting_state_cannot_split(tmp_path) -> None:
     context, _ = make_context(tmp_path)
     context.begin_task("refactor the game")
