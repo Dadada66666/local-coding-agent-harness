@@ -410,6 +410,48 @@ def test_completed_source_projection_uses_line_stub_without_artifacts(tmp_path) 
     assert not list((context.run_dir / "artifacts").glob("*.txt"))
 
 
+def test_control_plane_boundary_projects_consumed_recent_source(tmp_path) -> None:
+    source = tmp_path / "game.js"
+    source.write_text(
+        "\n".join(f"const line{index} = {index};" for index in range(400)),
+        encoding="utf-8",
+    )
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(
+            permission_mode="accept_edits",
+            context_min_recent_rounds=10,
+        ),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.messages = [{"role": "user", "content": "inspect"}]
+    for index, offset in enumerate((0, 200)):
+        call_id = f"source-{index}"
+        context.current_turn_id = index + 1
+        context.add_assistant_message(tool_use_message(call_id))
+        result = runner.runtime.executor.execute(
+            ToolCall(call_id, "read_file", {"path": "game.js", "offset": offset}),
+            context,
+        )
+        context.add_tool_result(call_id, result.content)
+    context.last_model_consumed_message_count = len(context.messages)
+
+    projection = ContextManager().compact_control_plane_boundary(context)
+
+    assert projection.count == 2
+    assert str(context.messages).count("Source observation compacted") == 2
+    assert not context.tool_result_artifacts
+    events = _trace_events(context)
+    assert any(
+        event.get("type") == "context_compact"
+        and event.get("reason") == "control_plane_boundary"
+        for event in events
+    )
+
+
 def test_checkpoint_retains_bounded_source_manifest(tmp_path) -> None:
     source = tmp_path / "game.js"
     source.write_text("\n".join(f"line {index}" for index in range(400)), encoding="utf-8")

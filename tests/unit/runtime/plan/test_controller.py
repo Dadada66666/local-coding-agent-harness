@@ -13,6 +13,7 @@ from runtime.plan import (
     PlanStepStatus,
     PlanTransitionError,
     PlanValidationError,
+    deterministic_plan_response,
 )
 
 
@@ -23,6 +24,22 @@ def make_controller(
     return PlanController(
         PlanState.initial(policy, "implement plan mode", approval_policy=approval_policy)
     )
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["同意", " 同意执行 ", "批准", "批准执行", "APPROVE", "Approved"],
+)
+def test_deterministic_plan_response_accepts_only_exact_approval_commands(text) -> None:
+    assert deterministic_plan_response(text) == "approve"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["我不同意", "同意。", "同意，但先修改第二步", "approve this", "批准执行后删除测试"],
+)
+def test_deterministic_plan_response_fails_closed_for_non_exact_text(text) -> None:
+    assert deterministic_plan_response(text) is None
 
 
 @pytest.mark.parametrize(

@@ -152,12 +152,17 @@ Interactive mode also recognizes:
 
 `/approve` and `/revise` resume the same task and preserve its model-call,
 mutation, verification, recovery, and context budgets. They do not create a new
-task. Auto mode does not use a keyword or prompt-length heuristic: the model's
-choice is a structured, traced tool call based on the task and inspected
-repository. Ordinary text entered while a plan is waiting is a continuation of
-that task. A dynamically visible `resolve_plan_response` tool interprets the
-real response as approval, revision, or cancellation; it is unavailable unless
-new user input exists, and the runtime uses no keyword approval table.
+task. At an approval prompt, `1`, `2`, and `3` map to approve, revise, and cancel;
+option `2` requests revision feedback. Exact replies `同意`, `同意执行`, `批准`,
+`批准执行`, `approve`, and `approved` use a deterministic approval path and do
+not spend a model call interpreting the authorization. Matching trims only outer
+whitespace and lowercases ASCII, so negative or conditional text is never
+substring-matched. All other ordinary text remains a continuation of the same
+task and is interpreted by the dynamically visible `resolve_plan_response` tool.
+
+Auto mode does not use a keyword or prompt-length heuristic: the model's direct
+or plan choice remains a structured, traced tool call based on the task and
+inspected repository.
 
 The Plan Gate and Permission Gate have separate responsibilities. Before mode
 selection, while planning, and while required approval is pending, the Plan
@@ -167,8 +172,14 @@ Permission Gate; plan state never grants filesystem or command permission.
 
 Tool visibility is state-aware. Planning exposes only inspection tools and the
 phase-specific plan contract; pending approval with fresh input exposes only
-`resolve_plan_response`. The Plan Gate remains the enforcement boundary for
-forged or stale calls.
+`resolve_plan_response`. `ToolRegistry.resolve()` supplies both schema visibility
+and executor callability, while the Plan Gate remains a defense-in-depth runtime
+boundary for forged or stale calls.
+
+Before that narrow approval-resolution call, consumed source observations are
+projected to bounded source stubs. A response containing any non-resolver tool is
+rejected as a whole and receives one automatic resolver-only retry; repeated
+failure pauses instead of looping.
 
 Plan tool visibility follows the same capability projection:
 

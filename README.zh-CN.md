@@ -136,17 +136,25 @@ agent --plan-mode auto --plan-approval auto
 ```
 
 `/approve` 和 `/revise` 会恢复同一个任务，不会调用 `begin_task()`；模型调用次数、mutation、
-verification、recovery 和上下文预算都保持连续。计划等待用户时输入的普通文本同样属于原任务续接。
-仅当存在新的真实用户回复时，模型才会看到 `resolve_plan_response`，并结构化解释为批准、修改或取消；
-Runtime 不使用关键词审批表。Auto 模式也不使用关键词或 prompt 长度规则判断复杂度，而是由模型结合
-任务与实际仓库，通过可追踪的工具调用作出选择。
+verification、recovery 和上下文预算都保持连续。审批提示中的 `1`、`2`、`3` 分别表示批准执行、修改
+计划和拒绝执行；选择 `2` 后会继续询问修改意见。精确回复 `同意`、`同意执行`、`批准`、`批准执行`、
+`approve` 或 `approved` 时，Runtime 通过确定性 fast path 直接批准，不消耗一次模型调用来解释授权。
+匹配只裁剪首尾空白并将 ASCII 转为小写，不做 substring 匹配，因此“我不同意”和附带条件的回复绝不会
+被直接批准。其他普通文本仍属于原任务续接，由动态可见的 `resolve_plan_response` 结构化解释。
+
+Auto 模式不使用关键词或 prompt 长度规则判断任务复杂度，而是由模型结合任务与实际仓库，通过可追踪的
+工具调用选择 direct 或 plan。
 
 Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以及 required 等待批准时，Plan Gate
 会在权限判断前阻止 Bash 和仓库副作用；direct 或已授权执行阶段则把调用交回现有 Permission Gate。
 计划状态本身不会自动批准任何文件或命令权限。
 
 工具可见性按计划状态动态收窄。规划阶段只暴露检查工具和当前阶段合法的计划 action；存在新用户输入的
-待批准阶段只暴露 `resolve_plan_response`。Plan Gate 仍会拦截伪造或过期调用，不把可见性当安全边界。
+待批准阶段只暴露 `resolve_plan_response`。`ToolRegistry.resolve()` 同时决定 schema 可见性和 Executor
+可调用性，Plan Gate 继续作为纵深防御，不把可见性当安全边界。
+
+进入该审批解析回合前，已消费源码会投影为有界 source stub。审批响应只要包含任何非 resolver 工具，
+Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠错；再次失败则暂停，不进入循环。
 
 计划工具使用同一份 capability 投影：
 

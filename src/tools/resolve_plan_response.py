@@ -3,6 +3,7 @@ from __future__ import annotations
 from runtime.operation import Operation
 from runtime.plan import PlanError
 from runtime.plan.capabilities import context_plan_capabilities
+from runtime.plan.resolution import apply_plan_response
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
@@ -85,16 +86,16 @@ class ResolvePlanResponseTool(BaseTool):
             self._required_text(args.get("reason"), "cancel reason must not be empty")
 
     def call(self, args: dict, context) -> ToolResult:
-        continuation_id = context.pending_user_continuation_id
         action = args["action"]
         try:
-            if action == "approve":
-                context.plan_controller.approve()
-            elif action == "revise":
-                context.plan_controller.revise(args["feedback"])
-            else:
-                context.plan_controller.cancel(args.get("reason") or "Cancelled by user response.")
-            context.consume_user_continuation(continuation_id)
+            resolution = apply_plan_response(
+                context,
+                action,
+                feedback=args.get("feedback"),
+                reason=args.get("reason") or "Cancelled by user response.",
+                source="model_resolver",
+                require_continuation=True,
+            )
         except (PlanError, ValueError) as exc:
             return ToolResult(
                 ok=False,
@@ -103,7 +104,7 @@ class ResolvePlanResponseTool(BaseTool):
                 metadata={"plan_error": True, "track_mutation_failure": False},
             )
 
-        state = context.plan_state
+        state = resolution.state
         return ToolResult(
             ok=True,
             content=(
@@ -116,7 +117,7 @@ class ResolvePlanResponseTool(BaseTool):
                 "plan_version": state.version,
                 "approved_version": state.approved_version,
                 "approval_source": state.approval_source,
-                "user_continuation_id": continuation_id,
+                "user_continuation_id": resolution.continuation_id,
                 "changed": False,
                 "control_plane_transition": True,
             },

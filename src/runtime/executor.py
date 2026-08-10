@@ -12,30 +12,56 @@ class ToolExecutor:
         self.hooks = hooks
 
     def execute(self, tool_call, context) -> ToolResult:
-        tool = self.registry.get(tool_call.name)
+        resolution = self.registry.resolve(tool_call.name, context)
+        tool = resolution.tool
+        gate_tool = tool or self._unknown_tool(tool_call)
 
-        if not tool:
+        if not resolution.known:
             result = ToolResult(
                 ok=False,
                 content=f"Unknown tool: {tool_call.name}",
                 error=f"Unknown tool: {tool_call.name}",
                 metadata={"unknown_tool": True},
             )
-            self._trigger_post_tool_use(tool_call, self._unknown_tool(tool_call), result, context)
+            self._trigger_post_tool_use(tool_call, gate_tool, result, context)
             return result
 
-        if not tool.is_available(context):
-            message = f"Tool is not available in the current runtime state: {tool_call.name}"
+        if not resolution.available:
+            message = f"Tool is unavailable in the current runtime state: {tool_call.name}"
+            plan_state = getattr(context, "plan_state", None)
             result = ToolResult(
                 ok=False,
                 content=message,
                 error=message,
                 metadata={
+                    "known_tool": True,
                     "unavailable_tool": True,
-                    "blocked_by": "tool_availability",
+                    "blocked_by": "tool_capability",
+                    "capability_reason": resolution.reason,
                     "track_mutation_failure": False,
+                    "model_contract_violation": True,
+                    **(
+                        {
+                            "plan_policy": plan_state.policy.value,
+                            "execution_path": plan_state.execution_path.value,
+                            "plan_phase": plan_state.phase.value,
+                        }
+                        if plan_state is not None
+                        else {}
+                    ),
                 },
             )
+            self._trigger_post_tool_use(tool_call, tool, result, context)
+            return result
+
+        blocked = self.hooks.trigger(
+            HookEvent.PRE_TOOL_VALIDATE,
+            tool_call=tool_call,
+            tool=tool,
+            context=context,
+        )
+        if blocked is not None:
+            result = self._blocked_result(blocked)
             self._trigger_post_tool_use(tool_call, tool, result, context)
             return result
 

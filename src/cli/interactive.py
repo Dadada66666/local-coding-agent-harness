@@ -8,7 +8,13 @@ import typer
 
 from agent.factory import build_agent_runner
 from runtime.config import RunConfig
-from runtime.plan import PlanApprovalPolicy, PlanError, PlanPolicy
+from runtime.plan import (
+    PlanApprovalPolicy,
+    PlanError,
+    PlanPhase,
+    PlanPolicy,
+    apply_plan_response,
+)
 from runtime.security import PermissionMode
 from runtime.task import TaskStatus
 
@@ -135,6 +141,18 @@ def validate_permission(permission: str) -> None:
 
 
 def handle_interactive_command(query: str, runner, context) -> bool:
+    if query in {"1", "2", "3"} and context.plan_state.phase is PlanPhase.AWAITING_APPROVAL:
+        if query == "1":
+            query = "/approve"
+        elif query == "2":
+            feedback = typer.prompt("revision feedback").strip()
+            if not feedback:
+                typer.echo("Plan command failed: revision feedback must not be empty", err=True)
+                return True
+            query = f"/revise {feedback}"
+        else:
+            query = "/cancel-plan"
+
     if not query.startswith("/"):
         return False
 
@@ -195,7 +213,7 @@ def handle_interactive_command(query: str, runner, context) -> bool:
         if command == "/approve":
             if argument:
                 raise PlanError("usage: /approve")
-            context.plan_controller.approve()
+            apply_plan_response(context, "approve", source="cli_command")
             runner.resume_runtime(
                 context,
                 "Runtime notice: the user approved the current plan version. Execute it, "
@@ -207,7 +225,12 @@ def handle_interactive_command(query: str, runner, context) -> bool:
         if command == "/revise":
             if not argument:
                 raise PlanError("usage: /revise <feedback>")
-            context.plan_controller.revise(argument)
+            apply_plan_response(
+                context,
+                "revise",
+                feedback=argument,
+                source="cli_command",
+            )
             runner.resume_runtime(
                 context,
                 "Runtime notice: the user requested a plan revision. Stay read-only and "
@@ -219,7 +242,12 @@ def handle_interactive_command(query: str, runner, context) -> bool:
         if command == "/cancel-plan":
             if argument:
                 raise PlanError("usage: /cancel-plan")
-            context.plan_controller.cancel("Cancelled by the user from the interactive CLI.")
+            apply_plan_response(
+                context,
+                "cancel",
+                reason="Cancelled by the user from the interactive CLI.",
+                source="cli_command",
+            )
             context.finished = True
             context.success = False
             context.abort_reason = "plan_cancelled"

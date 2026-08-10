@@ -44,12 +44,12 @@ def test_undecided_gate_allows_read_and_blocks_write_before_permission(tmp_path)
 
     assert read_result.ok is True
     assert write_result.ok is False
-    assert write_result.metadata["blocked_by"] == "plan_gate"
-    assert write_result.metadata["requires_mode_selection"] is True
+    assert write_result.metadata["blocked_by"] == "tool_capability"
+    assert write_result.metadata["capability_reason"] == "hidden_by_runtime_state"
+    assert write_result.metadata["plan_phase"] == "inactive"
     assert not (tmp_path / "demo.txt").exists()
     assert context.mutation_version == 0
     events = trace_events(context)
-    assert any(event["type"] == "plan_gate_blocked" for event in events)
     assert not any(
         event["type"] == "permission_decision"
         and event.get("tool_call_id") == "write"
@@ -77,11 +77,26 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
         ToolCall("read-while-waiting", "read_file", {"path": "missing.py"}),
         context,
     )
+    malformed_edit = runtime.executor.execute(
+        ToolCall(
+            "malformed-edit-while-waiting",
+            "edit_file",
+            {
+                "path": "demo.py",
+                "old_string": "before",
+                "new_string": "after",
+            },
+        ),
+        context,
+    )
 
     assert planning_result.metadata["plan_phase"] == "planning"
     assert awaiting_result.metadata["plan_phase"] == "awaiting_approval"
-    assert forged_read.metadata["blocked_by"] == "plan_gate"
+    assert forged_read.metadata["blocked_by"] == "tool_capability"
     assert forged_read.metadata["plan_phase"] == "awaiting_approval"
+    assert malformed_edit.metadata["blocked_by"] == "tool_capability"
+    assert malformed_edit.metadata["model_contract_violation"] is True
+    assert "validation_error" not in malformed_edit.metadata
     assert context.mutation_version == 0
     assert context.task_unresolved_mutation_failure is False
     assert context.task_tool_failures == []
