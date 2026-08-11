@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
@@ -52,6 +53,11 @@ class PlanTransitionError(PlanError):
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def plan_step_fingerprint(step_id: str, description: str) -> str:
+    normalized = f"{str(step_id).strip()}\n{str(description).strip()}"
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 @dataclass(slots=True)
@@ -123,6 +129,7 @@ class PlanState:
     selection_reason: str | None = None
     revision_feedback: str | None = None
     approval_source: str | None = None
+    completion_ledger: dict[str, str] = field(default_factory=dict)
     updated_at: str = field(default_factory=utc_now)
 
     @classmethod
@@ -184,6 +191,30 @@ class PlanState:
             raise PlanValidationError("plan step ids must be unique")
         if sum(step.status is PlanStepStatus.IN_PROGRESS for step in self.steps) > 1:
             raise PlanValidationError("only one plan step may be in progress")
+        if not isinstance(self.completion_ledger, dict) or any(
+            not isinstance(identifier, str)
+            or not identifier
+            or not isinstance(fingerprint, str)
+            or len(fingerprint) != 64
+            or any(character not in "0123456789abcdef" for character in fingerprint)
+            for identifier, fingerprint in self.completion_ledger.items()
+        ):
+            raise PlanValidationError("completion ledger is invalid")
+        completed_ids: set[str] = set()
+        for step in self.steps:
+            if step.status is PlanStepStatus.COMPLETED:
+                completed_ids.add(step.id)
+                if self.completion_ledger.get(step.id) != plan_step_fingerprint(
+                    step.id,
+                    step.description,
+                ):
+                    raise PlanValidationError(
+                        f"completed plan step {step.id} lacks runtime completion evidence"
+                    )
+        if set(self.completion_ledger) != completed_ids:
+            raise PlanValidationError(
+                "completion ledger may contain only current completed plan steps"
+            )
 
         if self.policy is PlanPolicy.OFF:
             if self.execution_path is not ExecutionPath.DIRECT:
@@ -227,6 +258,12 @@ class PlanState:
         if self.phase in {PlanPhase.PLANNING, PlanPhase.AWAITING_APPROVAL}:
             if self.approved_version is not None or self.approval_source is not None:
                 raise PlanValidationError("planning phases cannot retain plan authorization")
+            if any(
+                step.status is PlanStepStatus.IN_PROGRESS for step in self.steps
+            ):
+                raise PlanValidationError(
+                    "planning and approval phases cannot contain in-progress steps"
+                )
         if self.phase is PlanPhase.EXECUTING and self.approved_version != self.version:
             raise PlanValidationError("executing requires the current plan version to be authorized")
         if self.phase is PlanPhase.EXECUTING:
@@ -261,6 +298,7 @@ class PlanState:
             "selection_reason": self.selection_reason,
             "revision_feedback": self.revision_feedback,
             "approval_source": self.approval_source,
+            "completion_ledger": dict(self.completion_ledger),
             "updated_at": self.updated_at,
         }
 

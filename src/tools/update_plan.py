@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from runtime.call_budget import TaskCallBudget
 from runtime.operation import Operation
 from runtime.plan import PlanError, PlanStepStatus
 from runtime.plan.capabilities import context_plan_capabilities
@@ -22,7 +21,7 @@ PLAN_ACTIONS = {
 class UpdatePlanTool(BaseTool):
     name = "update_plan"
     description = (
-        "Create and optionally submit a structured plan in one call, update execution-step "
+        "Create a structured plan with explicit submit intent, update authorized execution "
         "status, or request replanning. This tool cannot approve a manual plan."
     )
     input_schema = {
@@ -41,10 +40,6 @@ class UpdatePlanTool(BaseTool):
                             "properties": {
                                 "id": {"type": "string", "minLength": 1},
                                 "description": {"type": "string", "minLength": 1},
-                                "status": {
-                                    "type": "string",
-                                    "enum": [status.value for status in PlanStepStatus],
-                                },
                             },
                             "required": ["id", "description"],
                             "additionalProperties": False,
@@ -52,7 +47,7 @@ class UpdatePlanTool(BaseTool):
                     },
                     "submit": {"type": "boolean"},
                 },
-                "required": ["action", "steps"],
+                "required": ["action", "steps", "submit"],
                 "additionalProperties": False,
             },
             {
@@ -109,12 +104,20 @@ class UpdatePlanTool(BaseTool):
         schema = super().schema(context)
         if context is None:
             return schema
-        actions = context_plan_capabilities(context).update_plan_actions
+        capabilities = context_plan_capabilities(context)
+        actions = capabilities.update_plan_actions
         contracts = [
             deepcopy(contract)
             for contract in self.input_schema["oneOf"]
             if contract["properties"]["action"]["const"] in actions
         ]
+        if capabilities.replace_plan_must_submit and "replace_plan" in actions:
+            replace_contract = next(
+                contract
+                for contract in contracts
+                if contract["properties"]["action"]["const"] == "replace_plan"
+            )
+            replace_contract["properties"]["submit"] = {"const": True}
         schema["input_schema"] = {"oneOf": contracts}
         return schema
 
@@ -139,7 +142,6 @@ class UpdatePlanTool(BaseTool):
             "action",
             "explanation",
             "steps",
-            "ready_for_approval",
             "submit",
             "step_id",
             "status",
@@ -164,7 +166,6 @@ class UpdatePlanTool(BaseTool):
                 "explanation",
                 "steps",
                 "submit",
-                "ready_for_approval",
             },
             "submit": {"action"},
             "update_step": {"action", "step_id", "status"},
@@ -182,15 +183,23 @@ class UpdatePlanTool(BaseTool):
             steps = args.get("steps")
             if not isinstance(steps, list) or not steps:
                 raise ToolValidationError("replace_plan requires a non-empty steps array")
-            if "ready_for_approval" in args and not isinstance(
-                args["ready_for_approval"], bool
+            for index, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    raise ToolValidationError(f"plan step {index} must be an object")
+                unknown_step_fields = set(step) - {"id", "description"}
+                if unknown_step_fields:
+                    raise ToolValidationError(
+                        "planning steps cannot set execution status; unknown fields in "
+                        f"step {index}: {', '.join(sorted(unknown_step_fields))}"
+                    )
+            if not isinstance(args.get("submit"), bool):
+                raise ToolValidationError("replace_plan requires a boolean submit field")
+            if (
+                context_plan_capabilities(context).replace_plan_must_submit
+                and args["submit"] is not True
             ):
-                raise ToolValidationError("ready_for_approval must be a boolean")
-            if "submit" in args and not isinstance(args["submit"], bool):
-                raise ToolValidationError("submit must be a boolean")
-            if "submit" in args and "ready_for_approval" in args:
                 raise ToolValidationError(
-                    "use submit; do not combine it with legacy ready_for_approval"
+                    "planning finalization requires replace_plan with submit=true"
                 )
         elif action == "update_step":
             if not isinstance(args.get("step_id"), str) or not args["step_id"].strip():
@@ -213,7 +222,7 @@ class UpdatePlanTool(BaseTool):
                     args["steps"],
                     explanation=args.get("explanation"),
                 )
-                if args.get("submit", args.get("ready_for_approval", False)):
+                if args["submit"]:
                     controller.submit_for_execution()
             elif action == "submit":
                 controller.submit_for_execution()
@@ -234,12 +243,7 @@ class UpdatePlanTool(BaseTool):
             )
 
         state = controller.state
-        budget = TaskCallBudget.from_context(context)
         step_count = len(state.steps)
-        budget_warning = bool(
-            action == "replace_plan"
-            and step_count > budget.plan_detail_warning_steps
-        )
         control_plane_transition = (
             state.phase is not before_phase
             or state.execution_path is not before_path
@@ -250,11 +254,9 @@ class UpdatePlanTool(BaseTool):
                 f"Plan action {action} recorded: phase={state.phase.value}, "
                 f"version={state.version}, approved_version={state.approved_version}."
                 + (
-                    " Plan detail note: this may be finer-grained than the remaining "
-                    "model-call budget warrants. This is advisory; keep the structure "
-                    "when dependencies require it, otherwise combine related work into "
-                    "top-level outcomes."
-                    if budget_warning
+                    " Draft saved with submit=false; continue only the investigation needed "
+                    "to finalize this plan."
+                    if action == "replace_plan" and not args["submit"]
                     else ""
                 )
             ),
@@ -267,9 +269,10 @@ class UpdatePlanTool(BaseTool):
                 "step_id": args.get("step_id"),
                 "step_status": args.get("status"),
                 "step_count": step_count,
-                "budget_warning": budget_warning,
-                "plan_detail_warning_steps": budget.plan_detail_warning_steps,
-                "planning_pressure": budget.planning_pressure,
+                "plan_submitted": bool(
+                    action == "submit"
+                    or (action == "replace_plan" and args.get("submit") is True)
+                ),
                 "changed": False,
                 "control_plane_transition": control_plane_transition,
             },

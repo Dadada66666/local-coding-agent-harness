@@ -45,7 +45,6 @@ class SourceReadState:
     unique_observation_chars: int = 0
     observation_ids: list[str] = field(default_factory=list)
     projected_observation_ids: set[str] = field(default_factory=set)
-    forced_rescan_ranges: list[tuple[int, int]] = field(default_factory=list)
 
     def overlap(self, start: int, end: int) -> int:
         return overlap_length(self.covered_ranges, start, end)
@@ -71,20 +70,6 @@ class SourceReadState:
             self.completed_turn = turn_id
             self.fully_scanned_consumed = False
         return already_seen, new_lines, self.fully_scanned and not was_complete
-
-    def record_forced_rescan(self, start: int, end: int) -> bool:
-        if start == 0:
-            self.forced_rescan_ranges = []
-        if not self.forced_rescan_ranges and start != 0:
-            return False
-        self.forced_rescan_ranges = merge_ranges(
-            self.forced_rescan_ranges,
-            (start, end),
-        )
-        if self._ranges_cover_all(self.forced_rescan_ranges):
-            self.forced_rescan_ranges = []
-            return True
-        return False
 
     def mark_consumed(self, turn_id: int | None) -> None:
         if (

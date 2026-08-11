@@ -19,7 +19,6 @@ class ReadFileTool(BaseTool):
             "path": {"type": "string"},
             "offset": {"type": "integer"},
             "limit": {"type": "integer"},
-            "force": {"type": "boolean"},
         },
         "required": ["path"],
         "additionalProperties": False,
@@ -41,21 +40,23 @@ class ReadFileTool(BaseTool):
         )
 
     def validate(self, args: dict, context) -> None:
+        unknown = set(args) - {"path", "offset", "limit"}
+        if unknown:
+            raise ToolValidationError(
+                f"unknown read_file fields: {', '.join(sorted(unknown))}"
+            )
         if not args.get("path"):
             raise ToolValidationError("read_file requires path")
         if int(args.get("offset", 0)) < 0:
             raise ToolValidationError("offset must be >= 0")
         if int(args.get("limit", DEFAULT_LIMIT)) <= 0:
             raise ToolValidationError("limit must be > 0")
-        if "force" in args and not isinstance(args["force"], bool):
-            raise ToolValidationError("force must be a boolean")
 
     def call(self, args: dict, context) -> ToolResult:
         requested_path = args["path"]
         target = context.safe_path(requested_path)
         offset = int(args.get("offset", 0))
         limit = int(args.get("limit", DEFAULT_LIMIT))
-        force = bool(args.get("force", False))
 
         if context.access_policy.is_protected_resolved_read(context.repo_path, target):
             return ToolResult(
@@ -104,7 +105,7 @@ class ReadFileTool(BaseTool):
         if high_overlap:
             metrics.high_overlap_rereads += 1
 
-        if state.fully_scanned and broad_read and high_overlap and not force:
+        if state.fully_scanned and broad_read and high_overlap:
             metrics.redundant_reads_avoided += 1
             context.record_file_snapshot(
                 target,
@@ -118,8 +119,8 @@ class ReadFileTool(BaseTool):
                     "This unchanged source file was already fully scanned in the current task.\n"
                     f"Requested range lines {offset + 1}-{requested_end} is "
                     f"{overlap_ratio:.0%} previously covered.\n"
-                    "Use grep for symbol discovery, a narrow read_file range for exact edit "
-                    "context, or force=true for an intentional refresh."
+                    "Use grep for symbol discovery or a narrow read_file range for exact "
+                    "edit context. File changes automatically invalidate this coverage."
                 ),
                 metadata={
                     **self._source_metadata(
@@ -176,9 +177,6 @@ class ReadFileTool(BaseTool):
         metrics.duplicate_source_lines_returned += already_seen
         if became_fully_scanned:
             metrics.fully_scanned_files.add(state.source_path)
-        if force and state.fully_scanned and high_overlap:
-            if state.record_forced_rescan(offset, returned_end_offset):
-                metrics.full_rescans += 1
         partial = not state.fully_scanned
         snapshot = context.record_file_snapshot(
             target,

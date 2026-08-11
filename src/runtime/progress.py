@@ -5,12 +5,90 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from runtime.call_budget import TaskCallBudget
+from runtime.call_budget import PlanningCallBudget, TaskCallBudget
 from runtime.plan import PlanPhase, PlanStepStatus
 
 
 EVIDENCE_TOOLS = frozenset({"grep", "list_dir", "read_artifact", "view_diff"})
 MAX_EVIDENCE_FINGERPRINTS = 64
+
+
+@dataclass
+class PlanningProgress:
+    active: bool = False
+    episode_started_call: int = 0
+    last_episode_calls: int = 0
+    first_draft_call: int | None = None
+    last_plan_change_call: int | None = None
+    last_plan_version: int = 0
+    draft_revision_count: int = 0
+    reads_after_draft: int = 0
+    finalize_required: bool = False
+    finalize_reason: str | None = None
+
+    def reset(self) -> None:
+        self.active = False
+        self.episode_started_call = 0
+        self.last_episode_calls = 0
+        self.first_draft_call = None
+        self.last_plan_change_call = None
+        self.last_plan_version = 0
+        self.draft_revision_count = 0
+        self.reads_after_draft = 0
+        self.finalize_required = False
+        self.finalize_reason = None
+
+    def start_episode(
+        self,
+        *,
+        model_call: int,
+        include_task_history: bool,
+        plan_version: int,
+        has_draft: bool,
+    ) -> None:
+        self.active = True
+        self.episode_started_call = 0 if include_task_history else max(model_call, 0)
+        self.last_episode_calls = 0
+        self.first_draft_call = model_call if has_draft else None
+        self.last_plan_change_call = model_call if has_draft else None
+        self.last_plan_version = max(plan_version, 0)
+        self.draft_revision_count = 0
+        self.reads_after_draft = 0
+        self.finalize_required = False
+        self.finalize_reason = None
+
+    def finish_episode(self, model_call: int) -> None:
+        if self.active:
+            self.last_episode_calls = self.calls_used(model_call)
+        self.active = False
+        self.finalize_required = False
+
+    def record_plan_change(self, *, model_call: int, version: int) -> None:
+        if not self.active or version == self.last_plan_version:
+            return
+        if self.first_draft_call is None:
+            self.first_draft_call = model_call
+        else:
+            self.draft_revision_count += 1
+        self.last_plan_change_call = model_call
+        self.last_plan_version = version
+
+    def calls_used(self, model_call: int) -> int:
+        if not self.active:
+            return self.last_episode_calls
+        return max(int(model_call) - self.episode_started_call, 0)
+
+    def calls_since_plan_change(self, model_call: int) -> int:
+        if self.last_plan_change_call is None:
+            return 0
+        return max(int(model_call) - self.last_plan_change_call, 0)
+
+    def require_finalization(self, reason: str) -> bool:
+        if self.finalize_required:
+            return False
+        self.finalize_required = True
+        self.finalize_reason = reason
+        return True
 
 
 @dataclass
@@ -77,6 +155,53 @@ class ProgressDecision:
 class ToolProgressPolicy:
     """Detect bounded, deterministic tool loops without directing task strategy."""
 
+    def prepare_turn(self, context) -> PlanningCallBudget | None:
+        state = getattr(context, "plan_state", None)
+        progress = getattr(context, "planning_progress", None)
+        if (
+            state is None
+            or state.phase is not PlanPhase.PLANNING
+            or progress is None
+        ):
+            return None
+        model_call = int(getattr(context, "task_model_calls", 0))
+        if not progress.active:
+            progress.start_episode(
+                model_call=0,
+                include_task_history=True,
+                plan_version=int(getattr(state, "version", 0)),
+                has_draft=bool(getattr(state, "steps", ())),
+            )
+        budget = PlanningCallBudget.from_context(context)
+        grace = int(getattr(context.config, "plan_draft_grace_calls", 2))
+        grace_expired = bool(
+            state.steps
+            and progress.last_plan_change_call is not None
+            and progress.calls_since_plan_change(model_call) > grace
+        )
+        reason = None
+        if budget.hard_limit_reached:
+            reason = "planning_hard_limit"
+        elif grace_expired:
+            reason = "plan_draft_grace_exhausted"
+        if reason is not None and progress.require_finalization(reason):
+            context.trace.log(
+                {
+                    "type": "planning_finalize_required",
+                    "turn_id": getattr(context, "current_turn_id", None),
+                    "task_model_call": model_call,
+                    "reason": reason,
+                    "planning_calls": budget.used_calls,
+                    "planning_soft_limit": budget.soft_limit_calls,
+                    "planning_hard_limit": budget.hard_limit_calls,
+                    "plan_version": state.version,
+                    "has_draft": bool(state.steps),
+                    "draft_revision_count": progress.draft_revision_count,
+                }
+            )
+            budget = PlanningCallBudget.from_context(context)
+        return budget
+
     def evaluate(
         self,
         context,
@@ -88,6 +213,7 @@ class ToolProgressPolicy:
         failures = self._deterministic_failures(executions)
         if failures is None:
             self._reset_failures(context)
+            self._record_planning_activity(context, executions)
             return self._evaluate_plan_execution(context, executions)
 
         fingerprint = self._fingerprint(failures)
@@ -150,6 +276,21 @@ class ToolProgressPolicy:
             )
 
         return ProgressDecision(**common)
+
+    def _record_planning_activity(self, context, executions) -> None:
+        state = getattr(context, "plan_state", None)
+        progress = getattr(context, "planning_progress", None)
+        if (
+            state is None
+            or state.phase is not PlanPhase.PLANNING
+            or progress is None
+            or not state.steps
+        ):
+            return
+        progress.reads_after_draft += sum(
+            result.ok and call.name in EVIDENCE_TOOLS | {"read_file"}
+            for call, result in executions
+        )
 
     def _evaluate_plan_execution(self, context, executions) -> ProgressDecision:
         state = getattr(context, "plan_state", None)

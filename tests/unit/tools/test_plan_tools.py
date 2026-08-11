@@ -148,8 +148,10 @@ def test_update_plan_schema_uses_action_specific_contracts() -> None:
         for contract in schema["oneOf"]
         if contract["properties"]["action"].get("const") == "replace_plan"
     )
-    assert set(replace_contract["required"]) == {"action", "steps"}
+    assert set(replace_contract["required"]) == {"action", "steps", "submit"}
     assert "submit" in replace_contract["properties"]
+    step_properties = replace_contract["properties"]["steps"]["items"]["properties"]
+    assert set(step_properties) == {"id", "description"}
 
 
 def test_update_plan_schema_is_narrowed_by_plan_phase(tmp_path) -> None:
@@ -180,7 +182,9 @@ def test_update_plan_schema_is_narrowed_by_plan_phase(tmp_path) -> None:
     assert executing_actions == {"update_step", "request_replan", "cancel", "complete"}
 
 
-def test_update_plan_budget_guidance_does_not_restrict_plan_steps(tmp_path) -> None:
+def test_update_plan_keeps_plan_size_flexible_but_requires_submit_intent(
+    tmp_path,
+) -> None:
     runtime = build_runtime()
     context = make_context(tmp_path, PlanPolicy.REQUIRED)
     context.task_model_calls = 9
@@ -208,15 +212,30 @@ def test_update_plan_budget_guidance_does_not_restrict_plan_steps(tmp_path) -> N
                     {"id": f"step-{index}", "description": f"Work package {index}"}
                     for index in range(10)
                 ],
+                "submit": False,
             },
         ),
         context,
     )
 
     assert result.ok is True
-    assert result.metadata["budget_warning"] is True
-    assert result.metadata["plan_detail_warning_steps"] == 9
-    assert "This is advisory" in result.content
+    assert result.metadata["plan_submitted"] is False
+    assert "Draft saved with submit=false" in result.content
+
+    missing_submit = runtime.executor.execute(
+        ToolCall(
+            "missing-submit",
+            "update_plan",
+            {
+                "action": "replace_plan",
+                "steps": [{"id": "step-1", "description": "Focused change"}],
+            },
+        ),
+        context,
+    )
+
+    assert missing_submit.ok is False
+    assert missing_submit.metadata["validation_error"] is True
 
     oversized = runtime.executor.execute(
         ToolCall(
@@ -228,6 +247,7 @@ def test_update_plan_budget_guidance_does_not_restrict_plan_steps(tmp_path) -> N
                     {"id": f"step-{index}", "description": f"Work package {index}"}
                     for index in range(101)
                 ],
+                "submit": False,
             },
         ),
         context,
@@ -236,6 +256,84 @@ def test_update_plan_budget_guidance_does_not_restrict_plan_steps(tmp_path) -> N
     assert oversized.ok is False
     assert oversized.metadata["plan_error"] is True
     assert "at most 100 steps" in oversized.error
+
+
+def test_planning_steps_cannot_claim_execution_status(tmp_path) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+
+    result = runtime.executor.execute(
+        ToolCall(
+            "forged-status",
+            "update_plan",
+            {
+                "action": "replace_plan",
+                "steps": [
+                    {
+                        "id": "step-1",
+                        "description": "Implement the change",
+                        "status": "completed",
+                    }
+                ],
+                "submit": True,
+            },
+        ),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["validation_error"] is True
+    assert "cannot set execution status" in result.error
+
+
+def test_planning_finalization_narrows_tools_and_update_contract(tmp_path) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+    context.plan_controller.replace_plan(
+        [{"id": "step-1", "description": "Implement the change"}]
+    )
+    context.planning_progress.require_finalization("draft_grace_exhausted")
+
+    assert schema_names(runtime, context) == {"update_plan"}
+    schema = runtime.tool_registry.get("update_plan").schema(context)["input_schema"]
+    contracts = {
+        contract["properties"]["action"]["const"]: contract
+        for contract in schema["oneOf"]
+    }
+    assert set(contracts) == {"replace_plan", "submit", "cancel"}
+    assert contracts["replace_plan"]["properties"]["submit"] == {"const": True}
+
+    rejected_draft = runtime.executor.execute(
+        ToolCall(
+            "another-draft",
+            "update_plan",
+            {
+                "action": "replace_plan",
+                "steps": [{"id": "step-1", "description": "Implement the change"}],
+                "submit": False,
+            },
+        ),
+        context,
+    )
+
+    assert rejected_draft.ok is False
+    assert rejected_draft.metadata["validation_error"] is True
+    assert "requires replace_plan with submit=true" in rejected_draft.error
+
+
+def test_planning_finalization_without_draft_requires_replace_and_submit(
+    tmp_path,
+) -> None:
+    runtime = build_runtime()
+    context = make_context(tmp_path, PlanPolicy.REQUIRED)
+    context.planning_progress.require_finalization("planning_hard_limit")
+
+    schema = runtime.tool_registry.get("update_plan").schema(context)["input_schema"]
+    actions = {
+        contract["properties"]["action"]["const"] for contract in schema["oneOf"]
+    }
+
+    assert actions == {"replace_plan", "cancel"}
 
 
 def test_submit_does_not_invalidate_an_existing_plan_as_budget_shrinks(tmp_path) -> None:

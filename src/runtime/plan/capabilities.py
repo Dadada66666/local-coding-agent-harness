@@ -23,6 +23,8 @@ class PlanCapabilities:
     waiting_for_user: bool
     visible_tool_names: frozenset[str] | None
     update_plan_actions: frozenset[str]
+    planning_finalize_required: bool = False
+    replace_plan_must_submit: bool = False
 
     def tool_is_visible(self, name: str) -> bool:
         return self.visible_tool_names is None or name in self.visible_tool_names
@@ -32,6 +34,7 @@ def plan_capabilities(
     state,
     *,
     has_user_continuation: bool = False,
+    planning_finalize_required: bool = False,
 ) -> PlanCapabilities:
     if state is None or state.policy is PlanPolicy.OFF:
         return PlanCapabilities(
@@ -60,8 +63,16 @@ def plan_capabilities(
         and state.execution_path is ExecutionPath.UNDECIDED
         and state.phase is PlanPhase.INACTIVE
     )
+    finalize_planning = bool(
+        state.phase is PlanPhase.PLANNING and planning_finalize_required
+    )
     plan_actions = (
-        PLANNING_ACTIONS
+        (
+            frozenset({"replace_plan", "cancel"})
+            | (frozenset({"submit"}) if state.steps else frozenset())
+        )
+        if finalize_planning
+        else PLANNING_ACTIONS
         if state.phase is PlanPhase.PLANNING
         else EXECUTING_ACTIONS
         if state.phase is PlanPhase.EXECUTING
@@ -69,6 +80,8 @@ def plan_capabilities(
     )
     if can_select:
         visible_tools = READ_ONLY_INSPECTION_TOOLS | {"select_execution_mode"}
+    elif finalize_planning:
+        visible_tools = frozenset({"update_plan"})
     elif state.phase is PlanPhase.PLANNING:
         visible_tools = READ_ONLY_INSPECTION_TOOLS | {"update_plan"}
     elif waiting:
@@ -89,15 +102,21 @@ def plan_capabilities(
         waiting_for_user=waiting,
         visible_tool_names=visible_tools,
         update_plan_actions=plan_actions,
+        planning_finalize_required=finalize_planning,
+        replace_plan_must_submit=finalize_planning,
     )
 
 
 def context_plan_capabilities(context) -> PlanCapabilities:
     pending = getattr(context, "has_pending_user_continuation", None)
     has_continuation = bool(pending()) if callable(pending) else False
+    progress = getattr(context, "planning_progress", None)
     return plan_capabilities(
         getattr(context, "plan_state", None),
         has_user_continuation=has_continuation,
+        planning_finalize_required=bool(
+            progress is not None and progress.finalize_required
+        ),
     )
 
 
