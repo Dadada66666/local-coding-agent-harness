@@ -186,7 +186,8 @@ def test_large_tool_output_is_persisted_once_and_recoverable(monkeypatch, tmp_pa
     runner = make_runner(tmp_path)
     context = runner.create_context("inspect generated output", include_initial_message=True)
     bash = runner.runtime.tool_registry.get("bash")
-    full_output = "0123456789" * 1200
+    minimum_chars = context.config.max_tool_result_chars + 1
+    full_output = ("0123456789" * ((minimum_chars // 10) + 1))[:minimum_chars]
     monkeypatch.setattr(
         bash,
         "call",

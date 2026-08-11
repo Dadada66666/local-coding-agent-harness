@@ -9,18 +9,18 @@ from runtime.plan.models import PlanApprovalPolicy, PlanPolicy
 class RunConfig:
     max_turns: int = 40
     max_repair_attempts: int = 3
-    max_tool_result_chars: int = 8000
+    max_tool_result_chars: int = 12000
     max_tool_round_tokens: int = 6000
     grep_max_matches: int = 50
-    compact_threshold_chars: int = 120000
+    compact_threshold_chars: int = 180000
     context_window_tokens: int | None = None
-    context_target_tokens: int | None = 32000
+    context_target_tokens: int | None = 48000
     context_eager_projection_tokens: int | None = 0
     source_working_set_max_tokens: int | None = None
     context_soft_limit_ratio: float = 0.8
     context_safety_margin_tokens: int = 4096
-    context_recent_target_tokens: int = 8000
-    context_recent_max_tokens: int = 16000
+    context_recent_target_tokens: int = 12000
+    context_recent_max_tokens: int = 24000
     context_min_recent_rounds: int = 2
     context_checkpoint_max_chars: int = 6000
     context_task_boundary_tokens: int = 12000
