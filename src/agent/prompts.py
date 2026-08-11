@@ -130,6 +130,7 @@ def build_plan_instructions(
         return f"""Plan phase: executing authorized plan version {plan_state.version}.
 - Follow the approved plan and use repository tools normally.
 - Keep plan step status accurate with update_plan.
+- When practical, batch routine step-status updates with the next productive tool call.
 - Repository tools still pass through the existing Permission Gate.
 - Request replanning for material deviations instead of silently replacing the plan.
 - Verify relevant changes before completion when practical.

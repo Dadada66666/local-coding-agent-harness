@@ -9,6 +9,7 @@ from runtime.bootstrap import build_runtime
 from runtime.config import RunConfig
 from runtime.plan import PlanApprovalPolicy, PlanPhase, PlanPolicy
 from runtime.task import TaskStatus
+from tools.base import ToolResult
 
 
 class FakeModelClient:
@@ -391,6 +392,127 @@ def test_required_approval_resumes_same_task_and_budget(tmp_path) -> None:
     assert context.task_id == first_task_id
     assert context.task_model_calls > calls_before_approval
     assert context.plan_state.phase is PlanPhase.COMPLETED
+
+
+def test_execution_recovers_after_projected_source_and_denied_temp_verification(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "demo.js"
+    original_source = "\n".join(
+        f"const value_{index} = {index};" for index in range(80)
+    ) + "\n"
+    source.write_text(original_source, encoding="utf-8")
+    invalid_verification = "cat > /tmp/check.js <<'EOF'\nconst ok = true;\nEOF\nnode /tmp/check.js"
+    safe_verification = "node --check demo.js"
+    runner, model = make_runner(
+        tmp_path,
+        PlanPolicy.REQUIRED,
+        [
+            tool_response(ToolCall("initial-read", "read_file", {"path": "demo.js"})),
+            tool_response(replace_plan_call()),
+            tool_response(
+                ToolCall("approve", "resolve_plan_response", {"action": "approve"})
+            ),
+            tool_response(
+                ToolCall(
+                    "start-step",
+                    "update_plan",
+                    {
+                        "action": "update_step",
+                        "step_id": "step-1",
+                        "status": "in_progress",
+                    },
+                ),
+                ToolCall("rehydrate", "read_file", {"path": "demo.js"}),
+            ),
+            tool_response(
+                ToolCall(
+                    "edit",
+                    "edit_file",
+                    {
+                        "path": "demo.js",
+                        "old_text": "const value_0 = 0;",
+                        "new_text": "const value_0 = 1;",
+                    },
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "invalid-verify",
+                    "bash",
+                    {"command": invalid_verification, "purpose": "verify"},
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "safe-verify",
+                    "bash",
+                    {"command": safe_verification, "purpose": "verify"},
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "complete-step",
+                    "update_plan",
+                    {
+                        "action": "update_step",
+                        "step_id": "step-1",
+                        "status": "completed",
+                    },
+                ),
+                ToolCall("complete-plan", "update_plan", {"action": "complete"}),
+            ),
+            final_response("change verified"),
+        ],
+    )
+    executed_commands = []
+    bash_tool = runner.runtime.tool_registry.get("bash")
+
+    def execute_safe_command(args, _context):
+        executed_commands.append(args["command"])
+        return ToolResult(
+            ok=True,
+            content="JavaScript syntax is valid.",
+            metadata={"purpose": args.get("purpose")},
+        )
+
+    monkeypatch.setattr(bash_tool, "call", execute_safe_command)
+    context = runner.start_interactive()
+
+    runner.start_task(context, "update and verify the source")
+    context.last_model_consumed_message_count = len(context.messages)
+    projection = runner.runtime.context_manager.compact_control_plane_boundary(context)
+    assert projection.count >= 1
+    runner.continue_task(context, "Please proceed with the plan exactly as written.")
+
+    assert context.success is True
+    assert context.task_status is TaskStatus.COMPLETED
+    assert context.plan_state.phase is PlanPhase.COMPLETED
+    assert source.read_text(encoding="utf-8").startswith("const value_0 = 1;\n")
+    assert executed_commands == [safe_verification]
+    assert context.source_read_metrics.duplicate_source_lines_returned == 80
+    assert context.source_read_metrics.redundant_reads_avoided == 0
+    assert context.task_unresolved_mutation_failure is False
+    assert context.source_read_metrics.source_observations_projected >= 1
+    assert len(model.calls) == 9
+
+    events = [
+        json.loads(line)
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    invalid_result = next(
+        event
+        for event in events
+        if event.get("type") == "tool_result"
+        and event.get("tool_call_id") == "invalid-verify"
+    )
+    assert invalid_result["metadata"]["terminal_on_deny"] is False
+    assert invalid_result["metadata"]["mutation_outcome"] == "not_executed"
+    assert not any(event.get("type") == "task_cancelled" for event in events)
+    report = context.report_writer.write(context).read_text(encoding="utf-8")
+    assert "## Failure Summary\nN/A" in report
+    assert "## Tool Failures\n- N/A" in report
 
 
 def test_natural_language_approval_continues_the_same_task(tmp_path) -> None:

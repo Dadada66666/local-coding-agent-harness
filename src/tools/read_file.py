@@ -107,7 +107,8 @@ class ReadFileTool(BaseTool):
         if high_overlap:
             metrics.high_overlap_rereads += 1
 
-        if state.fully_scanned and broad_read and high_overlap:
+        source_body_available = state.unprojected_observation_count > 0
+        if state.fully_scanned and broad_read and high_overlap and source_body_available:
             metrics.redundant_reads_avoided += 1
             context.record_file_snapshot(
                 target,
@@ -202,7 +203,7 @@ class ReadFileTool(BaseTool):
                 end=returned_end_offset if returned_count else None,
                 total_lines=len(lines),
                 next_offset=next_offset,
-                complete=state.fully_scanned,
+                complete=state.fully_scanned and not has_more,
                 source_line_truncated=source_line_truncated,
             )
         )

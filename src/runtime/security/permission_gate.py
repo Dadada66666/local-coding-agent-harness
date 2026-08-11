@@ -25,6 +25,10 @@ class PermissionGate:
         operation = self._classify_operation(tool, args, context)
         self._log_operation_classified(tool, args, operation, context)
 
+        protocol_decision = self._check_bash_protocol(operation, args, context)
+        if protocol_decision is not None:
+            return protocol_decision
+
         for path in operation.paths:
             try:
                 context.safe_path(path)
@@ -35,8 +39,7 @@ class PermissionGate:
                     message=f"Permission denied: path escapes WORKDIR: {path}",
                     operation=operation,
                     terminal_on_deny=(
-                        operation.terminal_on_deny
-                        or operation.kind in {"fs.write", "fs.delete"}
+                        operation.is_destructive or operation.kind == "fs.delete"
                     ),
                     decision_reason="path_escape",
                 )
@@ -65,10 +68,6 @@ class PermissionGate:
                 terminal_on_deny=operation.terminal_on_deny,
                 decision_reason="deny_rule",
             )
-
-        protocol_decision = self._check_bash_protocol(operation, args, context)
-        if protocol_decision is not None:
-            return protocol_decision
 
         ask_rule = context.permission_rules.match("ask", tool.name, operation.scope_key)
         if ask_rule:
@@ -266,7 +265,7 @@ class PermissionGate:
                 paths=paths,
                 command=command,
                 scope_key=scope,
-                terminal_on_deny=True,
+                terminal_on_deny=False,
                 is_sensitive=True,
                 metadata=metadata,
             )
@@ -385,20 +384,19 @@ class PermissionGate:
 
         risk = str(bash_risk.get("risk"))
         purpose = str(args.get("purpose", "")).strip().lower()
-        suggested_tool = self._suggested_file_tool_from_metadata(bash_risk, context)
         effects = set(bash_risk.get("effects") or [])
 
         if purpose == "verify" and (
             risk in {BashRisk.FILE_WRITE_VIA_BASH, BashRisk.FILE_DELETE_VIA_BASH}
             or "file_write" in effects
         ):
-            tool_hint = f" Use {suggested_tool} first." if suggested_tool else ""
             return self.approval.create_decision(
                 behavior=PermissionBehavior.DENY,
                 risk=risk,
                 message=(
                     "A verification command cannot also perform explicit file mutations."
-                    f"{tool_hint} Run verification in a separate Bash call."
+                    " Run verification directly in a separate Bash call without creating "
+                    "a temporary file."
                 ),
                 operation=operation,
                 terminal_on_deny=False,
@@ -407,6 +405,7 @@ class PermissionGate:
             )
 
         if bash_risk.get("execution_route") == "structured_tool":
+            suggested_tool = self._suggested_file_tool_from_metadata(bash_risk, context)
             tool_hint = suggested_tool or "the matching structured file tool"
             return self.approval.create_decision(
                 behavior=PermissionBehavior.DENY,
@@ -462,7 +461,7 @@ class PermissionGate:
                 risk=risk,
                 message=self._bash_file_write_message_from_metadata(bash_risk, context),
                 operation=operation,
-                terminal_on_deny=True,
+                terminal_on_deny=False,
                 decision_reason="bash_file_write",
             )
 

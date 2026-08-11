@@ -230,7 +230,7 @@ def test_verification_cannot_mix_shell_write_and_test(tmp_path: Path) -> None:
     decision = context.permission_gate.check(
         BashTool(),
         {
-            "command": "echo x > demo.py\npython -m pytest",
+            "command": "echo x > /tmp/check.js\npython -m pytest",
             "purpose": "verify",
         },
         context,
@@ -241,6 +241,7 @@ def test_verification_cannot_mix_shell_write_and_test(tmp_path: Path) -> None:
     assert decision.decision_reason == "bash_mixed_mutation_verification"
     assert decision.metadata["track_mutation_failure"] is False
     assert "separate Bash call" in decision.message
+    assert "without creating a temporary file" in decision.message
 
 
 def test_blocked_mixed_verification_does_not_mark_mutation_failure(
@@ -263,9 +264,32 @@ def test_blocked_mixed_verification_does_not_mark_mutation_failure(
 
     assert result.ok is False
     assert result.metadata["denied"] is True
+    assert result.metadata["terminal_on_deny"] is False
     assert result.metadata["mutation_outcome"] == "not_executed"
     assert context.task_unresolved_mutation_failure is False
+    assert context.finished is False
     assert not (tmp_path / "temporary.txt").exists()
+
+
+def test_bash_path_escape_write_is_denied_without_ending_task(tmp_path: Path) -> None:
+    runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
+    context = runner.create_context("reject outside write", include_initial_message=True)
+
+    result = runner.runtime.executor.execute(
+        ToolCall(
+            "outside-write",
+            "bash",
+            {"command": "cat > /tmp/check.js <<'EOF'\nconst ok = true;\nEOF"},
+        ),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["risk"] == "path_escape"
+    assert result.metadata["terminal_on_deny"] is False
+    assert result.metadata["mutation_outcome"] == "not_executed"
+    assert context.finished is False
+    assert context.task_unresolved_mutation_failure is False
 
 
 def test_bash_cat_heredoc_uses_header_redirection_only() -> None:
@@ -354,7 +378,7 @@ def test_approved_bash_file_write_records_task_mutation(monkeypatch, tmp_path: P
     assert result.metadata["mutation_paths"] == ["demo.py"]
 
 
-def test_failed_shell_patch_blocks_success_until_structured_edit_recovers(
+def test_blocked_shell_patch_is_not_recorded_as_mutation_failure(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "demo.py"
@@ -382,8 +406,8 @@ def test_failed_shell_patch_blocks_success_until_structured_edit_recovers(
     context.final_text = "done"
 
     assert blocked.ok is False
-    assert context.task_unresolved_mutation_failure is True
-    assert runner.infer_success(context) is False
+    assert blocked.metadata["mutation_outcome"] == "not_executed"
+    assert context.task_unresolved_mutation_failure is False
 
     read_result = runner.runtime.executor.execute(
         ToolCall("read", "read_file", {"path": "demo.py"}),
@@ -407,7 +431,7 @@ def test_failed_shell_patch_blocks_success_until_structured_edit_recovers(
     assert read_result.ok is True
     assert edit_result.ok is True
     assert context.task_unresolved_mutation_failure is False
-    assert edit_result.metadata["mutation_failure_recovered"] is True
+    assert "mutation_failure_recovered" not in edit_result.metadata
     assert runner.infer_success(context) is True
 
 

@@ -20,7 +20,8 @@ class BashTool(BaseTool):
     description = (
         'Run a shell command from WORKDIR; purpose="verify" records validation '
         "and enables fail-fast execution; exit_expectation declares the expected "
-        "overall status."
+        "overall status. For verification, prefer direct commands that do not create "
+        "temporary files outside WORKDIR."
     )
     input_schema = {
         "type": "object",
