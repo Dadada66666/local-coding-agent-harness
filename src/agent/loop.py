@@ -8,7 +8,7 @@ from pathlib import Path
 from agent.model_client import ModelClient, ModelContextOverflowError
 from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.bootstrap import RuntimeBundle
-from runtime.call_budget import TaskCallBudget
+from runtime.call_budget import PlanningCallBudget, TaskCallBudget
 from runtime.config import RunConfig
 from runtime.hooks import HookEvent
 from runtime.plan import (
@@ -189,9 +189,17 @@ class AgentLoop:
 
             context.turn_count += 1
             context.task_model_calls = getattr(context, "task_model_calls", 0) + 1
-            call_budget = TaskCallBudget.from_context(context)
             turn_id = context.turn_count
             context.current_turn_id = turn_id
+            prepare_progress = getattr(
+                getattr(self.runtime, "progress_policy", None),
+                "prepare_turn",
+                None,
+            )
+            if callable(prepare_progress):
+                prepare_progress(context)
+            call_budget = TaskCallBudget.from_context(context)
+            planning_budget = PlanningCallBudget.from_context(context)
             turn_started = time.monotonic()
             context.trace.log(
                 {
@@ -203,6 +211,10 @@ class AgentLoop:
                     "verification_reserve_calls": (
                         call_budget.verification_reserve_calls
                     ),
+                    "planning_calls": planning_budget.used_calls,
+                    "planning_soft_limit": planning_budget.soft_limit_calls,
+                    "planning_hard_limit": planning_budget.hard_limit_calls,
+                    "planning_finalize_required": planning_budget.finalize_required,
                     "message_count": len(context.messages),
                 }
             )
@@ -235,6 +247,7 @@ class AgentLoop:
                     else None
                 ),
                 call_budget=call_budget,
+                planning_budget=planning_budget,
             )
             tool_schemas = self._tool_schemas(context)
             max_output_tokens = int(getattr(self.model_client, "max_tokens", 4096))
@@ -259,6 +272,10 @@ class AgentLoop:
                         call_budget.verification_reserve_calls
                     ),
                     "verification_reserve_active": call_budget.reserve_active,
+                    "planning_calls": planning_budget.used_calls,
+                    "planning_soft_limit": planning_budget.soft_limit_calls,
+                    "planning_hard_limit": planning_budget.hard_limit_calls,
+                    "planning_finalize_required": planning_budget.finalize_required,
                 }
             )
             self.runtime.hooks.trigger(

@@ -153,6 +153,15 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 待批准阶段只暴露 `resolve_plan_response`。`ToolRegistry.resolve()` 同时决定 schema 可见性和 Executor
 可调用性，Plan Gate 继续作为纵深防御，不把可见性当安全边界。
 
+规划阶段使用独立、动态派生的模型调用预算。形成 Draft 后只有短暂的修订宽限期，而整个 Planning
+episode 的硬截止不会因 Draft 改版而延后。到达截止点后，模型只能提交当前计划、使用
+`submit=true` 替换并提交，或取消计划。计划步骤数量仍由模型根据真实依赖决定；Runtime 约束的是规划
+调用次数，而不是把步骤数固定为 3 到 5。每次 `replace_plan` 都必须显式提供 `submit=true` 或
+`submit=false`。
+
+规划输入中的步骤只包含 ID 和描述，执行状态由 Runtime 维护。Replan 时，仅当步骤 ID 与描述都匹配
+此前通过已授权执行控制器完成的步骤，`completed` 状态才会被保留，模型不能伪造执行历史。
+
 进入该审批解析回合前，已消费源码会投影为有界 source stub。审批响应只要包含任何非 resolver 工具，
 Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠错；再次失败则暂停，不进入循环。
 
@@ -160,6 +169,7 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 
 - `auto + undecided`：显示 `select_execution_mode`
 - `plan + planning/executing`：显示 `update_plan`
+- `planning + 必须收敛`：只显示 `update_plan` 的提交、替换并提交、取消子集
 - `awaiting_approval + 新用户回复`：显示 `resolve_plan_response`
 - `off`、direct、completed 和 cancelled：不显示计划工具
 
@@ -179,8 +189,8 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 - `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
 - `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。每页明确返回总行数、实际行范围、
   `next_offset` 和 `has_more`；task-local、绑定 SHA 的区间覆盖会识别重叠和完整扫描。未变化且已完整扫描
-  的源码再次被宽范围读取时只返回小型提示，`force=true` 可显式刷新。非 UTF-8 文件会返回普通工具失败，
-  而不是未处理的 decode exception。
+  的源码再次被宽范围读取时只返回小型提示，并引导使用 grep 或窄行范围；源码变化会自动使覆盖失效。
+  非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
 - `read_artifact`：通过当前 run 内有效的不透明 ID，分页读取大工具结果；不接受文件系统路径。
 - `write_file`：写入完整的 UTF-8 文件。新文件使用排他创建；已有文件必须具备完整且最新的 snapshot，并通过原子替换写入。成功写入会更新文件 snapshot。
 - `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
@@ -188,8 +198,8 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 - `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；预期整体返回非零状态时可设置 `exit_expectation="nonzero"`。shell patch 会被路由到结构化文件工具。
 - `view_diff`：在 git 仓库中查看 diff；非 git 目录会返回干净的 "diff unavailable" 结果。
 - `select_execution_mode`：仅在 auto 未决策阶段动态可见，记录模型选择 direct 或 plan 的具体理由。
-- `update_plan`：仅在计划生命周期相关阶段动态可见；使用按 action 区分的 schema，可在一次调用中替换并提交计划，
-  但不能批准 manual 计划。
+- `update_plan`：仅在计划生命周期相关阶段动态可见；Planning 替换必须显式声明是否提交，且不能设置执行
+  状态；Executing action 更新由 Runtime 掌控的步骤进度。该工具不能批准 manual 计划。
 - `resolve_plan_response`：仅在等待审批且存在新用户续接时可见，结构化记录批准、修改或取消。
 
 文件工具由 `AgentContext.safe_path()` 约束，读写不能逃逸 `WORKDIR`。

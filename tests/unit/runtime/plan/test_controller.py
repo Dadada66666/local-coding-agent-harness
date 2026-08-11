@@ -10,6 +10,7 @@ from runtime.plan import (
     PlanPhase,
     PlanPolicy,
     PlanState,
+    PlanStep,
     PlanStepStatus,
     PlanTransitionError,
     PlanValidationError,
@@ -152,6 +153,40 @@ def test_empty_or_duplicate_plan_is_rejected() -> None:
         )
 
 
+def test_initial_planning_cannot_fabricate_execution_status() -> None:
+    controller = make_controller()
+
+    controller.replace_plan(
+        [
+            {
+                "id": "step-1",
+                "description": "Implement the controller",
+                "status": "completed",
+            },
+            {
+                "id": "step-2",
+                "description": "Verify the behavior",
+                "status": "in_progress",
+            },
+        ]
+    )
+
+    assert [step.status for step in controller.state.steps] == [
+        PlanStepStatus.PENDING,
+        PlanStepStatus.PENDING,
+    ]
+
+
+def test_planning_state_rejects_in_progress_step_invariant() -> None:
+    state = PlanState.initial(PlanPolicy.REQUIRED, "implement plan mode")
+    state.steps = [
+        PlanStep("step-1", "Implement the controller", PlanStepStatus.IN_PROGRESS)
+    ]
+
+    with pytest.raises(PlanValidationError, match="cannot contain in-progress"):
+        state.validate()
+
+
 def test_plan_change_invalidates_old_approval() -> None:
     controller = make_controller()
     controller.replace_plan([{"id": "step-1", "description": "First version"}])
@@ -164,6 +199,48 @@ def test_plan_change_invalidates_old_approval() -> None:
     assert controller.state.phase is PlanPhase.PLANNING
     assert controller.state.approved_version is None
     assert controller.state.version > approved_version
+
+
+def test_replan_preserves_only_runtime_verified_completed_work() -> None:
+    controller = make_controller()
+    controller.replace_plan(
+        [
+            {"id": "step-1", "description": "Implement the controller"},
+            {"id": "step-2", "description": "Verify the behavior"},
+        ]
+    )
+    controller.submit_for_execution()
+    controller.approve()
+    controller.update_step("step-1", PlanStepStatus.COMPLETED)
+
+    controller.request_replan("the verification path changed")
+    controller.replace_plan(
+        [
+            {"id": "step-1", "description": "Implement the controller"},
+            {"id": "step-2", "description": "Run the revised verification"},
+        ]
+    )
+
+    assert controller.state.steps[0].status is PlanStepStatus.COMPLETED
+    assert controller.state.steps[1].status is PlanStepStatus.PENDING
+
+
+def test_replan_does_not_reuse_completion_after_description_changes() -> None:
+    controller = make_controller()
+    controller.replace_plan(
+        [{"id": "step-1", "description": "Implement the controller"}]
+    )
+    controller.submit_for_execution()
+    controller.approve()
+    controller.update_step("step-1", PlanStepStatus.COMPLETED)
+
+    controller.request_replan("the implementation scope changed")
+    controller.replace_plan(
+        [{"id": "step-1", "description": "Redesign the controller contract"}]
+    )
+
+    assert controller.state.steps[0].status is PlanStepStatus.PENDING
+    assert controller.state.completion_ledger == {}
 
 
 def test_revision_returns_to_planning_and_requires_new_approval() -> None:

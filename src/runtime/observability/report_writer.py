@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from runtime.call_budget import TaskCallBudget
+from runtime.call_budget import PlanningCallBudget, TaskCallBudget
 from runtime.session import AgentContext
 from runtime.plan import PlanPolicy
 
@@ -291,15 +291,27 @@ class ReportWriter:
 
     def _call_budget(self, context: AgentContext) -> list[str]:
         budget = TaskCallBudget.from_context(context)
-        progress = getattr(context, "plan_execution_progress", None)
+        planning = PlanningCallBudget.from_context(context)
+        execution = getattr(context, "plan_execution_progress", None)
+        planning_progress = getattr(context, "planning_progress", None)
+        task_cost = context.cost_tracker.delta(context.task_cost_start)
         return [
-            f"- used: {budget.used_calls}/{budget.max_calls}",
+            f"- attempted_model_calls: {budget.used_calls}/{budget.max_calls}",
+            f"- completed_provider_calls: {task_cost['calls']}",
             f"- remaining: {budget.remaining_calls}",
             f"- verification_reserve: {budget.verification_reserve_calls}",
             f"- reserve_active: {str(budget.reserve_active).lower()}",
-            f"- planning_pressure: {budget.planning_pressure}",
-            f"- plan_detail_warning_after: {budget.plan_detail_warning_steps}",
-            f"- active_plan_step: {getattr(progress, 'step_id', None) or 'N/A'}",
+            f"- planning_calls: {planning.used_calls}",
+            f"- planning_soft_limit: {planning.soft_limit_calls}",
+            f"- planning_hard_limit: {planning.hard_limit_calls}",
+            f"- planning_finalize_required: {str(planning.finalize_required).lower()}",
+            "- planning_finalize_reason: "
+            f"{getattr(planning_progress, 'finalize_reason', None) or 'N/A'}",
+            "- planning_draft_revisions: "
+            f"{getattr(planning_progress, 'draft_revision_count', 0)}",
+            "- planning_reads_after_draft: "
+            f"{getattr(planning_progress, 'reads_after_draft', 0)}",
+            f"- active_plan_step: {getattr(execution, 'step_id', None) or 'N/A'}",
         ]
 
     def _context_management_summary(self, context: AgentContext) -> list[str]:

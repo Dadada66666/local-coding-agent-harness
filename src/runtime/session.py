@@ -9,7 +9,7 @@ from runtime.config import RunConfig
 from runtime.context.source_state import SourceReadMetrics, SourceReadState
 from runtime.plan import ExecutionPath, PlanPhase
 from runtime.plan.capabilities import context_tool_is_visible
-from runtime.progress import PlanExecutionProgress
+from runtime.progress import PlanningProgress, PlanExecutionProgress
 from runtime.security.access_policy import AccessPolicy
 from runtime.security.permission_rules import PermissionRuleStore
 from runtime.task import (
@@ -89,6 +89,7 @@ class AgentContext:
     plan_execution_progress: PlanExecutionProgress = field(
         default_factory=PlanExecutionProgress
     )
+    planning_progress: PlanningProgress = field(default_factory=PlanningProgress)
     repair_attempts: int = 0
     last_test_result: dict | None = None
     task_test_result: dict | None = None
@@ -387,6 +388,7 @@ class AgentContext:
         self.task_failure_repeat_count = 0
         self.task_saturated_invalid_calls = 0
         self.plan_execution_progress.reset()
+        self.planning_progress.reset()
         self.repair_attempts = 0
         self.context_recovery_attempts = 0
         self.context_compaction_failures = 0
@@ -466,6 +468,26 @@ class AgentContext:
         if self.task_id is None:
             return
         phase = after.get("phase")
+        before_phase = before.get("phase") if before is not None else None
+        model_call = int(getattr(self, "task_model_calls", 0))
+        if phase == "planning" and before_phase != "planning":
+            self.planning_progress.start_episode(
+                model_call=model_call,
+                include_task_history=action in {
+                    "initialized",
+                    "task_initialized",
+                    "selected_plan",
+                },
+                plan_version=int(after.get("version", 0) or 0),
+                has_draft=bool(after.get("steps")),
+            )
+        elif phase == "planning" and action == "plan_replaced":
+            self.planning_progress.record_plan_change(
+                model_call=model_call,
+                version=int(after.get("version", 0) or 0),
+            )
+        elif before_phase == "planning" and phase != "planning":
+            self.planning_progress.finish_episode(model_call)
         if phase == "awaiting_approval":
             self.transition_task(
                 TaskStatus.WAITING_USER,

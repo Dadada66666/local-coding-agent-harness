@@ -9,7 +9,7 @@ from typing import Any
 from runtime.plan.models import PlanPolicy, PlanState, utc_now
 
 
-PLAN_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 2
 MAX_GOAL_CHARS = 4000
 MAX_TEXT_CHARS = 2000
 MAX_STEP_DESCRIPTION_CHARS = 1000
@@ -113,6 +113,7 @@ class PlanStore:
             "approval_source": state.approval_source,
             "explanation": self._optional_text(state.explanation),
             "revision_feedback": self._optional_text(state.revision_feedback),
+            "completion_ledger": dict(sorted(state.completion_ledger.items())),
             "steps": steps,
             "steps_omitted": max(len(state.steps) - len(steps), 0),
             "updated_at": state.updated_at or utc_now(),

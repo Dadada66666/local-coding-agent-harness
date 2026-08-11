@@ -13,6 +13,7 @@ from runtime.plan.models import (
     PlanStepStatus,
     PlanTransitionError,
     PlanValidationError,
+    plan_step_fingerprint,
     utc_now,
 )
 
@@ -105,6 +106,7 @@ class PlanController:
         self.state.phase = PlanPhase.PLANNING
         self.state.selection_reason = self._required_text(reason, "selection reason")
         self.state.steps.clear()
+        self.state.completion_ledger.clear()
         self.state.version = 0
         self.state.approved_version = None
         self.state.approval_source = None
@@ -126,8 +128,14 @@ class PlanController:
         identifiers = [step.id for step in normalized]
         if len(identifiers) != len(set(identifiers)):
             raise PlanValidationError("plan step ids must be unique")
-        if sum(step.status is PlanStepStatus.IN_PROGRESS for step in normalized) > 1:
-            raise PlanValidationError("only one plan step may be in progress")
+        retained_completion_ledger: dict[str, str] = {}
+        for step in normalized:
+            fingerprint = plan_step_fingerprint(step.id, step.description)
+            if self.state.completion_ledger.get(step.id) == fingerprint:
+                step.status = PlanStepStatus.COMPLETED
+                retained_completion_ledger[step.id] = fingerprint
+            else:
+                step.status = PlanStepStatus.PENDING
         normalized_explanation = self._optional_text(explanation)
 
         existing = [step.to_dict() for step in self.state.steps]
@@ -137,6 +145,7 @@ class PlanController:
 
         before = self._snapshot()
         self.state.steps = normalized
+        self.state.completion_ledger = retained_completion_ledger
         self.state.explanation = normalized_explanation
         self.state.version += 1
         self.state.approved_version = None
@@ -225,6 +234,11 @@ class PlanController:
 
         before = self._snapshot()
         target.status = target_status
+        if target_status is PlanStepStatus.COMPLETED:
+            self.state.completion_ledger[target.id] = plan_step_fingerprint(
+                target.id,
+                target.description,
+            )
         self._record("plan_step_updated", before=before, step_id=identifier)
         return self.state
 

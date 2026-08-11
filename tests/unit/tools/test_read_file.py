@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from agent.messages import ToolCall
 from runtime.config import RunConfig
 from agent.loop import AgentLoop
 from runtime.bootstrap import build_runtime
+from tools.base import ToolValidationError
 from tools.read_file import ReadFileTool
 
 
@@ -113,18 +116,18 @@ def test_unchanged_fully_scanned_source_uses_lightweight_reread_response(
         tool.call({"path": "game.js", "offset": offset, "limit": 200}, context)
 
     redundant = tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
-    forced = tool.call(
-        {"path": "game.js", "offset": 0, "limit": 200, "force": True},
-        context,
-    )
 
     assert redundant.ok is True
     assert redundant.metadata["redundant_source"] is True
     assert redundant.metadata["returned_lines"] == 0
     assert "already fully scanned" in redundant.content
     assert len(redundant.content) < 600
-    assert forced.metadata["redundant_source"] is False
-    assert forced.metadata["returned_lines"] == 200
+    assert "force" not in tool.input_schema["properties"]
+    with pytest.raises(ToolValidationError, match="unknown read_file fields: force"):
+        tool.validate(
+            {"path": "game.js", "offset": 0, "limit": 200, "force": True},
+            context,
+        )
 
 
 def test_source_mutation_invalidates_coverage(tmp_path: Path) -> None:

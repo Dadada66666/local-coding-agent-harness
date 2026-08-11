@@ -52,6 +52,7 @@ def build_system_prompt(
     has_user_continuation: bool = False,
     source_context: list[str] | None = None,
     call_budget=None,
+    planning_budget=None,
 ) -> str:
     base = BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
@@ -62,6 +63,7 @@ def build_system_prompt(
         plan_state,
         has_user_continuation=has_user_continuation,
         call_budget=call_budget,
+        planning_budget=planning_budget,
     )
     sections = [base.rstrip()]
     if plan_instructions:
@@ -81,6 +83,7 @@ def build_plan_instructions(
     *,
     has_user_continuation: bool = False,
     call_budget=None,
+    planning_budget=None,
 ) -> str:
     if plan_state is None or plan_state.policy is PlanPolicy.OFF:
         return ""
@@ -104,13 +107,16 @@ def build_plan_instructions(
             if plan_state.revision_feedback
             else ""
         )
-        budget = _planning_budget_instructions(call_budget)
+        budget = _planning_budget_instructions(plan_state, planning_budget)
         return f"""Plan phase: planning (read-only).
 - Inspect actual files and modules; do not modify files or run Bash.
 - Maintain an executable, verifiable structured plan with update_plan.
 - Scope open-ended tasks to one coherent, high-value outcome and defer optional work.
 - Use coarse work packages rather than a fine-grained todo list; include verification.
-- When the plan is complete, prefer replace_plan with submit=true in one call.
+- Plan steps contain only id and description; Runtime owns execution status.
+- Every replace_plan call requires explicit submit=true or submit=false.
+- Use submit=false only while concrete repository questions remain unresolved.
+- When complete, use replace_plan with submit=true in one call.
 - Use stable unique step ids and concrete repository references.
 - Submit only after the plan is complete. {approval_rule}
 - Do not assume approval or describe a natural-language plan as submitted.{budget}{revision}"""
@@ -168,21 +174,23 @@ def build_plan_instructions(
     return f"Plan phase: {plan_state.phase.value}. Do not start unapproved repository work."
 
 
-def _planning_budget_instructions(call_budget) -> str:
-    if call_budget is None:
+def _planning_budget_instructions(plan_state, planning_budget) -> str:
+    if planning_budget is None:
         return ""
-    if call_budget.planning_pressure == "tight":
-        step_guidance = "plan only the minimum implementation and verification path"
-    elif call_budget.planning_pressure == "constrained":
-        step_guidance = "use a compact outcome-level plan"
-    else:
-        step_guidance = "use outcome-level steps and choose their count by actual dependencies"
-    return (
-        "\n- Call budget: "
-        f"{call_budget.remaining_calls}/{call_budget.max_calls} remain; reserve "
-        f"{call_budget.verification_reserve_calls} for verify/finalize; "
-        f"{step_guidance}."
-    )
+    if planning_budget.finalize_required:
+        action = (
+            "submit the current plan, replace it with submit=true, or cancel"
+            if plan_state.steps
+            else "create the final plan with submit=true, or cancel"
+        )
+        return f"\n- Planning finalization is required: {action}; do not investigate further."
+    if planning_budget.soft_limit_reached:
+        return (
+            "\n- Planning budget: "
+            f"{planning_budget.used_calls}/{planning_budget.hard_limit_calls} calls used; "
+            "resolve only concrete blockers and finalize the plan."
+        )
+    return ""
 
 
 def _execution_budget_instructions(call_budget) -> str:

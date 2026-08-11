@@ -1,10 +1,11 @@
 from types import SimpleNamespace
 
-from runtime.call_budget import TaskCallBudget
+from runtime.call_budget import PlanningCallBudget, TaskCallBudget
 from runtime.config import RunConfig
+from runtime.progress import PlanningProgress
 
 
-def test_call_budget_reserves_verification_and_derives_plan_guidance() -> None:
+def test_call_budget_reserves_verification_calls() -> None:
     context = SimpleNamespace(
         config=RunConfig(max_turns=40, verification_reserve_calls=4),
         task_model_calls=9,
@@ -16,8 +17,6 @@ def test_call_budget_reserves_verification_and_derives_plan_guidance() -> None:
     assert budget.remaining_calls == 31
     assert budget.verification_reserve_calls == 4
     assert budget.work_calls_remaining == 27
-    assert budget.plan_detail_warning_steps == 9
-    assert budget.planning_pressure == "normal"
     assert budget.reserve_active is False
 
 
@@ -31,8 +30,6 @@ def test_call_budget_scales_reserve_for_small_tasks() -> None:
     assert budget.verification_reserve_calls == 1
     assert budget.remaining_calls == 4
     assert budget.work_calls_remaining == 3
-    assert budget.plan_detail_warning_steps == 3
-    assert budget.planning_pressure == "tight"
 
 
 def test_call_budget_marks_the_final_reserve() -> None:
@@ -45,3 +42,54 @@ def test_call_budget_marks_the_final_reserve() -> None:
     assert budget.remaining_calls == 4
     assert budget.reserve_active is True
     assert budget.nearing_reserve is True
+
+
+def test_planning_budget_is_phase_local_and_auto_derived() -> None:
+    progress = PlanningProgress()
+    progress.start_episode(
+        model_call=3,
+        include_task_history=False,
+        plan_version=0,
+        has_draft=False,
+    )
+    context = SimpleNamespace(
+        config=RunConfig(max_turns=40, verification_reserve_calls=4),
+        task_model_calls=9,
+        planning_progress=progress,
+    )
+
+    budget = PlanningCallBudget.from_context(context)
+
+    assert budget.used_calls == 6
+    assert budget.soft_limit_calls == 6
+    assert budget.hard_limit_calls == 8
+    assert budget.calls_until_hard_limit == 2
+    assert budget.soft_limit_reached is True
+    assert budget.hard_limit_reached is False
+
+
+def test_planning_budget_respects_explicit_limits_and_finalize_state() -> None:
+    progress = PlanningProgress()
+    progress.start_episode(
+        model_call=1,
+        include_task_history=False,
+        plan_version=0,
+        has_draft=False,
+    )
+    progress.require_finalization("draft_grace_exhausted")
+    context = SimpleNamespace(
+        config=RunConfig(
+            max_turns=40,
+            planning_soft_limit_calls=4,
+            planning_hard_limit_calls=7,
+        ),
+        task_model_calls=5,
+        planning_progress=progress,
+    )
+
+    budget = PlanningCallBudget.from_context(context)
+
+    assert budget.used_calls == 4
+    assert budget.soft_limit_calls == 4
+    assert budget.hard_limit_calls == 7
+    assert budget.finalize_required is True

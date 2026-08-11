@@ -176,6 +176,19 @@ phase-specific plan contract; pending approval with fresh input exposes only
 and executor callability, while the Plan Gate remains a defense-in-depth runtime
 boundary for forged or stale calls.
 
+Planning has a phase-local, dynamically derived call budget. A coherent draft
+gets a short revision grace period, while the planning episode has a hard
+deadline that draft revisions cannot extend. At that boundary the model sees
+only a finalize contract: submit the current plan, replace it with
+`submit=true`, or cancel. Plan step count remains model-selected; the runtime
+budgets planning calls rather than imposing a fixed number of work packages.
+Every `replace_plan` call must state `submit=true` or `submit=false` explicitly.
+
+Planning input contains only step IDs and descriptions. Step status is runtime
+execution evidence, not model-authored history. During replanning, a completed
+step is preserved only when its ID and description match a step previously
+completed through the authorized execution controller.
+
 Before that narrow approval-resolution call, consumed source observations are
 projected to bounded source stubs. A response containing any non-resolver tool is
 rejected as a whole and receives one automatic resolver-only retry; repeated
@@ -185,6 +198,8 @@ Plan tool visibility follows the same capability projection:
 
 - `auto + undecided`: `select_execution_mode`
 - `plan + planning/executing`: `update_plan`
+- `planning + finalization required`: only the submit/replace-and-submit/cancel
+  subset of `update_plan`
 - `awaiting_approval + fresh user response`: `resolve_plan_response`
 - `off`, direct execution, completed plans, and cancelled plans: no plan tools
 
@@ -216,9 +231,10 @@ Available tools:
 - `read_file`: read UTF-8 text with line numbers and record a file snapshot.
   Pages include total lines, returned range, `next_offset`, and `has_more`.
   Task-local, SHA-bound interval coverage identifies overlap and complete scans.
-  Broad rereads of an unchanged fully scanned source return a small notice;
-  `force=true` explicitly requests a refresh. Non-UTF-8 files return a normal
-  tool failure instead of an unhandled decode exception.
+  Broad rereads of an unchanged fully scanned source return a small notice and
+  direct the model to grep or a narrow line range. A source mutation invalidates
+  coverage automatically. Non-UTF-8 files return a normal tool failure instead
+  of an unhandled decode exception.
 - `read_artifact`: retrieve a bounded slice of a large tool result through an
   opaque ID scoped to the current run; it does not accept filesystem paths.
 - `write_file`: write a complete UTF-8 file. Missing files are created exclusively;
@@ -241,9 +257,10 @@ Available tools:
   directories return a clean "diff unavailable" result.
 - `select_execution_mode`: dynamically visible in undecided auto mode; records
   the model's direct-or-plan choice and reason.
-- `update_plan`: dynamically visible during plan lifecycle work; updates plan
-  versions and step status. Its action-specific schema supports replacing and
-  submitting a plan in one call but cannot approve a manual plan.
+- `update_plan`: dynamically visible during plan lifecycle work. Planning
+  replacements require explicit submit intent and cannot set execution status;
+  execution actions update runtime-owned step progress. The tool cannot approve
+  a manual plan.
 - `resolve_plan_response`: visible only while a plan awaits approval and a fresh
   user continuation exists; records approve, revise, or cancel structurally.
 
