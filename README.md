@@ -176,13 +176,12 @@ phase-specific plan contract; pending approval with fresh input exposes only
 and executor callability, while the Plan Gate remains a defense-in-depth runtime
 boundary for forged or stale calls.
 
-Planning has a phase-local, dynamically derived call budget. A coherent draft
-gets a short revision grace period, while the planning episode has a hard
-deadline that draft revisions cannot extend. At that boundary the model sees
-only a finalize contract: submit the current plan, replace it with
-`submit=true`, or cancel. Plan step count remains model-selected; the runtime
-budgets planning calls rather than imposing a fixed number of work packages.
-Every `replace_plan` call must state `submit=true` or `submit=false` explicitly.
+Planning remains read-only until the model explicitly submits or cancels the
+plan. Legal repository inspection does not become unavailable because of a
+phase-local call counter or draft age. The global `max_turns` limit remains the
+task safety cap, while call-budget reporting is observational. Plan step count
+remains model-selected, and every `replace_plan` call must state
+`submit=true` or `submit=false` explicitly.
 
 Planning input contains only step IDs and descriptions. Step status is runtime
 execution evidence, not model-authored history. During replanning, a completed
@@ -198,8 +197,6 @@ Plan tool visibility follows the same capability projection:
 
 - `auto + undecided`: `select_execution_mode`
 - `plan + planning/executing`: `update_plan`
-- `planning + finalization required`: only the submit/replace-and-submit/cancel
-  subset of `update_plan`
 - `awaiting_approval + fresh user response`: `resolve_plan_response`
 - `off`, direct execution, completed plans, and cancelled plans: no plan tools
 

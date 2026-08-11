@@ -111,13 +111,6 @@ class UpdatePlanTool(BaseTool):
             for contract in self.input_schema["oneOf"]
             if contract["properties"]["action"]["const"] in actions
         ]
-        if capabilities.replace_plan_must_submit and "replace_plan" in actions:
-            replace_contract = next(
-                contract
-                for contract in contracts
-                if contract["properties"]["action"]["const"] == "replace_plan"
-            )
-            replace_contract["properties"]["submit"] = {"const": True}
         schema["input_schema"] = {"oneOf": contracts}
         return schema
 
@@ -194,13 +187,6 @@ class UpdatePlanTool(BaseTool):
                     )
             if not isinstance(args.get("submit"), bool):
                 raise ToolValidationError("replace_plan requires a boolean submit field")
-            if (
-                context_plan_capabilities(context).replace_plan_must_submit
-                and args["submit"] is not True
-            ):
-                raise ToolValidationError(
-                    "planning finalization requires replace_plan with submit=true"
-                )
         elif action == "update_step":
             if not isinstance(args.get("step_id"), str) or not args["step_id"].strip():
                 raise ToolValidationError("update_step requires a non-empty step_id")

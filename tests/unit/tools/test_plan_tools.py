@@ -286,57 +286,7 @@ def test_planning_steps_cannot_claim_execution_status(tmp_path) -> None:
     assert "cannot set execution status" in result.error
 
 
-def test_planning_finalization_narrows_tools_and_update_contract(tmp_path) -> None:
-    runtime = build_runtime()
-    context = make_context(tmp_path, PlanPolicy.REQUIRED)
-    context.plan_controller.replace_plan(
-        [{"id": "step-1", "description": "Implement the change"}]
-    )
-    context.planning_progress.require_finalization("draft_grace_exhausted")
-
-    assert schema_names(runtime, context) == {"update_plan"}
-    schema = runtime.tool_registry.get("update_plan").schema(context)["input_schema"]
-    contracts = {
-        contract["properties"]["action"]["const"]: contract
-        for contract in schema["oneOf"]
-    }
-    assert set(contracts) == {"replace_plan", "submit", "cancel"}
-    assert contracts["replace_plan"]["properties"]["submit"] == {"const": True}
-
-    rejected_draft = runtime.executor.execute(
-        ToolCall(
-            "another-draft",
-            "update_plan",
-            {
-                "action": "replace_plan",
-                "steps": [{"id": "step-1", "description": "Implement the change"}],
-                "submit": False,
-            },
-        ),
-        context,
-    )
-
-    assert rejected_draft.ok is False
-    assert rejected_draft.metadata["validation_error"] is True
-    assert "requires replace_plan with submit=true" in rejected_draft.error
-
-
-def test_planning_finalization_without_draft_requires_replace_and_submit(
-    tmp_path,
-) -> None:
-    runtime = build_runtime()
-    context = make_context(tmp_path, PlanPolicy.REQUIRED)
-    context.planning_progress.require_finalization("planning_hard_limit")
-
-    schema = runtime.tool_registry.get("update_plan").schema(context)["input_schema"]
-    actions = {
-        contract["properties"]["action"]["const"] for contract in schema["oneOf"]
-    }
-
-    assert actions == {"replace_plan", "cancel"}
-
-
-def test_submit_does_not_invalidate_an_existing_plan_as_budget_shrinks(tmp_path) -> None:
+def test_submit_accepts_model_selected_plan_size(tmp_path) -> None:
     runtime = build_runtime()
     context = make_context(tmp_path, PlanPolicy.REQUIRED)
     context.plan_controller.replace_plan(

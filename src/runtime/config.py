@@ -8,11 +8,6 @@ from runtime.plan.models import PlanApprovalPolicy, PlanPolicy
 @dataclass
 class RunConfig:
     max_turns: int = 40
-    verification_reserve_calls: int = 4
-    planning_soft_limit_calls: int | None = None
-    planning_hard_limit_calls: int | None = None
-    plan_draft_grace_calls: int = 2
-    plan_step_stall_calls: int = 4
     max_repair_attempts: int = 3
     max_tool_result_chars: int = 8000
     max_tool_round_tokens: int = 6000
@@ -56,30 +51,6 @@ class RunConfig:
             ) from exc
         if self.max_turns <= 0:
             raise ValueError("max_turns must be > 0")
-        if self.verification_reserve_calls < 0:
-            raise ValueError("verification_reserve_calls must be >= 0")
-        if (
-            self.planning_soft_limit_calls is not None
-            and self.planning_soft_limit_calls <= 0
-        ):
-            raise ValueError("planning_soft_limit_calls must be > 0 when set")
-        if (
-            self.planning_hard_limit_calls is not None
-            and self.planning_hard_limit_calls <= 0
-        ):
-            raise ValueError("planning_hard_limit_calls must be > 0 when set")
-        if (
-            self.planning_soft_limit_calls is not None
-            and self.planning_hard_limit_calls is not None
-            and self.planning_soft_limit_calls >= self.planning_hard_limit_calls
-        ):
-            raise ValueError(
-                "planning_soft_limit_calls must be less than planning_hard_limit_calls"
-            )
-        if self.plan_draft_grace_calls <= 0:
-            raise ValueError("plan_draft_grace_calls must be > 0")
-        if self.plan_step_stall_calls <= 0:
-            raise ValueError("plan_step_stall_calls must be > 0")
         if self.max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be >= 0")
         if self.max_tool_result_chars < 256:

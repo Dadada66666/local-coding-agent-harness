@@ -89,10 +89,11 @@ def mutation_result_hook(tool_call, tool, result, context) -> None:
 
 
 def failure_history_hook(tool_call, tool, result, context) -> None:
-    if (
-        result.ok
-        or result.metadata.get("denied")
-        or result.metadata.get("blocked_by") in {"plan_gate", "tool_capability"}
+    if result.ok or result.metadata.get("denied"):
+        return None
+    blocked_by = result.metadata.get("blocked_by")
+    if blocked_by in {"plan_gate", "tool_capability"} and not result.metadata.get(
+        "model_contract_violation"
     ):
         return None
     failures = getattr(context, "task_tool_failures", None)
@@ -104,6 +105,13 @@ def failure_history_hook(tool_call, tool, result, context) -> None:
             "tool": tool_call.name,
             "error": result.error or "tool failed",
             "output_preview": head_tail_preview(result.content or "", 300),
+            "category": (
+                "unavailable_tool"
+                if result.metadata.get("unavailable_tool")
+                else "validation_error"
+                if result.metadata.get("validation_error")
+                else "tool_failure"
+            ),
         }
     )
     del failures[:-20]
