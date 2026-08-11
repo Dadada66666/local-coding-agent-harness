@@ -37,6 +37,7 @@ def permission_hook(tool_call, tool, context):
     if resolved.operation is not None:
         metadata["operation"] = resolved.operation.to_metadata()
     metadata.update(resolved.metadata)
+    metadata["track_mutation_failure"] = False
 
     return ToolResult(
         ok=False,

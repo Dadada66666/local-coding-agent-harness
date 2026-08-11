@@ -551,10 +551,15 @@ def test_source_efficiency_metrics_are_written_to_report_and_cost(tmp_path) -> N
         config=RunConfig(permission_mode="accept_edits"),
     )
     context = runner.create_context("inspect", include_initial_message=True)
-    tool = runner.runtime.tool_registry.get("read_file")
-    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
-    tool.call({"path": "game.js", "offset": 200, "limit": 200}, context)
-    tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    for call_id, offset in (("first", 0), ("second", 200), ("redundant", 0)):
+        runner.runtime.executor.execute(
+            ToolCall(
+                call_id,
+                "read_file",
+                {"path": "game.js", "offset": offset, "limit": 200},
+            ),
+            context,
+        )
 
     report = context.report_writer.write(context).read_text(encoding="utf-8")
     cost_path = context.cost_tracker.write(context)

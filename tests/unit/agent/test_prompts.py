@@ -45,6 +45,7 @@ def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
 
     assert "Follow the approved plan" in prompt
     assert "Keep plan step status accurate" in prompt
+    assert "batch routine step-status updates" in prompt
     assert "Request replanning for material deviations" in prompt
     assert "verification reserve" not in prompt.lower()
     assert "calls remain" not in prompt.lower()

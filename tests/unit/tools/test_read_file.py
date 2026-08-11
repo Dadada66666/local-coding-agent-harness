@@ -207,11 +207,26 @@ def test_unchanged_fully_scanned_source_uses_lightweight_reread_response(
         encoding="utf-8",
     )
     context = make_context(tmp_path)
-    tool = ReadFileTool()
-    for offset in range(0, 951, 200):
-        tool.call({"path": "game.js", "offset": offset, "limit": 200}, context)
+    runtime = build_runtime()
+    tool = runtime.tool_registry.get("read_file")
+    for index, offset in enumerate(range(0, 951, 200)):
+        runtime.executor.execute(
+            ToolCall(
+                f"scan-{index}",
+                "read_file",
+                {"path": "game.js", "offset": offset, "limit": 200},
+            ),
+            context,
+        )
 
-    redundant = tool.call({"path": "game.js", "offset": 0, "limit": 200}, context)
+    redundant = runtime.executor.execute(
+        ToolCall(
+            "redundant",
+            "read_file",
+            {"path": "game.js", "offset": 0, "limit": 200},
+        ),
+        context,
+    )
 
     assert redundant.ok is True
     assert redundant.metadata["redundant_source"] is True
@@ -226,6 +241,43 @@ def test_unchanged_fully_scanned_source_uses_lightweight_reread_response(
         )
 
 
+def test_projected_fully_scanned_source_can_rehydrate_once(tmp_path: Path) -> None:
+    path = tmp_path / "index.html"
+    path.write_text(
+        "\n".join(f"<div id='item-{index}'>value</div>" for index in range(80)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    runtime = build_runtime()
+
+    initial = runtime.executor.execute(
+        ToolCall("initial", "read_file", {"path": "index.html"}),
+        context,
+    )
+    state = context.read_file_segments[str(path)]
+    assert initial.metadata["fully_scanned"] is True
+    assert state.unprojected_observation_count == 1
+
+    context.mark_source_observation_projected("initial", initial.metadata)
+    assert state.unprojected_observation_count == 0
+
+    rehydrated = runtime.executor.execute(
+        ToolCall("rehydrated", "read_file", {"path": "index.html"}),
+        context,
+    )
+    assert rehydrated.metadata["redundant_source"] is False
+    assert rehydrated.metadata["returned_lines"] == 80
+    assert "item-79" in rehydrated.content
+    assert state.unprojected_observation_count == 1
+
+    redundant = runtime.executor.execute(
+        ToolCall("redundant", "read_file", {"path": "index.html"}),
+        context,
+    )
+    assert redundant.metadata["redundant_source"] is True
+    assert redundant.metadata["returned_lines"] == 0
+
+
 def test_broad_duplicate_protection_is_independent_of_default_page_size(
     tmp_path: Path,
 ) -> None:
@@ -234,11 +286,33 @@ def test_broad_duplicate_protection_is_independent_of_default_page_size(
         encoding="utf-8",
     )
     context = make_context(tmp_path)
-    tool = ReadFileTool()
-    _read_all_pages(tool, context, path="large.py")
+    runtime = build_runtime()
+    for index, offset in enumerate(range(0, 2000, 200)):
+        runtime.executor.execute(
+            ToolCall(
+                f"scan-{index}",
+                "read_file",
+                {"path": "large.py", "offset": offset, "limit": 200},
+            ),
+            context,
+        )
 
-    broad = tool.call({"path": "large.py", "offset": 0, "limit": 200}, context)
-    narrow = tool.call({"path": "large.py", "offset": 100, "limit": 20}, context)
+    broad = runtime.executor.execute(
+        ToolCall(
+            "broad",
+            "read_file",
+            {"path": "large.py", "offset": 0, "limit": 200},
+        ),
+        context,
+    )
+    narrow = runtime.executor.execute(
+        ToolCall(
+            "narrow",
+            "read_file",
+            {"path": "large.py", "offset": 100, "limit": 20},
+        ),
+        context,
+    )
 
     assert broad.metadata["redundant_source"] is True
     assert broad.metadata["returned_lines"] == 0
