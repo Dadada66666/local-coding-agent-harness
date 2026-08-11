@@ -6,8 +6,10 @@ from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
-DEFAULT_LIMIT = 200
-PAGINATION_RESERVE_CHARS = 240
+DEFAULT_LIMIT = 350
+BROAD_READ_MAX_LINES = 200
+PAGINATION_PATH_MAX_CHARS = 80
+REPEATED_SEGMENT_HINT = "[read_file: segment already returned unchanged]"
 
 
 class ReadFileTool(BaseTool):
@@ -152,10 +154,15 @@ class ReadFileTool(BaseTool):
             )
 
         selected = lines[offset : offset + limit]
-        rendered, page_limited = self._render_bounded_page(
+        display_path = self._display_path(requested_path)
+        suffix_reserve = self._pagination_suffix_reserve(
+            path=display_path,
+            total_lines=len(lines),
+        )
+        rendered, page_limited, source_line_truncated = self._render_bounded_page(
             selected,
             offset=offset,
-            max_chars=int(context.config.max_tool_result_chars),
+            max_chars=max(int(context.config.max_tool_result_chars) - suffix_reserve, 1),
         )
         returned_count = len(rendered)
         returned_end_offset = offset + returned_count
@@ -163,9 +170,10 @@ class ReadFileTool(BaseTool):
         has_more = remaining > 0
         next_offset = returned_end_offset if has_more else None
 
+        coverage_end_offset = offset if source_line_truncated else returned_end_offset
         already_seen, new_lines, became_fully_scanned = state.record_range(
             offset,
-            returned_end_offset,
+            coverage_end_offset,
             observation_chars=sum(len(value) + 1 for value in rendered),
             turn_id=getattr(context, "current_turn_id", None),
         )
@@ -186,14 +194,17 @@ class ReadFileTool(BaseTool):
         )
 
         if repeated_segment:
-            rendered.append(
-                "[read_file hint: this line segment was already returned unchanged; "
-                "use next_offset, grep, or a narrower range when possible]"
-            )
+            rendered.append(REPEATED_SEGMENT_HINT)
         rendered.append(
-            "[read_file pagination: "
-            f"returned={returned_count} lines; total_lines={len(lines)}; "
-            f"next_offset={next_offset}; has_more={str(has_more).lower()}]"
+            self._pagination_footer(
+                path=display_path,
+                start=offset + 1 if returned_count else None,
+                end=returned_end_offset if returned_count else None,
+                total_lines=len(lines),
+                next_offset=next_offset,
+                complete=state.fully_scanned,
+                source_line_truncated=source_line_truncated,
+            )
         )
 
         return ToolResult(
@@ -214,6 +225,7 @@ class ReadFileTool(BaseTool):
                 "has_more": has_more,
                 "pagination": "lines",
                 "page_limited_by_chars": page_limited,
+                "source_line_truncated": source_line_truncated,
                 "repeated_segment": repeated_segment,
                 "redundant_source": False,
                 "overlap_ratio": round(returned_overlap_ratio, 4),
@@ -223,7 +235,7 @@ class ReadFileTool(BaseTool):
                 "source_sha256": snapshot.sha256,
                 "source_path": state.source_path,
                 "projection_kind": "source_slice",
-                "reconstructible": True,
+                "reconstructible": not source_line_truncated,
                 "fully_scanned": state.fully_scanned,
                 "partial": partial,
             },
@@ -235,8 +247,8 @@ class ReadFileTool(BaseTool):
         *,
         offset: int,
         max_chars: int,
-    ) -> tuple[list[str], bool]:
-        budget = max(max_chars - PAGINATION_RESERVE_CHARS, 1)
+    ) -> tuple[list[str], bool, bool]:
+        budget = max(max_chars, 1)
         rendered: list[str] = []
         used = 0
         for index, line in enumerate(lines):
@@ -245,18 +257,77 @@ class ReadFileTool(BaseTool):
             if rendered and used + added > budget:
                 break
             if not rendered and added > budget:
-                # Preserve the full source line so the generic artifact path remains
-                # available for unusual minified or generated files.
-                rendered.append(value)
-                return rendered, len(lines) > 1
+                marker = " ... [line truncated]"
+                if budget <= len(marker):
+                    rendered.append(marker[:budget])
+                else:
+                    rendered.append(f"{value[: budget - len(marker)]}{marker}")
+                return rendered, True, True
             rendered.append(value)
             used += added
-        return rendered, len(rendered) < len(lines)
+        return rendered, len(rendered) < len(lines), False
 
     def _broad_read_threshold(self, total_lines: int) -> int:
         if total_lines <= 0:
-            return DEFAULT_LIMIT
-        return max(50, min(DEFAULT_LIMIT, math.ceil(total_lines * 0.15)))
+            return BROAD_READ_MAX_LINES
+        return max(50, min(BROAD_READ_MAX_LINES, math.ceil(total_lines * 0.15)))
+
+    def _display_path(self, requested_path: str) -> str:
+        if len(requested_path) <= PAGINATION_PATH_MAX_CHARS:
+            return requested_path
+        tail_chars = PAGINATION_PATH_MAX_CHARS // 2
+        head_chars = PAGINATION_PATH_MAX_CHARS - tail_chars - 3
+        return f"{requested_path[:head_chars]}...{requested_path[-tail_chars:]}"
+
+    def _pagination_suffix_reserve(self, *, path: str, total_lines: int) -> int:
+        maximum_line = max(total_lines, 1)
+        variants = (
+            self._pagination_footer(
+                path=path,
+                start=maximum_line,
+                end=maximum_line,
+                total_lines=total_lines,
+                next_offset=maximum_line,
+                complete=False,
+                source_line_truncated=True,
+            ),
+            self._pagination_footer(
+                path=path,
+                start=maximum_line,
+                end=maximum_line,
+                total_lines=total_lines,
+                next_offset=None,
+                complete=True,
+                source_line_truncated=False,
+            ),
+        )
+        return max(len(value) for value in variants) + len(REPEATED_SEGMENT_HINT) + 2
+
+    def _pagination_footer(
+        self,
+        *,
+        path: str,
+        start: int | None,
+        end: int | None,
+        total_lines: int,
+        next_offset: int | None,
+        complete: bool,
+        source_line_truncated: bool,
+    ) -> str:
+        returned_range = f"{start}-{end}" if start is not None and end is not None else "none"
+        if source_line_truncated:
+            status = "line_truncated"
+            if next_offset is not None:
+                status = f"next_offset={next_offset} | {status}"
+        elif complete:
+            status = "complete"
+        elif next_offset is not None:
+            status = f"next_offset={next_offset}"
+        else:
+            status = "incomplete"
+        return (
+            f"[read_file: {path} | lines {returned_range} / {total_lines} | {status}]"
+        )
 
     def _source_metadata(
         self,

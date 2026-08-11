@@ -229,7 +229,7 @@ def test_projection_adjusts_provider_anchor_without_reusing_stale_usage() -> Non
 def test_eager_projection_watermarks_derive_from_context_target() -> None:
     manager = ContextManager()
 
-    automatic = manager._eager_watermarks(RunConfig(context_target_tokens=32_000))
+    automatic = manager._eager_watermarks(RunConfig())
     explicit = manager._eager_watermarks(
         RunConfig(
             context_target_tokens=32_000,
@@ -237,8 +237,38 @@ def test_eager_projection_watermarks_derive_from_context_target() -> None:
         )
     )
 
-    assert automatic == (23_040, 19_353)
+    assert automatic == (40_800, 34_272)
     assert explicit == (12_000, 10_080)
+
+
+def test_context_below_eager_threshold_is_left_unchanged(tmp_path) -> None:
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(
+            permission_mode="accept_edits",
+            context_eager_projection_tokens=10_000,
+            compact_threshold_chars=1_000_000,
+        ),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.messages = [
+        {"role": "user", "content": "inspect"},
+        tool_use_message("call_1", name="bash"),
+        tool_result_message("call_1", "small output" * 20),
+    ]
+    context.last_model_consumed_message_count = len(context.messages)
+    before = deepcopy(context.messages)
+
+    preparation = ContextManager().prepare_context(context)
+
+    assert preparation.changed is False
+    assert preparation.compacted is False
+    assert preparation.microcompacted is False
+    assert context.messages == before
+    assert context.eager_projection_active is False
 
 
 def test_economic_token_target_triggers_compaction_before_char_fallback() -> None:
@@ -301,6 +331,36 @@ def test_consumed_tool_results_project_before_full_context_pressure(tmp_path) ->
         and event.get("reason") == "eager_tool_result_projection"
         for event in _trace_events(context)
     )
+
+
+def test_full_compaction_retains_new_recent_working_history() -> None:
+    messages = [{"role": "user", "content": "inspect the repository"}]
+    for index in range(12):
+        call_id = f"source-{index}"
+        messages.extend(
+            [
+                tool_use_message(call_id),
+                tool_result_message(call_id, "x" * 12_000),
+            ]
+        )
+    context = simple_context(
+        messages,
+        compact_threshold_chars=1_000_000,
+        context_target_tokens=100,
+        context_recent_target_tokens=12_000,
+        context_recent_max_tokens=24_000,
+        context_min_recent_rounds=2,
+    )
+
+    preparation = ContextManager().prepare_context(context)
+
+    boundary = next(
+        event for event in context.trace.events if event.get("type") == "context_boundary"
+    )
+    assert preparation.compacted is True
+    assert 12_000 <= boundary["recent_tokens"] <= 24_000
+    assert boundary["recent_round_count"] >= 2
+    assert _tool_protocol_is_paired(context.messages)
 
 
 def test_active_source_scan_survives_eager_projection(tmp_path) -> None:

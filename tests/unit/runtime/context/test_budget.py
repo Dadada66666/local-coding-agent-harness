@@ -72,3 +72,51 @@ def test_absolute_target_limits_cost_before_capacity_pressure() -> None:
     assert measurement.hard_limit_tokens == 191808
     assert measurement.soft_limit_tokens == 500
     assert measurement.trigger_reason == "token_budget"
+
+
+def test_known_small_window_limits_a_larger_context_target() -> None:
+    measurement = measure_context(
+        system="system",
+        messages=[{"role": "user", "content": "x" * 80_000}],
+        tools=[],
+        context_window_tokens=32_000,
+        target_tokens=48_000,
+        max_output_tokens=8_000,
+        safety_margin_tokens=4_096,
+        soft_limit_ratio=0.8,
+        fallback_char_limit=180_000,
+    )
+
+    assert measurement.hard_limit_tokens == 19_904
+    assert measurement.soft_limit_tokens == 15_923
+    assert measurement.trigger_reason == "token_budget"
+
+
+def test_unknown_window_uses_finite_target_and_character_fallback() -> None:
+    below = measure_context(
+        system="system",
+        messages=[{"role": "user", "content": "x" * 100_000}],
+        tools=[],
+        context_window_tokens=None,
+        target_tokens=48_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        soft_limit_ratio=0.8,
+        fallback_char_limit=180_000,
+    )
+    fallback = measure_context(
+        system="system",
+        messages=[{"role": "user", "content": "x" * 180_000}],
+        tools=[],
+        context_window_tokens=None,
+        target_tokens=48_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        soft_limit_ratio=0.8,
+        fallback_char_limit=180_000,
+    )
+
+    assert below.soft_limit_tokens == 48_000
+    assert below.trigger_reason is None
+    assert fallback.soft_limit_tokens == 48_000
+    assert fallback.trigger_reason == "char_fallback"
