@@ -83,13 +83,11 @@ bounded retry.
 is visible only while approval is pending and a fresh real-user continuation
 exists. Existing tools keep their default availability.
 
-Planning convergence is phase-local. `PlanningProgress` tracks one planning
-episode, its first draft, revisions, reads after the draft, and an absolute hard
-deadline. Draft replacement refreshes only the short finalization grace period;
-it never resets the episode deadline. Once finalization is required, capability
-projection exposes only `update_plan`, and its dynamic schema permits submit,
-replace with `submit=true`, or cancel as applicable. The controller remains the
-authority if a stale or forged call bypasses schema discovery.
+Planning capability is lifecycle-driven, not call-count-driven. While the phase
+is `planning`, read-only inspection and the phase-specific `update_plan` contract
+remain available. The model explicitly submits or cancels the plan; draft age,
+source-read count, and phase-local call heuristics never narrow tool authority.
+The global `max_turns` limit remains the final model-call safety cap.
 
 Plan steps supplied during planning contain identity and intent only. Execution
 status is controller-owned. A compact completion ledger records a fingerprint of
@@ -106,8 +104,9 @@ Validation remains tool-owned. The Plan Gate only decides whether the current
 plan phase permits side effects; when it yields, the existing Permission Gate
 still evaluates paths, command risk, user rules, and sandbox state. A blocked
 plan call returns a structured `ToolResult`, records trace metadata, and is not
-counted as a mutation, verification attempt, repair failure, or deterministic
-invalid-call loop.
+counted as a mutation, verification attempt, or repair failure. Repeated
+identical model-contract violations are fingerprinted separately and bounded
+without treating different legal repository reads as stalled work.
 
 Manual approval is also a bounded control-plane protocol. Exact approval commands
 use a conservative deterministic matcher, while ambiguous responses expose only
@@ -120,7 +119,6 @@ one response application function so the pending continuation is consumed once.
 | `off` | Disabled; original tool flow is unchanged. |
 | `auto + undecided` | Allows repository reads and mode selection; blocks Bash and mutations. |
 | `planning` | Allows repository reads and plan updates; blocks Bash and mutations. |
-| `planning` finalization | Exposes only submit, replace-and-submit, or cancel; stale reads remain blocked by capability resolution and Plan Gate. |
 | `awaiting_approval` | Allows bounded reads and blocks side effects; fresh user input enables only the response resolver. |
 | `direct` | Yields to the existing Permission Gate. |
 | `executing` | Yields to Permission Gate; plan state never auto-allows the call. |

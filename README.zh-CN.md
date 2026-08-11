@@ -153,11 +153,9 @@ Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以�
 待批准阶段只暴露 `resolve_plan_response`。`ToolRegistry.resolve()` 同时决定 schema 可见性和 Executor
 可调用性，Plan Gate 继续作为纵深防御，不把可见性当安全边界。
 
-规划阶段使用独立、动态派生的模型调用预算。形成 Draft 后只有短暂的修订宽限期，而整个 Planning
-episode 的硬截止不会因 Draft 改版而延后。到达截止点后，模型只能提交当前计划、使用
-`submit=true` 替换并提交，或取消计划。计划步骤数量仍由模型根据真实依赖决定；Runtime 约束的是规划
-调用次数，而不是把步骤数固定为 3 到 5。每次 `replace_plan` 都必须显式提供 `submit=true` 或
-`submit=false`。
+规划阶段保持只读，直到模型显式提交或取消计划。合法的仓库调查不会因为阶段调用次数或 Draft 年龄而被
+关闭；全局 `max_turns` 仍是任务级安全上限，调用预算只用于观测。计划步骤数量继续由模型根据真实依赖
+决定，每次 `replace_plan` 都必须显式提供 `submit=true` 或 `submit=false`。
 
 规划输入中的步骤只包含 ID 和描述，执行状态由 Runtime 维护。Replan 时，仅当步骤 ID 与描述都匹配
 此前通过已授权执行控制器完成的步骤，`completed` 状态才会被保留，模型不能伪造执行历史。
@@ -169,7 +167,6 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 
 - `auto + undecided`：显示 `select_execution_mode`
 - `plan + planning/executing`：显示 `update_plan`
-- `planning + 必须收敛`：只显示 `update_plan` 的提交、替换并提交、取消子集
 - `awaiting_approval + 新用户回复`：显示 `resolve_plan_response`
 - `off`、direct、completed 和 cancelled：不显示计划工具
 

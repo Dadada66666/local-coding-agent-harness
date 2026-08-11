@@ -135,10 +135,11 @@ def test_required_noninteractive_run_stops_for_approval_without_changes(tmp_path
     assert "Waiting reason: plan_approval" in report
     assert "## Model Call Budget" in report
     assert "- attempted_model_calls: 1/40" in report
-    assert "- planning_calls: 1" in report
+    assert "- remaining: 39" in report
+    assert "planning_finalize_required" not in report
 
 
-def test_existing_draft_converges_to_finalize_only_tool_contract(tmp_path) -> None:
+def test_explicit_draft_keeps_read_only_planning_tools_available(tmp_path) -> None:
     source = tmp_path / "demo.py"
     source.write_text("value = 1\n", encoding="utf-8")
     runner, model = make_runner(
@@ -162,57 +163,144 @@ def test_existing_draft_converges_to_finalize_only_tool_contract(tmp_path) -> No
             tool_response(
                 ToolCall("inspect-once", "grep", {"path": ".", "pattern": "value"})
             ),
-            tool_response(ToolCall("blocked-read", "read_file", {"path": "demo.py"})),
             tool_response(ToolCall("submit", "update_plan", {"action": "submit"})),
         ],
-        config_overrides={"plan_draft_grace_calls": 2},
     )
 
     context = runner.run("plan a repository change")
 
     assert context.plan_state.phase is PlanPhase.AWAITING_APPROVAL
-    assert model.calls[1]["tools"] != {"update_plan"}
-    assert model.calls[2]["tools"] != {"update_plan"}
-    assert model.calls[3]["tools"] == {"update_plan"}
-    assert model.calls[4]["tools"] == {"update_plan"}
+    assert "read_file" in model.calls[1]["tools"]
+    assert "grep" in model.calls[2]["tools"]
+    assert "update_plan" in model.calls[3]["tools"]
     assert context.source_read_metrics.read_file_calls == 1
     events = [
         json.loads(line)
         for line in context.trace.path.read_text(encoding="utf-8").splitlines()
     ]
-    blocked = next(
-        event
-        for event in events
-        if event.get("type") == "tool_result"
-        and event.get("tool_call_id") == "blocked-read"
+    assert not any(event.get("type") == "planning_finalize_required" for event in events)
+
+
+def test_long_planning_does_not_narrow_read_tools(tmp_path) -> None:
+    (tmp_path / "demo.py").write_text(
+        "".join(f"value_{line} = {line}\n" for line in range(1200)),
+        encoding="utf-8",
     )
-    assert blocked["ok"] is False
-    assert blocked["metadata"]["blocked_by"] == "tool_capability"
-    assert context.planning_progress.last_episode_calls == 5
-    assert context.planning_progress.finalize_reason == "plan_draft_grace_exhausted"
-
-
-def test_planning_hard_limit_requires_final_plan_when_no_draft_exists(tmp_path) -> None:
-    (tmp_path / "demo.py").write_text("value = 1\n", encoding="utf-8")
+    reads = [
+        tool_response(
+            ToolCall(
+                f"inspect-{page}",
+                "read_file",
+                {"path": "demo.py", "offset": page * 100, "limit": 100},
+            )
+        )
+        for page in range(12)
+    ]
     runner, model = make_runner(
         tmp_path,
         PlanPolicy.REQUIRED,
-        [
-            tool_response(ToolCall("inspect", "read_file", {"path": "demo.py"})),
-            tool_response(replace_plan_call()),
-        ],
-        config_overrides={
-            "planning_soft_limit_calls": 1,
-            "planning_hard_limit_calls": 2,
-        },
+        [*reads, tool_response(replace_plan_call())],
     )
 
     context = runner.run("plan a repository change")
 
     assert context.plan_state.phase is PlanPhase.AWAITING_APPROVAL
-    assert "read_file" in model.calls[0]["tools"]
-    assert model.calls[1]["tools"] == {"update_plan"}
-    assert "Planning finalization is required" in model.calls[1]["system"]
+    assert len(model.calls) == 13
+    assert all("read_file" in call["tools"] for call in model.calls[:12])
+    assert all("update_plan" in call["tools"] for call in model.calls)
+    assert all("Planning finalization is required" not in call["system"] for call in model.calls)
+    assert context.source_read_metrics.read_file_calls == 12
+
+
+def test_repeated_same_planning_capability_violation_is_bounded(tmp_path) -> None:
+    invalid = ToolCall(
+        "invalid-edit-1",
+        "edit_file",
+        {"path": "demo.py", "old_text": "before", "new_text": "after"},
+    )
+    runner, model = make_runner(
+        tmp_path,
+        PlanPolicy.REQUIRED,
+        [
+            tool_response(invalid),
+            tool_response(ToolCall("invalid-edit-2", invalid.name, invalid.arguments)),
+            tool_response(ToolCall("invalid-edit-3", invalid.name, invalid.arguments)),
+        ],
+    )
+
+    context = runner.run("plan a repository change")
+
+    assert len(model.calls) == 3
+    assert context.abort_reason == "repeated_tool_failure"
+    events = [
+        json.loads(line)
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    rejected = [
+        event
+        for event in events
+        if event.get("type") == "tool_result"
+        and event.get("metadata", {}).get("unavailable_tool")
+    ]
+    assert len(rejected) == 3
+    assert any(event.get("type") == "tool_progress_retry" for event in events)
+    assert any(event.get("type") == "tool_progress_stalled" for event in events)
+
+
+def test_different_legal_execution_reads_are_not_treated_as_stalled(tmp_path) -> None:
+    (tmp_path / "demo.py").write_text(
+        "value_1 = 1\nvalue_2 = 2\nvalue_3 = 3\nvalue_4 = 4\n",
+        encoding="utf-8",
+    )
+    runner, model = make_runner(
+        tmp_path,
+        PlanPolicy.REQUIRED,
+        [
+            tool_response(replace_plan_call()),
+            tool_response(
+                ToolCall("read-1", "read_file", {"path": "demo.py", "limit": 1})
+            ),
+            tool_response(
+                ToolCall(
+                    "read-2",
+                    "read_file",
+                    {"path": "demo.py", "offset": 1, "limit": 1},
+                )
+            ),
+            tool_response(ToolCall("grep", "grep", {"path": ".", "pattern": "value_3"})),
+            tool_response(
+                ToolCall(
+                    "read-3",
+                    "read_file",
+                    {"path": "demo.py", "offset": 2, "limit": 1},
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "complete-step",
+                    "update_plan",
+                    {"action": "update_step", "step_id": "step-1", "status": "completed"},
+                )
+            ),
+            tool_response(ToolCall("complete-plan", "update_plan", {"action": "complete"})),
+            final_response("inspection complete"),
+        ],
+        approval_policy=PlanApprovalPolicy.AUTO,
+    )
+
+    context = runner.run("inspect several execution details")
+
+    assert context.success is True
+    assert context.plan_state.phase is PlanPhase.COMPLETED
+    assert len(model.calls) == 8
+    events = [
+        json.loads(line)
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not any(
+        event.get("type") in {"tool_progress_retry", "tool_progress_stalled"}
+        for event in events
+    )
 
 
 def test_auto_plan_decision_with_auto_approval_continues_without_user_input(tmp_path) -> None:

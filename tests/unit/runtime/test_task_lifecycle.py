@@ -135,16 +135,16 @@ def test_source_working_set_is_task_local(tmp_path) -> None:
     assert context.source_read_metrics.read_file_calls == 0
 
 
-def test_plan_execution_progress_is_task_local(tmp_path) -> None:
+def test_deterministic_failure_progress_is_task_local(tmp_path) -> None:
     context, _ = make_context(tmp_path, policy=PlanPolicy.OFF)
     context.begin_task("first task")
-    context.plan_execution_progress.step_id = "step-old"
-    context.plan_execution_progress.last_progress_call = 12
-    context.plan_execution_progress.reserve_nudge_emitted = True
+    context.task_failure_fingerprint = "old-fingerprint"
+    context.task_failure_repeat_count = 2
+    context.task_saturated_invalid_calls = 1
     context.transition_task(TaskStatus.COMPLETED, trigger="test_complete")
 
     context.begin_task("next task")
 
-    assert context.plan_execution_progress.step_id is None
-    assert context.plan_execution_progress.last_progress_call == 0
-    assert context.plan_execution_progress.reserve_nudge_emitted is False
+    assert context.task_failure_fingerprint is None
+    assert context.task_failure_repeat_count == 0
+    assert context.task_saturated_invalid_calls == 0

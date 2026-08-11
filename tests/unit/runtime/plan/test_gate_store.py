@@ -99,7 +99,11 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
     assert "validation_error" not in malformed_edit.metadata
     assert context.mutation_version == 0
     assert context.task_unresolved_mutation_failure is False
-    assert context.task_tool_failures == []
+    assert len(context.task_tool_failures) == 4
+    assert all(
+        failure["category"] == "unavailable_tool"
+        for failure in context.task_tool_failures
+    )
     progress = runtime.progress_policy.evaluate(
         context,
         SimpleNamespace(usage=SimpleNamespace(output_tokens=0)),
@@ -107,7 +111,8 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
         max_output_tokens=4096,
     )
     assert progress.action == "continue"
-    assert context.task_failure_fingerprint is None
+    assert context.task_failure_fingerprint is not None
+    assert context.task_failure_repeat_count == 1
     assert runtime.recovery_policy.should_inject_retry(context) is False
 
 

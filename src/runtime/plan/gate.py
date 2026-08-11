@@ -30,24 +30,16 @@ class PlanGate:
             and callable(pending_continuation)
             and pending_continuation()
         )
-        requires_finalization = bool(capabilities.planning_finalize_required)
         if requires_selection:
             message = (
                 f"Plan gate blocked {tool_call.name}: call select_execution_mode before "
                 "using Bash or a repository mutation tool."
             )
         elif state.phase is PlanPhase.PLANNING:
-            if requires_finalization:
-                message = (
-                    f"Plan gate blocked {tool_call.name}: the planning budget is exhausted. "
-                    "Use update_plan to submit a final plan, replace and submit it in one "
-                    "call, or cancel."
-                )
-            else:
-                message = (
-                    f"Plan gate blocked {tool_call.name}: planning is read-only. "
-                    "Finish the structured plan with update_plan first."
-                )
+            message = (
+                f"Plan gate blocked {tool_call.name}: planning is read-only. "
+                "Finish the structured plan with update_plan first."
+            )
         elif state.phase is PlanPhase.AWAITING_APPROVAL:
             if requires_resolution:
                 message = (
@@ -63,9 +55,7 @@ class PlanGate:
             message = f"Plan gate blocked {tool_call.name} in phase {state.phase.value}."
 
         metadata = {
-            "blocked_by": (
-                "planning_convergence" if requires_finalization else "plan_gate"
-            ),
+            "blocked_by": "plan_gate",
             "blocked_by_hook": True,
             "plan_policy": state.policy.value,
             "execution_path": state.execution_path.value,
@@ -74,7 +64,6 @@ class PlanGate:
             "requires_mode_selection": requires_selection,
             "requires_plan_approval": requires_approval,
             "requires_plan_response_resolution": requires_resolution,
-            "requires_plan_finalization": requires_finalization,
             "track_mutation_failure": False,
         }
         context.trace.log(

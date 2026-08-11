@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
-from agent.prompts import build_plan_instructions
-from runtime.call_budget import PlanningCallBudget, TaskCallBudget
+from agent.prompts import build_plan_instructions, build_system_prompt
+from runtime.call_budget import TaskCallBudget
 from runtime.plan import (
     ExecutionPath,
     PlanApprovalPolicy,
@@ -30,79 +30,35 @@ def plan_state(phase: PlanPhase):
     )
 
 
-def planning_budget(*, used: int, finalize: bool = False) -> PlanningCallBudget:
-    return PlanningCallBudget(
-        used_calls=used,
-        soft_limit_calls=6,
-        hard_limit_calls=8,
-        calls_until_hard_limit=max(8 - used, 0),
-        soft_limit_reached=used >= 6,
-        hard_limit_reached=used >= 8,
-        finalize_required=finalize,
-    )
+def test_planning_prompt_preserves_model_strategy_and_explicit_protocol() -> None:
+    prompt = build_plan_instructions(plan_state(PlanPhase.PLANNING))
 
-
-def test_planning_prompt_keeps_normal_turns_compact() -> None:
-
-    prompt = build_plan_instructions(
-        plan_state(PlanPhase.PLANNING),
-        planning_budget=planning_budget(used=4),
-    )
-
-    assert "one coherent, high-value outcome" in prompt
-    assert "Every replace_plan call requires explicit submit=true or submit=false" in prompt
+    assert "Inspect the repository as needed" in prompt
+    assert "explicit submit=true or submit=false" in prompt
+    assert "Runtime owns execution status" in prompt
     assert "Planning budget:" not in prompt
+    assert "finalization is required" not in prompt
 
 
-def test_planning_prompt_surfaces_phase_budget_only_under_pressure() -> None:
+def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
+    prompt = build_plan_instructions(plan_state(PlanPhase.EXECUTING))
 
-    prompt = build_plan_instructions(
-        plan_state(PlanPhase.PLANNING),
-        planning_budget=planning_budget(used=6),
+    assert "Follow the approved plan" in prompt
+    assert "Keep plan step status accurate" in prompt
+    assert "Request replanning for material deviations" in prompt
+    assert "verification reserve" not in prompt.lower()
+    assert "calls remain" not in prompt.lower()
+
+
+def test_global_call_limit_hint_appears_only_near_hard_limit(tmp_path) -> None:
+    normal = build_system_prompt(
+        tmp_path,
+        call_budget=TaskCallBudget.from_limits(max_calls=40, used_calls=34),
+    )
+    near_limit = build_system_prompt(
+        tmp_path,
+        call_budget=TaskCallBudget.from_limits(max_calls=40, used_calls=35),
     )
 
-    assert "Planning budget: 6/8 calls used" in prompt
-    assert "resolve only concrete blockers and finalize the plan" in prompt
-
-
-def test_planning_prompt_requires_control_plane_finalization() -> None:
-    prompt = build_plan_instructions(
-        plan_state(PlanPhase.PLANNING),
-        planning_budget=planning_budget(used=8, finalize=True),
-    )
-
-    assert "Planning finalization is required" in prompt
-    assert "submit the current plan, replace it with submit=true, or cancel" in prompt
-    assert "do not investigate further" in prompt
-
-
-def test_execution_prompt_activates_verification_reserve() -> None:
-    budget = TaskCallBudget.from_limits(
-        max_calls=40,
-        used_calls=36,
-        configured_reserve=4,
-    )
-
-    prompt = build_plan_instructions(
-        plan_state(PlanPhase.EXECUTING),
-        call_budget=budget,
-    )
-
-    assert "Call budget: 4 remain" in prompt
-    assert "do not spend a turn only announcing progress" in prompt
-    assert "verify current mutations and finalize now" in prompt
-
-
-def test_execution_prompt_omits_budget_until_reserve_is_near() -> None:
-    budget = TaskCallBudget.from_limits(
-        max_calls=40,
-        used_calls=20,
-        configured_reserve=4,
-    )
-
-    prompt = build_plan_instructions(
-        plan_state(PlanPhase.EXECUTING),
-        call_budget=budget,
-    )
-
-    assert "Call budget:" not in prompt
+    assert "approaching its global model-call limit" not in normal
+    assert "approaching its global model-call limit" in near_limit
