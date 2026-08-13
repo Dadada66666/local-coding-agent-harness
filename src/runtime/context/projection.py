@@ -59,7 +59,16 @@ class ToolResultProjector:
                 continue
 
             projected: list[tuple[dict, str, str, str | None]] = []
-            for block in sorted(candidates, key=estimate_value_tokens, reverse=True):
+            ordered_candidates = sorted(
+                candidates,
+                key=lambda block: self._round_budget_sort_key(
+                    context,
+                    block,
+                    names,
+                ),
+            )
+            source_candidates_started = False
+            for block in ordered_candidates:
                 if total <= limit:
                     break
                 tool_use_id = str(block.get("tool_use_id", ""))
@@ -68,6 +77,25 @@ class ToolResultProjector:
                 tool_name = names.get(tool_use_id, "unknown")
                 source = provenance.get(tool_use_id)
                 metadata = self._result_metadata(context, tool_use_id)
+                source_result = self._is_source_result(tool_name, metadata)
+                protected_source = source_result and self._protect_source(
+                    context,
+                    metadata,
+                )
+                if source_result and not source_candidates_started:
+                    total, extra_savings = self._minimize_persisted_previews(
+                        projected,
+                        total=total,
+                        limit=limit,
+                    )
+                    saved_tokens += extra_savings
+                    source_candidates_started = True
+                    if total <= limit:
+                        if protected_source:
+                            metrics = getattr(context, "source_read_metrics", None)
+                            if metrics is not None:
+                                metrics.source_projection_protections += 1
+                        break
                 minimum_candidate = dict(block)
                 if self._is_source_result(tool_name, metadata):
                     minimum_candidate["content"] = self._source_stub(
@@ -127,23 +155,12 @@ class ToolResultProjector:
                 projected.append((block, artifact_id, tool_name, source))
 
             if total > limit:
-                for block, artifact_id, tool_name, source in sorted(
+                total, extra_savings = self._minimize_persisted_previews(
                     projected,
-                    key=lambda item: estimate_value_tokens(item[0]),
-                    reverse=True,
-                ):
-                    if total <= limit:
-                        break
-                    before_tokens = estimate_value_tokens(block)
-                    block["content"] = self._persisted_stub(
-                        artifact_id,
-                        tool_name,
-                        source,
-                    )
-                    after_tokens = estimate_value_tokens(block)
-                    reduction = max(before_tokens - after_tokens, 0)
-                    total -= reduction
-                    saved_tokens += reduction
+                    total=total,
+                    limit=limit,
+                )
+                saved_tokens += extra_savings
 
         if replacement_count:
             context.messages = messages
@@ -244,14 +261,6 @@ class ToolResultProjector:
             return ToolResultProjection()
         context.messages = messages
         self.mark_context_changed(context)
-        context.trace.log(
-            {
-                "type": "context_microcompact",
-                "compacted_tool_result_count": len(compacted_ids),
-                "compacted_tool_ids": compacted_ids,
-                "saved_tokens": saved_tokens,
-            }
-        )
         return ToolResultProjection(
             count=len(compacted_ids),
             saved_tokens=saved_tokens,
@@ -266,7 +275,11 @@ class ToolResultProjector:
         if existing and context.artifacts.get(existing) is not None:
             return existing
         try:
-            reference = context.artifacts.persist(tool_use_id, content)
+            reference = context.artifacts.persist(
+                tool_use_id,
+                content,
+                creation_reason="context_projection",
+            )
         except (OSError, UnicodeError) as exc:
             context.trace.log(
                 {
@@ -278,7 +291,60 @@ class ToolResultProjector:
             )
             return None
         artifact_map[tool_use_id] = reference.artifact_id
+        context.trace.log(
+            {
+                "type": "artifact_persisted",
+                "tool_call_id": tool_use_id,
+                "artifact_id": reference.artifact_id,
+                "chars_persisted": reference.chars,
+                "creation_reason": reference.creation_reason,
+            }
+        )
         return reference.artifact_id
+
+    def _round_budget_sort_key(
+        self,
+        context,
+        block: dict,
+        names: dict[str, str],
+    ) -> tuple[int, int]:
+        tool_use_id = str(block.get("tool_use_id", ""))
+        tool_name = names.get(tool_use_id, "unknown")
+        metadata = self._result_metadata(context, tool_use_id)
+        if not self._is_source_result(tool_name, metadata):
+            priority = 0
+        elif not self._protect_source(context, metadata):
+            priority = 1
+        else:
+            priority = 2
+        return priority, -estimate_value_tokens(block)
+
+    def _minimize_persisted_previews(
+        self,
+        projected: list[tuple[dict, str, str, str | None]],
+        *,
+        total: int,
+        limit: int,
+    ) -> tuple[int, int]:
+        saved_tokens = 0
+        for block, artifact_id, tool_name, source in sorted(
+            projected,
+            key=lambda item: estimate_value_tokens(item[0]),
+            reverse=True,
+        ):
+            if total <= limit:
+                break
+            before_tokens = estimate_value_tokens(block)
+            block["content"] = self._persisted_stub(
+                artifact_id,
+                tool_name,
+                source,
+            )
+            after_tokens = estimate_value_tokens(block)
+            reduction = max(before_tokens - after_tokens, 0)
+            total -= reduction
+            saved_tokens += reduction
+        return total, saved_tokens
 
     def _persisted_preview(
         self,

@@ -108,6 +108,12 @@ class ReadFileTool(BaseTool):
             metrics.high_overlap_rereads += 1
 
         source_body_available = state.unprojected_observation_count > 0
+        rehydration = (
+            state.fully_scanned
+            and broad_read
+            and high_overlap
+            and not source_body_available
+        )
         if state.fully_scanned and broad_read and high_overlap and source_body_available:
             metrics.redundant_reads_avoided += 1
             context.record_file_snapshot(
@@ -151,6 +157,7 @@ class ReadFileTool(BaseTool):
                     "fully_scanned": True,
                     "partial": False,
                     "projection_kind": "source_notice",
+                    "rehydration": False,
                 },
             )
 
@@ -184,6 +191,9 @@ class ReadFileTool(BaseTool):
         repeated_segment = returned_count > 0 and already_seen == returned_count
         metrics.unique_source_lines_returned += new_lines
         metrics.duplicate_source_lines_returned += already_seen
+        if rehydration and returned_count:
+            metrics.rehydration_reads += 1
+            metrics.rehydrated_source_lines += already_seen
         if became_fully_scanned:
             metrics.fully_scanned_files.add(state.source_path)
         partial = not state.fully_scanned
@@ -236,6 +246,8 @@ class ReadFileTool(BaseTool):
                 "source_sha256": snapshot.sha256,
                 "source_path": state.source_path,
                 "projection_kind": "source_slice",
+                "rehydration": rehydration,
+                "rehydrated_lines": already_seen if rehydration else 0,
                 "reconstructible": not source_line_truncated,
                 "fully_scanned": state.fully_scanned,
                 "partial": partial,

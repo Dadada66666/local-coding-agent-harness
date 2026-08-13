@@ -110,6 +110,8 @@ class SourceReadMetrics:
     read_file_calls: int = 0
     unique_source_lines_returned: int = 0
     duplicate_source_lines_returned: int = 0
+    rehydration_reads: int = 0
+    rehydrated_source_lines: int = 0
     high_overlap_rereads: int = 0
     redundant_reads_avoided: int = 0
     full_rescans: int = 0

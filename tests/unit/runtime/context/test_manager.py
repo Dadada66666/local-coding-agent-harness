@@ -327,7 +327,7 @@ def test_consumed_tool_results_project_before_full_context_pressure(tmp_path) ->
     assert preparation.compacted is False
     assert "Old tool observation cleared" in str(context.messages)
     assert any(
-        event.get("type") == "context_compact"
+        event.get("type") == "context_tool_results_projected"
         and event.get("reason") == "eager_tool_result_projection"
         for event in _trace_events(context)
     )
@@ -361,6 +361,12 @@ def test_full_compaction_retains_new_recent_working_history() -> None:
     assert 12_000 <= boundary["recent_tokens"] <= 24_000
     assert boundary["recent_round_count"] >= 2
     assert _tool_protocol_is_paired(context.messages)
+    full_event = next(
+        event for event in context.trace.events if event.get("type") == "context_compact"
+    )
+    assert full_event["mode"] == "full"
+    assert full_event["before_tokens"] > full_event["after_tokens"]
+    assert full_event["saved_tokens"] > 0
 
 
 def test_active_source_scan_survives_eager_projection(tmp_path) -> None:
@@ -506,7 +512,7 @@ def test_control_plane_boundary_projects_consumed_recent_source(tmp_path) -> Non
     assert not context.tool_result_artifacts
     events = _trace_events(context)
     assert any(
-        event.get("type") == "context_compact"
+        event.get("type") == "context_tool_results_projected"
         and event.get("reason") == "control_plane_boundary"
         for event in events
     )
@@ -560,6 +566,21 @@ def test_source_efficiency_metrics_are_written_to_report_and_cost(tmp_path) -> N
             ),
             context,
         )
+    context.cost_tracker.record_context_event(
+        {
+            "type": "tool_result_budget",
+            "replaced_results": 1,
+            "saved_tokens": 100,
+        }
+    )
+    context.cost_tracker.record_context_event(
+        {
+            "type": "context_tool_results_projected",
+            "reason": "eager_tool_result_projection",
+            "projected_results": 2,
+            "saved_tokens": 200,
+        }
+    )
 
     report = context.report_writer.write(context).read_text(encoding="utf-8")
     cost_path = context.cost_tracker.write(context)
@@ -568,9 +589,21 @@ def test_source_efficiency_metrics_are_written_to_report_and_cost(tmp_path) -> N
     assert "## Source Read Efficiency" in report
     assert "read_file_calls: 3" in report
     assert "redundant_reads_avoided: 1" in report
+    assert "rehydration_reads: 0" in report
+    assert "full_history_compactions: 0" in report
+    assert "tool_result_projection_events: 1" in report
+    assert "tool_results_projected: 2" in report
+    assert "round_budget_projection_events: 1" in report
+    assert "round_budget_results_projected: 1" in report
+    assert "## Artifact Persistence" in report
     assert cost["source_read_efficiency"]["read_file_calls"] == 3
     assert cost["source_read_efficiency"]["redundant_reads_avoided"] == 1
     assert "source_working_set" in cost["context_management"]
+    assert cost["context_management"]["full_history_compactions"] == 0
+    assert cost["context_management"]["tool_result_projection_events"] == 1
+    assert cost["context_management"]["tool_results_projected"] == 2
+    assert cost["context_management"]["round_budget_projection_events"] == 1
+    assert cost["artifacts"]["created"] == 0
 
 
 def test_microcompact_only_clears_consumed_old_observations(tmp_path) -> None:
@@ -719,6 +752,174 @@ def test_tool_round_budget_offloads_largest_results_without_mutating_audit(tmp_p
     assert "artifact_id:" in str(context.messages)
     assert "artifact_id:" not in str(context.conversation_messages)
     assert len(list((context.run_dir / "artifacts").glob("*.txt"))) == projection.count
+    artifact_metrics = context.artifacts.snapshot()
+    assert artifact_metrics["created"] == projection.count
+    assert artifact_metrics["context_projection_artifacts"] == projection.count
+
+
+def test_tool_round_budget_prefers_non_source_before_active_source(tmp_path) -> None:
+    source = tmp_path / "active.js"
+    source.write_text("\n".join(f"const line{index} = {index};" for index in range(350)))
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=compact_config(max_tool_round_tokens=3200),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.current_turn_id = 1
+    source_result = runner.runtime.executor.execute(
+        ToolCall("source", "read_file", {"path": "active.js"}),
+        context,
+    )
+    context.messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "source", "name": "read_file", "input": {}},
+                {"type": "tool_use", "id": "grep", "name": "grep", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "source", "content": source_result.content},
+                {"type": "tool_result", "tool_use_id": "grep", "content": "match\n" * 1600},
+            ],
+        },
+    ]
+
+    projection = ToolResultProjector().enforce_round_budget(context)
+
+    rendered = {
+        block["tool_use_id"]: block["content"] for block in context.messages[-1]["content"]
+    }
+    assert projection.count == 1
+    assert "Source observation compacted" not in rendered["source"]
+    assert "artifact_id:" in rendered["grep"]
+    assert context.source_read_metrics.source_observations_projected == 0
+
+
+def test_tool_round_budget_uses_inactive_source_before_active_source(tmp_path) -> None:
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=compact_config(max_tool_round_tokens=3200),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    results = {}
+    for name in ("inactive.js", "active.js"):
+        (tmp_path / name).write_text(
+            "\n".join(f"const {name[0]}{line} = {line};" for line in range(350)),
+            encoding="utf-8",
+        )
+    context.current_turn_id = 1
+    results["inactive.js"] = runner.runtime.executor.execute(
+        ToolCall("inactive.js", "read_file", {"path": "inactive.js"}),
+        context,
+    )
+    context.current_turn_id = 2
+    context.mark_model_request_consumed(0)
+    results["active.js"] = runner.runtime.executor.execute(
+        ToolCall("active.js", "read_file", {"path": "active.js"}),
+        context,
+    )
+    context.current_turn_id = 4
+    context.messages = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": name, "name": "read_file", "input": {}}
+            for name in results
+        ]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": name, "content": result.content}
+            for name, result in results.items()
+        ]},
+    ]
+
+    projection = ToolResultProjector().enforce_round_budget(context)
+
+    rendered = {
+        block["tool_use_id"]: block["content"] for block in context.messages[-1]["content"]
+    }
+    assert projection.count == 1
+    assert "Source observation compacted" in rendered["inactive.js"]
+    assert "Source observation compacted" not in rendered["active.js"]
+
+
+def test_tool_round_budget_projects_active_source_as_last_resort(tmp_path) -> None:
+    source = tmp_path / "active.js"
+    source.write_text("\n".join(f"const line{index} = {index};" for index in range(350)))
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=compact_config(max_tool_round_tokens=100),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.current_turn_id = 1
+    result = runner.runtime.executor.execute(
+        ToolCall("source", "read_file", {"path": "active.js"}),
+        context,
+    )
+    context.messages = [
+        tool_use_message("source"),
+        tool_result_message("source", result.content),
+    ]
+
+    projection = ToolResultProjector().enforce_round_budget(context)
+
+    event = next(event for event in _trace_events(context) if event["type"] == "tool_result_budget")
+    assert projection.count == 1
+    assert "Source observation compacted" in str(context.messages)
+    assert event["budget_satisfied"] is True
+
+
+def test_default_round_budget_retains_three_realistic_source_pages(tmp_path) -> None:
+    source = tmp_path / "game.js"
+    source.write_text(
+        "\n".join(
+            f"function feature{index}() {{ return 'value-{index}-{'x' * 24}'; }}"
+            for index in range(1100)
+        ),
+        encoding="utf-8",
+    )
+    runner = AgentLoop(
+        model_client=object(),
+        runtime=build_runtime(),
+        repo_path=tmp_path,
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits"),
+    )
+    context = runner.create_context("inspect", include_initial_message=True)
+    results = []
+    for index, offset in enumerate((0, 350, 700)):
+        call_id = f"source-{index}"
+        result = runner.runtime.executor.execute(
+            ToolCall(call_id, "read_file", {"path": "game.js", "offset": offset}),
+            context,
+        )
+        results.append((call_id, result.content, False))
+    context.messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": call_id, "name": "read_file", "input": {}}
+                for call_id, _, _ in results
+            ],
+        },
+    ]
+    context.add_tool_results(results)
+
+    projection = ToolResultProjector().enforce_round_budget(context)
+
+    assert projection.count == 0
+    assert str(context.messages).count("[read_file:") == 3
+    assert context.config.max_tool_round_tokens == 12_000
 
 
 def test_tool_round_budget_projects_error_results_without_losing_error_flags(tmp_path) -> None:

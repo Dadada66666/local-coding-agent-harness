@@ -213,8 +213,15 @@ class ReadableTraceWriter:
                 )
             elif event_type == "tool_result_budget":
                 notes.append(
-                    "- tool results projected: "
+                    "- context round-budget tool-results projected: "
                     f"{event.get('replaced_results', 0)} results, "
+                    f"about {event.get('saved_tokens', 0)} tokens saved"
+                )
+            elif event_type == "context_tool_results_projected":
+                notes.append(
+                    "- context tool-results projected "
+                    f"({event.get('reason', 'unknown')}): "
+                    f"{event.get('projected_results', 0)} results, "
                     f"about {event.get('saved_tokens', 0)} tokens saved"
                 )
             elif event_type == "context_compact":
@@ -222,6 +229,21 @@ class ReadableTraceWriter:
                     f"- context compacted ({event.get('mode', 'unknown')}): "
                     f"about {event.get('saved_tokens', 0)} tokens saved"
                 )
+            elif event_type == "artifact_persisted":
+                notes.append(
+                    "- artifact persisted "
+                    f"({event.get('creation_reason', 'other')}): "
+                    f"{event.get('chars_persisted', 0)} chars"
+                )
+            elif event_type == "tool_result":
+                metadata = event.get("metadata") or {}
+                if metadata.get("rehydration"):
+                    notes.append(
+                        "- source rehydrated: "
+                        f"{metadata.get('source_path', 'unknown')} "
+                        f"lines {metadata.get('returned_line_start')}-"
+                        f"{metadata.get('returned_line_end')}"
+                    )
             elif event_type == "context_recovery":
                 status = "succeeded" if event.get("recovered") else "failed"
                 notes.append(

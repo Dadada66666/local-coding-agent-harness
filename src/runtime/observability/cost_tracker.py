@@ -194,12 +194,14 @@ class CostTracker:
                     "completed_tasks": list(getattr(context, "completed_tasks", [])),
                     "context_management": {
                         "events": self.context_events,
+                        **self._context_event_summary(context),
                         "estimated_tokens_saved": sum(
                             max(int(event.get("saved_tokens", 0)), 0)
                             for event in self.context_events
                         ),
                         "source_working_set": self._source_working_set(context),
                     },
+                    "artifacts": self._artifact_summary(context),
                     "source_read_efficiency": self._source_efficiency(context),
                     "token_breakdown": {
                         "note": (
@@ -363,6 +365,42 @@ class CostTracker:
 
     def _source_working_set(self, context) -> dict[str, Any]:
         snapshot = getattr(context, "source_working_set_snapshot", None)
+        return snapshot() if callable(snapshot) else {}
+
+    def _context_event_summary(self, context) -> dict[str, int]:
+        projection_events = [
+            event
+            for event in self.context_events
+            if event.get("type") == "context_tool_results_projected"
+        ]
+        round_budget_events = [
+            event
+            for event in self.context_events
+            if event.get("type") == "tool_result_budget"
+        ]
+        return {
+            "full_history_compactions": int(
+                getattr(context, "context_compactions", 0)
+            ),
+            "tool_result_projection_events": len(projection_events),
+            "tool_results_projected": sum(
+                max(int(event.get("projected_results", 0)), 0)
+                for event in projection_events
+            ),
+            "round_budget_projection_events": len(round_budget_events),
+            "round_budget_results_projected": sum(
+                max(int(event.get("replaced_results", 0)), 0)
+                for event in round_budget_events
+            ),
+            "eager_projection_events": sum(
+                event.get("reason") == "eager_tool_result_projection"
+                for event in projection_events
+            ),
+        }
+
+    def _artifact_summary(self, context) -> dict[str, int]:
+        artifacts = getattr(context, "artifacts", None)
+        snapshot = getattr(artifacts, "snapshot", None)
         return snapshot() if callable(snapshot) else {}
 
     def _with_totals(self, values: dict[str, int]) -> dict[str, int]:

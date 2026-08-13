@@ -287,13 +287,27 @@ class AgentContext:
             metrics.unique_source_lines_returned
             + metrics.duplicate_source_lines_returned
         )
+        non_rehydration_overlap = max(
+            metrics.duplicate_source_lines_returned
+            - metrics.rehydrated_source_lines,
+            0,
+        )
         return {
             "read_file_calls": metrics.read_file_calls,
             "unique_files_read": len(metrics.files_read),
             "unique_source_lines_returned": metrics.unique_source_lines_returned,
             "duplicate_source_lines_returned": metrics.duplicate_source_lines_returned,
+            "rehydration_reads": metrics.rehydration_reads,
+            "rehydrated_source_lines": metrics.rehydrated_source_lines,
+            "non_rehydration_overlap_lines": non_rehydration_overlap,
             "overlap_ratio": round(
                 metrics.duplicate_source_lines_returned / returned,
+                4,
+            )
+            if returned
+            else 0.0,
+            "non_rehydration_overlap_ratio": round(
+                non_rehydration_overlap / returned,
                 4,
             )
             if returned

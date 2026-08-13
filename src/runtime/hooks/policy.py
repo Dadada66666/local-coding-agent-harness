@@ -80,6 +80,7 @@ def large_output_hook(tool_call, tool, result, context) -> None:
         reference = context.artifacts.persist(
             tool_call_id=tool_call.id,
             content=full_content,
+            creation_reason="large_output",
         )
     except (OSError, UnicodeError) as exc:
         result.content = _bounded_output_message(
@@ -130,6 +131,16 @@ def large_output_hook(tool_call, tool, result, context) -> None:
     result.metadata["original_chars"] = len(full_content)
     result.metadata["artifact_id"] = reference.artifact_id
     result.metadata["truncated"] = True
+    context.trace.log(
+        {
+            "type": "artifact_persisted",
+            "tool_call_id": tool_call.id,
+            "tool": tool_call.name,
+            "artifact_id": reference.artifact_id,
+            "chars_persisted": reference.chars,
+            "creation_reason": reference.creation_reason,
+        }
+    )
 
     return None
 
