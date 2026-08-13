@@ -131,6 +131,7 @@ class ContextManager:
                         projection,
                         eager_projection,
                     ),
+                    event_projection=eager_projection,
                     reason="eager_tool_result_projection",
                 )
 
@@ -195,6 +196,7 @@ class ContextManager:
                         projection,
                         microprojection,
                     ),
+                    event_projection=microprojection,
                     reason=reason or current.trigger_reason or "automatic",
                 )
 
@@ -215,6 +217,8 @@ class ContextManager:
                     projection,
                     microprojection,
                 ),
+                event_projection=microprojection,
+                tool_projection_after=after_micro,
                 reason=reason or current.trigger_reason or "forced",
             )
         except Exception as exc:
@@ -299,21 +303,15 @@ class ContextManager:
 
         after_tokens = estimate_messages_tokens(context.messages)
         saved_tokens = max(before_tokens - after_tokens, projection.saved_tokens)
-        event = {
-            "type": "context_compact",
-            "reason": "control_plane_boundary",
-            "mode": "tool_results",
-            "before_tokens": before_tokens,
-            "after_tokens": after_tokens,
-            "saved_tokens": saved_tokens,
-            "total_saved_tokens": saved_tokens,
-            "message_count": len(context.messages),
-            "context_generation": getattr(context, "context_generation", 0),
-        }
-        context.trace.log(event)
-        tracker = getattr(context, "cost_tracker", None)
-        if tracker is not None and hasattr(tracker, "record_context_event"):
-            tracker.record_context_event(event)
+        self._record_tool_projection_event(
+            context,
+            projection,
+            reason="control_plane_boundary",
+            before_tokens=before_tokens,
+            after_tokens=after_tokens,
+            saved_tokens=saved_tokens,
+            total_saved_tokens=saved_tokens,
+        )
         return projection
 
     def _finish_preparation(
@@ -326,6 +324,8 @@ class ContextManager:
         compacted: bool,
         microcompacted: bool,
         projection: ToolResultProjection,
+        event_projection: ToolResultProjection,
+        tool_projection_after: ContextMeasurement | None = None,
         reason: str,
     ) -> ContextPreparation:
         saved_tokens = max(
@@ -333,16 +333,37 @@ class ContextManager:
             projection.saved_tokens,
         )
         self._log_measurement(context, after, phase="after")
-        if compacted or microcompacted:
+        if tool_projection_after is not None:
+            projected_measurement = tool_projection_after
+        elif microcompacted:
+            projected_measurement = after
+        else:
+            projected_measurement = post_projection
+        if microcompacted:
+            projection_saved_tokens = max(
+                post_projection.used_tokens - projected_measurement.used_tokens,
+                event_projection.saved_tokens,
+                0,
+            )
+            self._record_tool_projection_event(
+                context,
+                event_projection,
+                reason=reason,
+                before_tokens=post_projection.used_tokens,
+                after_tokens=projected_measurement.used_tokens,
+                saved_tokens=projection_saved_tokens,
+                total_saved_tokens=saved_tokens,
+            )
+        if compacted:
             compaction_saved_tokens = max(
-                post_projection.used_tokens - after.used_tokens,
+                projected_measurement.used_tokens - after.used_tokens,
                 0,
             )
             event = {
                 "type": "context_compact",
                 "reason": reason,
-                "mode": "full" if compacted else "tool_results",
-                "before_tokens": before.used_tokens,
+                "mode": "full",
+                "before_tokens": projected_measurement.used_tokens,
                 "after_tokens": after.used_tokens,
                 "saved_tokens": compaction_saved_tokens,
                 "total_saved_tokens": saved_tokens,
@@ -360,6 +381,34 @@ class ContextManager:
             tool_results_projected=projection.count,
             saved_tokens=saved_tokens,
         )
+
+    def _record_tool_projection_event(
+        self,
+        context,
+        projection: ToolResultProjection,
+        *,
+        reason: str,
+        before_tokens: int,
+        after_tokens: int,
+        saved_tokens: int,
+        total_saved_tokens: int,
+    ) -> None:
+        event = {
+            "type": "context_tool_results_projected",
+            "reason": reason,
+            "mode": "tool_results",
+            "projected_results": projection.count,
+            "before_tokens": before_tokens,
+            "after_tokens": after_tokens,
+            "saved_tokens": saved_tokens,
+            "total_saved_tokens": total_saved_tokens,
+            "message_count": len(context.messages),
+            "context_generation": getattr(context, "context_generation", 0),
+        }
+        context.trace.log(event)
+        tracker = getattr(context, "cost_tracker", None)
+        if tracker is not None and hasattr(tracker, "record_context_event"):
+            tracker.record_context_event(event)
 
     def _measure(
         self,

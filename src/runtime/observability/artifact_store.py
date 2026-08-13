@@ -11,6 +11,7 @@ class ArtifactReference:
     path: Path
     chars: int
     tool_call_id: str
+    creation_reason: str = "other"
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,13 @@ class ArtifactStore:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         self._records: dict[str, ArtifactReference] = {}
 
-    def persist(self, tool_call_id: str, content: str) -> ArtifactReference:
+    def persist(
+        self,
+        tool_call_id: str,
+        content: str,
+        *,
+        creation_reason: str = "other",
+    ) -> ArtifactReference:
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
         artifact_id = f"artifact_{uuid4().hex[:16]}"
         path = self.artifacts_dir / f"{artifact_id}.txt"
@@ -47,6 +54,7 @@ class ArtifactStore:
             path=path,
             chars=len(content),
             tool_call_id=str(tool_call_id),
+            creation_reason=creation_reason,
         )
         self._records[artifact_id] = reference
         return reference
@@ -77,6 +85,20 @@ class ArtifactStore:
 
     def get(self, artifact_id: str) -> ArtifactReference | None:
         return self._records.get(artifact_id)
+
+    def snapshot(self) -> dict[str, int]:
+        records = list(self._records.values())
+        return {
+            "created": len(records),
+            "chars_persisted": sum(reference.chars for reference in records),
+            "large_output_artifacts": sum(
+                reference.creation_reason == "large_output" for reference in records
+            ),
+            "context_projection_artifacts": sum(
+                reference.creation_reason == "context_projection"
+                for reference in records
+            ),
+        }
 
     def _read_chars(self, path: Path, *, offset: int, limit: int) -> str:
         with path.open("r", encoding="utf-8") as file:

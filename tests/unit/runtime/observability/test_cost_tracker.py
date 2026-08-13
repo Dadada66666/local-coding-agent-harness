@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent.messages import TokenUsage
 from runtime.observability.cost_tracker import CostTracker
@@ -100,6 +101,56 @@ def test_runtime_checkpoint_is_counted_as_compacted_history() -> None:
 
     assert breakdown["compacted_history"]["estimated_tokens"] > 0
     assert breakdown["user_messages"]["estimated_tokens"] == 0
+
+
+def test_cost_tracker_writes_context_and_artifact_summaries(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+    monkeypatch.setattr(Path, "mkdir", lambda self, *args, **kwargs: None)
+    monkeypatch.setattr(
+        Path,
+        "write_text",
+        lambda self, text, *args, **kwargs: captured.setdefault("text", text),
+    )
+    tracker = CostTracker(Path("unused-run-dir"))
+    tracker.record_context_event(
+        {
+            "type": "tool_result_budget",
+            "replaced_results": 1,
+            "saved_tokens": 100,
+        }
+    )
+    tracker.record_context_event(
+        {
+            "type": "context_tool_results_projected",
+            "reason": "eager_tool_result_projection",
+            "projected_results": 2,
+            "saved_tokens": 200,
+        }
+    )
+    context = SimpleNamespace(
+        context_compactions=1,
+        completed_tasks=[],
+        artifacts=SimpleNamespace(
+            snapshot=lambda: {
+                "created": 3,
+                "chars_persisted": 900,
+                "large_output_artifacts": 1,
+                "context_projection_artifacts": 2,
+            }
+        ),
+    )
+
+    tracker.write(context)
+    data = json.loads(captured["text"])
+
+    management = data["context_management"]
+    assert management["full_history_compactions"] == 1
+    assert management["tool_result_projection_events"] == 1
+    assert management["tool_results_projected"] == 2
+    assert management["round_budget_projection_events"] == 1
+    assert management["round_budget_results_projected"] == 1
+    assert management["eager_projection_events"] == 1
+    assert data["artifacts"]["chars_persisted"] == 900
 
 
 def _allocated_total(breakdown: dict) -> int:

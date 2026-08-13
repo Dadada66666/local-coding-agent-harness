@@ -100,3 +100,58 @@ def test_readable_trace_writer_renders_tool_failures_without_full_output(tmp_pat
 
     assert "result: failed - old_text not found" in content
     assert "task cancelled: protected_write - Permission denied" in content
+
+
+def test_readable_trace_distinguishes_projection_compaction_and_artifacts(tmp_path) -> None:
+    trace_path = tmp_path / "trace.jsonl"
+    events = [
+        {
+            "type": "tool_result_budget",
+            "replaced_results": 1,
+            "saved_tokens": 100,
+        },
+        {
+            "type": "context_tool_results_projected",
+            "reason": "eager_tool_result_projection",
+            "projected_results": 2,
+            "saved_tokens": 200,
+        },
+        {
+            "type": "context_compact",
+            "mode": "full",
+            "saved_tokens": 300,
+        },
+        {
+            "type": "artifact_persisted",
+            "creation_reason": "context_projection",
+            "chars_persisted": 400,
+        },
+        {
+            "type": "tool_result",
+            "metadata": {
+                "rehydration": True,
+                "source_path": "game.js",
+                "returned_line_start": 1,
+                "returned_line_end": 350,
+            },
+        },
+    ]
+    trace_path.write_text(
+        "\n".join(json.dumps(event) for event in events),
+        encoding="utf-8",
+    )
+    context = SimpleNamespace(
+        run_dir=tmp_path,
+        run_id="run-1",
+        task="inspect",
+        trace=SimpleNamespace(path=trace_path),
+        messages=[],
+    )
+
+    content = ReadableTraceWriter().write(context).read_text(encoding="utf-8")
+
+    assert "context round-budget tool-results projected" in content
+    assert "context tool-results projected (eager_tool_result_projection)" in content
+    assert "context compacted (full)" in content
+    assert "artifact persisted (context_projection)" in content
+    assert "source rehydrated: game.js lines 1-350" in content

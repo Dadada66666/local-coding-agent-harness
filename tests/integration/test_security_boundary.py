@@ -204,7 +204,14 @@ def test_large_tool_output_is_persisted_once_and_recoverable(monkeypatch, tmp_pa
     assert str(context.run_dir) not in result.content
     reference = context.artifacts.get(result.artifact_id)
     assert reference is not None
+    assert reference.creation_reason == "large_output"
     assert reference.path.read_text(encoding="utf-8") == full_output
+    assert context.artifacts.snapshot() == {
+        "created": 1,
+        "chars_persisted": len(full_output),
+        "large_output_artifacts": 1,
+        "context_projection_artifacts": 0,
+    }
 
     artifact_result = runner.runtime.executor.execute(
         ToolCall(

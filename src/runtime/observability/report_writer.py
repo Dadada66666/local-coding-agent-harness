@@ -68,6 +68,9 @@ class ReportWriter:
             "## Source Read Efficiency",
             *self._source_read_efficiency(context),
             "",
+            "## Artifact Persistence",
+            *self._artifact_summary(context),
+            "",
             "## Sandbox",
             *self._sandbox_summary(context),
             "",
@@ -302,11 +305,27 @@ class ReportWriter:
         tracker = context.cost_tracker
         events = getattr(tracker, "context_events", [])
         saved_tokens = sum(max(int(event.get("saved_tokens", 0)), 0) for event in events)
+        projection_events = [
+            event
+            for event in events
+            if event.get("type") == "context_tool_results_projected"
+        ]
+        round_budget_events = [
+            event for event in events if event.get("type") == "tool_result_budget"
+        ]
         lines = [
             "- scope: session",
             f"- window_tokens: {getattr(context.config, 'context_window_tokens', None) or 'unknown'}",
             f"- target_tokens: {getattr(context.config, 'context_target_tokens', None) or 'disabled'}",
-            f"- compactions: {getattr(context, 'context_compactions', 0)}",
+            f"- full_history_compactions: {getattr(context, 'context_compactions', 0)}",
+            f"- tool_result_projection_events: {len(projection_events)}",
+            "- tool_results_projected: "
+            f"{sum(max(int(event.get('projected_results', 0)), 0) for event in projection_events)}",
+            f"- round_budget_projection_events: {len(round_budget_events)}",
+            "- round_budget_results_projected: "
+            f"{sum(max(int(event.get('replaced_results', 0)), 0) for event in round_budget_events)}",
+            "- eager_projection_events: "
+            f"{sum(event.get('reason') == 'eager_tool_result_projection' for event in projection_events)}",
             f"- overflow_recovery_attempts: {getattr(context, 'context_recovery_attempts', 0)}",
             f"- estimated_tokens_saved: {saved_tokens}",
         ]
@@ -339,7 +358,13 @@ class ReportWriter:
             f"- unique_files_read: {values['unique_files_read']}",
             f"- unique_source_lines_returned: {values['unique_source_lines_returned']}",
             f"- duplicate_source_lines_returned: {values['duplicate_source_lines_returned']}",
+            f"- rehydration_reads: {values['rehydration_reads']}",
+            f"- rehydrated_source_lines: {values['rehydrated_source_lines']}",
+            "- non_rehydration_overlap_lines: "
+            f"{values['non_rehydration_overlap_lines']}",
             f"- overlap_ratio: {values['overlap_ratio']:.2%}",
+            "- non_rehydration_overlap_ratio: "
+            f"{values['non_rehydration_overlap_ratio']:.2%}",
             f"- files_fully_scanned: {values['files_fully_scanned']}",
             f"- full_rescans: {values['full_rescans']}",
             f"- high_overlap_rereads: {values['high_overlap_rereads']}",
@@ -347,6 +372,20 @@ class ReportWriter:
             "- generic_artifacts_created_from_source_reads: "
             f"{values['generic_artifacts_created_from_source_reads']}",
             f"- source_snapshots_persisted: {values['source_snapshots_persisted']}",
+        ]
+
+    def _artifact_summary(self, context: AgentContext) -> list[str]:
+        artifacts = getattr(context, "artifacts", None)
+        snapshot = getattr(artifacts, "snapshot", None)
+        values = snapshot() if callable(snapshot) else {}
+        if not values:
+            return ["- N/A"]
+        return [
+            f"- created: {values['created']}",
+            f"- chars_persisted: {values['chars_persisted']}",
+            f"- large_output_artifacts: {values['large_output_artifacts']}",
+            "- context_projection_artifacts: "
+            f"{values['context_projection_artifacts']}",
         ]
 
     def _plan_section(self, context: AgentContext) -> list[str]:

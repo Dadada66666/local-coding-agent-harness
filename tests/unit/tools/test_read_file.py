@@ -266,16 +266,26 @@ def test_projected_fully_scanned_source_can_rehydrate_once(tmp_path: Path) -> No
         context,
     )
     assert rehydrated.metadata["redundant_source"] is False
+    assert rehydrated.metadata["rehydration"] is True
+    assert rehydrated.metadata["rehydrated_lines"] == 80
     assert rehydrated.metadata["returned_lines"] == 80
     assert "item-79" in rehydrated.content
     assert state.unprojected_observation_count == 1
+    assert context.source_read_metrics.rehydration_reads == 1
+    assert context.source_read_metrics.rehydrated_source_lines == 80
+    snapshot = context.source_efficiency_snapshot()
+    assert snapshot["duplicate_source_lines_returned"] == 80
+    assert snapshot["rehydrated_source_lines"] == 80
+    assert snapshot["non_rehydration_overlap_lines"] == 0
 
     redundant = runtime.executor.execute(
         ToolCall("redundant", "read_file", {"path": "index.html"}),
         context,
     )
     assert redundant.metadata["redundant_source"] is True
+    assert redundant.metadata["rehydration"] is False
     assert redundant.metadata["returned_lines"] == 0
+    assert context.source_read_metrics.rehydration_reads == 1
 
 
 def test_broad_duplicate_protection_is_independent_of_default_page_size(
