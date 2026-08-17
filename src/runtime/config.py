@@ -9,7 +9,7 @@ from runtime.plan.models import PlanApprovalPolicy, PlanPolicy
 class RunConfig:
     max_turns: int = 40
     max_repair_attempts: int = 3
-    max_tool_result_chars: int = 12000
+    max_tool_result_chars: int = 18000
     max_tool_round_tokens: int = 12000
     grep_max_matches: int = 50
     compact_threshold_chars: int = 180000

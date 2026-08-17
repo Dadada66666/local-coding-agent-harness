@@ -4,6 +4,8 @@ import json
 from copy import deepcopy
 from types import SimpleNamespace
 
+import pytest
+
 from agent.messages import TokenUsage, ToolCall
 from runtime.config import RunConfig
 from agent.loop import AgentLoop
@@ -819,7 +821,19 @@ def test_tool_round_budget_projects_source_as_last_resort(tmp_path) -> None:
     assert event["budget_satisfied"] is True
 
 
-def test_default_round_budget_retains_three_realistic_source_pages(tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("offsets", "expected_projected"),
+    [
+        ((0, 500), 0),
+        ((0, 400, 800), 1),
+    ],
+    ids=("two-page-batch", "oversized-three-page-batch"),
+)
+def test_default_round_budget_bounds_realistic_source_page_batches(
+    tmp_path,
+    offsets,
+    expected_projected,
+) -> None:
     source = tmp_path / "game.js"
     source.write_text(
         "\n".join(
@@ -837,7 +851,7 @@ def test_default_round_budget_retains_three_realistic_source_pages(tmp_path) -> 
     )
     context = runner.create_context("inspect", include_initial_message=True)
     results = []
-    for index, offset in enumerate((0, 350, 700)):
+    for index, offset in enumerate(offsets):
         call_id = f"source-{index}"
         result = runner.runtime.executor.execute(
             ToolCall(call_id, "read_file", {"path": "game.js", "offset": offset}),
@@ -857,8 +871,8 @@ def test_default_round_budget_retains_three_realistic_source_pages(tmp_path) -> 
 
     projection = ToolResultProjector().enforce_round_budget(context)
 
-    assert projection.count == 0
-    assert str(context.messages).count("[read_file:") == 3
+    assert projection.count == expected_projected
+    assert str(context.messages).count("[read_file:") == len(offsets) - expected_projected
     assert context.config.max_tool_round_tokens == 12_000
 
 

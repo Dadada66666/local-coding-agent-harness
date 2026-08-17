@@ -88,27 +88,24 @@ def test_paginated_scan_merges_coverage_for_a_951_line_source(tmp_path: Path) ->
     assert context.read_file_state[str(path)].partial is False
 
 
-def test_default_pagination_reduces_round_trips_for_a_1100_line_source(
+def test_default_pagination_reduces_round_trips_for_a_1200_line_source(
     tmp_path: Path,
 ) -> None:
-    source = "\n".join(
-        f'const value_{index} = "component-{index}"; // update animation and collision state'
-        for index in range(1100)
-    )
-    legacy_root = tmp_path / "legacy"
+    source = "\n".join(f"const state_{index} = update({index}); // game" for index in range(1200))
+    baseline_root = tmp_path / "baseline"
     optimized_root = tmp_path / "optimized"
-    legacy_root.mkdir()
+    baseline_root.mkdir()
     optimized_root.mkdir()
-    (legacy_root / "large_demo.js").write_text(source, encoding="utf-8")
+    (baseline_root / "large_demo.js").write_text(source, encoding="utf-8")
     (optimized_root / "large_demo.js").write_text(source, encoding="utf-8")
     tool = ReadFileTool()
 
-    legacy_context = make_context(legacy_root, max_tool_result_chars=8000)
-    legacy_pages = _read_all_pages(
+    baseline_context = make_context(baseline_root, max_tool_result_chars=12000)
+    baseline_pages = _read_all_pages(
         tool,
-        legacy_context,
+        baseline_context,
         path="large_demo.js",
-        limit=200,
+        limit=350,
     )
     optimized_context = make_context(optimized_root)
     optimized_pages = _read_all_pages(
@@ -117,16 +114,22 @@ def test_default_pagination_reduces_round_trips_for_a_1100_line_source(
         path="large_demo.js",
     )
 
-    assert DEFAULT_LIMIT == 350
-    assert len(optimized_pages) * 10 <= len(legacy_pages) * 7
-    assert sum(page.metadata["returned_lines"] for page in optimized_pages) == 1100
-    assert optimized_context.source_read_metrics.unique_source_lines_returned == 1100
+    assert DEFAULT_LIMIT == 500
+    assert optimized_context.config.max_tool_result_chars == 18000
+    assert len(baseline_pages) == 5
+    assert len(optimized_pages) == 4
+    assert sum(page.metadata["returned_lines"] for page in optimized_pages) == 1200
+    assert all(
+        len(page.content) <= optimized_context.config.max_tool_result_chars
+        for page in optimized_pages
+    )
+    assert optimized_context.source_read_metrics.unique_source_lines_returned == 1200
     assert optimized_context.source_read_metrics.duplicate_source_lines_returned == 0
     assert optimized_pages[-1].metadata["fully_scanned"] is True
     final_page = optimized_pages[-1]
     assert final_page.content.endswith(
         "[read_file: large_demo.js | lines "
-        f"{final_page.metadata['returned_line_start']}-1100 / 1100 | complete]"
+        f"{final_page.metadata['returned_line_start']}-1200 / 1200 | complete]"
     )
 
 
