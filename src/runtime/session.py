@@ -6,7 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from runtime.config import RunConfig
-from runtime.context.source_state import SourceReadMetrics, SourceReadState
+from runtime.context.source_state import (
+    SourceReadMetrics,
+    SourceReadState,
+    merge_ranges,
+    overlap_length,
+)
 from runtime.plan import ExecutionPath, PlanPhase
 from runtime.plan.capabilities import context_tool_is_visible
 from runtime.security.access_policy import AccessPolicy
@@ -186,48 +191,8 @@ class AgentContext:
             self.read_file_segments[key] = state
         return state
 
-    def source_working_set_budget_tokens(self) -> int:
-        explicit = getattr(self.config, "source_working_set_max_tokens", None)
-        if explicit is not None and int(explicit) > 0:
-            return int(explicit)
-        target = getattr(self.config, "context_target_tokens", None)
-        if target is None:
-            target = getattr(self.config, "context_recent_max_tokens", 16000)
-        return max(1000, int(target * 0.45))
-
-    def active_source_states(self) -> list[SourceReadState]:
-        return [
-            state
-            for state in self.read_file_segments.values()
-            if state.active
-            and (
-                state.fully_scanned
-                or state.last_read_turn is None
-                or self.current_turn_id - state.last_read_turn <= 1
-            )
-        ]
-
     def is_tool_visible(self, tool_name: str) -> bool:
         return context_tool_is_visible(self, tool_name)
-
-    def active_source_tokens(self) -> int:
-        return sum(state.estimated_tokens for state in self.active_source_states())
-
-    def should_protect_source_observation(self, metadata: dict[str, Any]) -> bool:
-        if metadata.get("projection_kind") != "source_slice":
-            return False
-        resolved_path = str(metadata.get("resolved_path") or "")
-        state = self.read_file_segments.get(resolved_path)
-        if state is None or state.sha256 != metadata.get("source_sha256"):
-            return False
-        budget = self.source_working_set_budget_tokens()
-        active = self.active_source_states()
-        if not any(item is state for item in active):
-            return False
-        if sum(item.estimated_tokens for item in active) <= budget:
-            return True
-        most_recent = max(active, key=lambda item: item.last_read_turn or -1, default=None)
-        return state is most_recent and state.estimated_tokens <= budget
 
     def record_source_observation(self, tool_call_id: str, metadata: dict[str, Any]) -> None:
         if metadata.get("projection_kind") != "source_slice":
@@ -238,6 +203,42 @@ class AgentContext:
         identifier = str(tool_call_id)
         if identifier not in state.observation_ids:
             state.observation_ids.append(identifier)
+
+    def source_resident_overlap(
+        self,
+        state: SourceReadState,
+        start: int,
+        end: int,
+    ) -> int:
+        observation_ids = set(state.observation_ids)
+        projected_ids = state.projected_observation_ids
+        resident_ids: set[str] = set()
+        for message in self.messages:
+            content = message.get("content")
+            if message.get("role") != "user" or not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                identifier = str(block.get("tool_use_id", ""))
+                if identifier in observation_ids and identifier not in projected_ids:
+                    resident_ids.add(identifier)
+
+        ranges: list[tuple[int, int]] = []
+        for identifier in resident_ids:
+            metadata = self.tool_result_metadata.get(identifier, {})
+            if (
+                metadata.get("projection_kind") != "source_slice"
+                or metadata.get("source_sha256") != state.sha256
+                or metadata.get("source_path") != state.source_path
+            ):
+                continue
+            line_start = metadata.get("returned_line_start")
+            line_end = metadata.get("returned_line_end")
+            if not isinstance(line_start, int) or not isinstance(line_end, int):
+                continue
+            ranges = merge_ranges(ranges, (max(line_start - 1, 0), line_end))
+        return overlap_length(ranges, start, end)
 
     def mark_source_observation_projected(
         self,
@@ -269,18 +270,6 @@ class AgentContext:
             for state in states
         ]
 
-    def source_prompt_context(self, *, limit: int = 5) -> list[str]:
-        states = [
-            state
-            for state in self.read_file_segments.values()
-            if state.fully_scanned
-        ]
-        states.sort(key=lambda state: state.last_read_turn or -1)
-        return [
-            f"{state.source_path}: fully scanned, unchanged"
-            for state in states[-limit:]
-        ]
-
     def source_efficiency_snapshot(self) -> dict[str, Any]:
         metrics = self.source_read_metrics
         returned = (
@@ -306,47 +295,10 @@ class AgentContext:
             )
             if returned
             else 0.0,
-            "non_rehydration_overlap_ratio": round(
-                non_rehydration_overlap / returned,
-                4,
-            )
-            if returned
-            else 0.0,
             "files_fully_scanned": len(metrics.fully_scanned_files),
-            "full_rescans": metrics.full_rescans,
             "high_overlap_rereads": metrics.high_overlap_rereads,
             "redundant_reads_avoided": metrics.redundant_reads_avoided,
-            "generic_artifacts_created_from_source_reads": metrics.source_artifacts_created,
-            "source_snapshots_persisted": metrics.source_snapshots_persisted,
-        }
-
-    def source_working_set_snapshot(self, *, limit: int = 3) -> dict[str, Any]:
-        active = sorted(
-            self.active_source_states(),
-            key=lambda state: state.estimated_tokens,
-            reverse=True,
-        )
-        return {
-            "budget_tokens": self.source_working_set_budget_tokens(),
-            "active_source_files": len(active),
-            "active_source_tokens": sum(state.estimated_tokens for state in active),
-            "source_observations_pinned": sum(
-                state.unprojected_observation_count for state in active
-            ),
-            "source_observations_projected": (
-                self.source_read_metrics.source_observations_projected
-            ),
-            "projection_protection_decisions": (
-                self.source_read_metrics.source_projection_protections
-            ),
-            "top_active_sources": [
-                {
-                    "path": state.source_path,
-                    "estimated_tokens": state.estimated_tokens,
-                    "fully_scanned": state.fully_scanned,
-                }
-                for state in active[:limit]
-            ],
+            "source_observations_projected": metrics.source_observations_projected,
         }
 
     def record_changed_file(self, path: str) -> None:
@@ -624,8 +576,6 @@ class AgentContext:
 
     def mark_model_request_consumed(self, message_count: int) -> None:
         self.last_model_consumed_message_count = max(message_count, 0)
-        for state in self.read_file_segments.values():
-            state.mark_consumed(self.current_turn_id)
 
     def record_model_usage(self, usage: Any, response_message_index: int) -> None:
         self.last_model_usage = usage

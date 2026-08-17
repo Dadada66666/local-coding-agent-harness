@@ -56,9 +56,9 @@ The adapter loads only the harness-root `.env` by default; it does not search
 the active `WORKDIR`. Set `LCAH_ENV_FILE` to an explicit path when running an
 installed package without that file.
 
-Set `MODEL_CONTEXT_WINDOW_TOKENS` when the provider does not expose the model's
-window size. This enables token-budget compaction; without it, the runtime keeps
-the compatible character-threshold fallback.
+Set `MODEL_CONTEXT_WINDOW_TOKENS` to the provider's real model window. The
+runtime combines that hard-cap safety with its finite operating target; the
+character threshold is used only when both token limits are disabled.
 
 The model adapter uses the Anthropic Messages API shape, including top-level
 `system`, `messages`, `tools`, assistant `tool_use` blocks, and user
@@ -300,15 +300,16 @@ Important runtime properties:
   resolution, including aliases that resolve to protected files.
 - Context pressure includes the system prompt, tool schemas, messages, reserved
   output, and a safety margin. Provider usage anchors the local estimator when
-  available. Capacity pressure and the default 32K economic context target use
-  the lower limit; a character threshold remains the compatibility fallback.
-- Context reduction is layered. The eager watermark is derived from the economic
-  target by default and uses hysteresis. A bounded active source working set is
-  retained until a paginated scan is coherent and consumed; hard context safety
-  still takes priority. Consumed source slices become line-based source stubs
-  without generic artifacts, while Bash, grep, and log output retain recoverable
-  artifact references. Full compaction includes a bounded source manifest. The
-  append-only conversation audit is unchanged.
+  available. Capacity pressure and the default 272K operating target use the
+  lower limit; the character threshold is only a compatibility fallback when
+  token limits are disabled.
+- Context reduction is pressure-driven. The eager watermark is derived from the
+  operating target and uses hysteresis. Projection only clears consumed results
+  before the protected recent suffix; the per-round hard budget prefers
+  non-source results before source pages. Consumed source slices become
+  line-based source stubs without generic artifacts, while Bash, grep, and log
+  output retain recoverable artifact references. Full compaction includes a
+  bounded source manifest. The append-only conversation audit is unchanged.
 - Interactive task boundaries compact completed history above a token threshold
   into a deterministic checkpoint before the next task starts. The current
   prompt and the append-only audit remain intact.

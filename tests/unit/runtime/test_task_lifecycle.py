@@ -116,7 +116,7 @@ def test_cancelling_task_also_cancels_nonterminal_plan(tmp_path) -> None:
     context.validate_lifecycle_invariants()
 
 
-def test_source_working_set_is_task_local(tmp_path) -> None:
+def test_source_read_state_is_task_local(tmp_path) -> None:
     source = tmp_path / "demo.py"
     source.write_text("one\ntwo\n", encoding="utf-8")
     context, _ = make_context(tmp_path, policy=PlanPolicy.OFF)
@@ -126,7 +126,7 @@ def test_source_working_set_is_task_local(tmp_path) -> None:
         requested_path="demo.py",
         sha256="a" * 64,
         total_lines=2,
-    ).record_range(0, 2, observation_chars=8, turn_id=1)
+    ).record_range(0, 2, turn_id=1)
     context.transition_task(TaskStatus.COMPLETED, trigger="test_complete")
 
     context.begin_task("new task")

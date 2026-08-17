@@ -40,9 +40,6 @@ class SourceReadState:
     covered_ranges: list[tuple[int, int]] = field(default_factory=list)
     fully_scanned: bool = False
     last_read_turn: int | None = None
-    completed_turn: int | None = None
-    fully_scanned_consumed: bool = False
-    unique_observation_chars: int = 0
     observation_ids: list[str] = field(default_factory=list)
     projected_observation_ids: set[str] = field(default_factory=set)
 
@@ -54,7 +51,6 @@ class SourceReadState:
         start: int,
         end: int,
         *,
-        observation_chars: int,
         turn_id: int | None,
     ) -> tuple[int, int, bool]:
         requested = max(end - start, 0)
@@ -64,37 +60,7 @@ class SourceReadState:
         self.covered_ranges = merge_ranges(self.covered_ranges, (start, end))
         self.fully_scanned = self._covers_all_lines()
         self.last_read_turn = turn_id
-        if new_lines and requested:
-            self.unique_observation_chars += int(observation_chars * new_lines / requested)
-        if self.fully_scanned and not was_complete:
-            self.completed_turn = turn_id
-            self.fully_scanned_consumed = False
         return already_seen, new_lines, self.fully_scanned and not was_complete
-
-    def mark_consumed(self, turn_id: int | None) -> None:
-        if (
-            self.fully_scanned
-            and not self.fully_scanned_consumed
-            and self.completed_turn is not None
-            and turn_id is not None
-            and turn_id > self.completed_turn
-        ):
-            self.fully_scanned_consumed = True
-
-    @property
-    def active(self) -> bool:
-        return not self.fully_scanned or not self.fully_scanned_consumed
-
-    @property
-    def estimated_tokens(self) -> int:
-        return (self.unique_observation_chars + 2) // 3
-
-    @property
-    def unprojected_observation_count(self) -> int:
-        return sum(
-            tool_call_id not in self.projected_observation_ids
-            for tool_call_id in self.observation_ids
-        )
 
     def _covers_all_lines(self) -> bool:
         return self._ranges_cover_all(self.covered_ranges)
@@ -114,10 +80,6 @@ class SourceReadMetrics:
     rehydrated_source_lines: int = 0
     high_overlap_rereads: int = 0
     redundant_reads_avoided: int = 0
-    full_rescans: int = 0
     source_observations_projected: int = 0
-    source_projection_protections: int = 0
-    source_artifacts_created: int = 0
-    source_snapshots_persisted: int = 0
     files_read: set[str] = field(default_factory=set)
     fully_scanned_files: set[str] = field(default_factory=set)

@@ -394,7 +394,7 @@ def test_required_approval_resumes_same_task_and_budget(tmp_path) -> None:
     assert context.plan_state.phase is PlanPhase.COMPLETED
 
 
-def test_execution_recovers_after_projected_source_and_denied_temp_verification(
+def test_execution_reuses_planning_source_and_recovers_after_denied_verification(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -424,9 +424,6 @@ def test_execution_recovers_after_projected_source_and_denied_temp_verification(
                         "status": "in_progress",
                     },
                 ),
-                ToolCall("rehydrate", "read_file", {"path": "demo.js"}),
-            ),
-            tool_response(
                 ToolCall(
                     "edit",
                     "edit_file",
@@ -481,9 +478,6 @@ def test_execution_recovers_after_projected_source_and_denied_temp_verification(
     context = runner.start_interactive()
 
     runner.start_task(context, "update and verify the source")
-    context.last_model_consumed_message_count = len(context.messages)
-    projection = runner.runtime.context_manager.compact_control_plane_boundary(context)
-    assert projection.count >= 1
     runner.continue_task(context, "Please proceed with the plan exactly as written.")
 
     assert context.success is True
@@ -491,11 +485,12 @@ def test_execution_recovers_after_projected_source_and_denied_temp_verification(
     assert context.plan_state.phase is PlanPhase.COMPLETED
     assert source.read_text(encoding="utf-8").startswith("const value_0 = 1;\n")
     assert executed_commands == [safe_verification]
-    assert context.source_read_metrics.duplicate_source_lines_returned == 80
+    assert context.source_read_metrics.duplicate_source_lines_returned == 0
     assert context.source_read_metrics.redundant_reads_avoided == 0
     assert context.task_unresolved_mutation_failure is False
-    assert context.source_read_metrics.source_observations_projected >= 1
-    assert len(model.calls) == 9
+    assert context.source_read_metrics.source_observations_projected == 0
+    assert len(model.calls) == 8
+    assert "value_79" in str(model.calls[3]["messages"])
 
     events = [
         json.loads(line)
@@ -510,6 +505,9 @@ def test_execution_recovers_after_projected_source_and_denied_temp_verification(
     assert invalid_result["metadata"]["terminal_on_deny"] is False
     assert invalid_result["metadata"]["mutation_outcome"] == "not_executed"
     assert not any(event.get("type") == "task_cancelled" for event in events)
+    assert not any(
+        event.get("reason") == "control_plane_boundary" for event in events
+    )
     report = context.report_writer.write(context).read_text(encoding="utf-8")
     assert "## Failure Summary\nN/A" in report
     assert "## Tool Failures\n- N/A" in report

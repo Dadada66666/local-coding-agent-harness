@@ -26,8 +26,13 @@ def make_context():
     )
 
 
-def run_test_result_hook(arguments: dict, metadata: dict, ok: bool = False):
-    context = make_context()
+def run_test_result_hook(
+    arguments: dict,
+    metadata: dict,
+    ok: bool = False,
+    context=None,
+):
+    context = context or make_context()
     tool = SimpleNamespace(name="bash")
     tool_call = SimpleNamespace(id="call_1", arguments=arguments)
     result = ToolResult(
@@ -77,6 +82,66 @@ def test_read_only_discovery_command_is_not_recorded_as_verification() -> None:
     assert context.last_test_result is None
     assert result.metadata["verification_ignored"] is True
     assert any(event["type"] == "verification_ignored" for event in context.trace.events)
+
+
+def test_command_discovery_does_not_overwrite_real_verification() -> None:
+    context, _ = run_test_result_hook(
+        arguments={"command": "node --check app.js", "purpose": "verify"},
+        metadata={"purpose": "verify"},
+        ok=True,
+    )
+    recorded = context.task_test_result
+
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "command -v chromium || command -v firefox || true",
+            "purpose": "verify",
+        },
+        metadata={"purpose": "verify"},
+        ok=True,
+        context=context,
+    )
+
+    assert context.task_test_result is recorded
+    assert context.task_test_result["command"] == "node --check app.js"
+    assert result.metadata["verification_ignored"] is True
+
+
+def test_which_test_binary_is_discovery_even_without_verify_purpose() -> None:
+    context, result = run_test_result_hook(
+        arguments={"command": "which pytest"},
+        metadata={},
+        ok=True,
+    )
+
+    assert context.last_test_result is None
+    assert result.metadata["verification_ignored"] is True
+
+
+def test_cd_wrapped_git_diff_is_discovery() -> None:
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "cd project && git diff --check",
+            "purpose": "verify",
+        },
+        metadata={"purpose": "verify"},
+        ok=False,
+    )
+
+    assert context.last_test_result is None
+    assert result.metadata["verification_ignored"] is True
+
+
+def test_ruff_check_remains_a_real_static_verification() -> None:
+    context, result = run_test_result_hook(
+        arguments={"command": "ruff check .", "purpose": "verify"},
+        metadata={"purpose": "verify"},
+        ok=True,
+    )
+
+    assert context.last_test_result["command"] == "ruff check ."
+    assert context.last_test_result["verification_level"] == "static"
+    assert result.metadata["verification_command"] is True
 
 
 def test_test_command_is_still_recorded_without_verify_purpose() -> None:

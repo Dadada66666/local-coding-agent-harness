@@ -204,15 +204,6 @@ class AgentLoop:
                 }
             )
 
-            if self._has_pending_plan_response(context):
-                compact_boundary = getattr(
-                    self.runtime.context_manager,
-                    "compact_control_plane_boundary",
-                    None,
-                )
-                if callable(compact_boundary):
-                    compact_boundary(context)
-
             pending_continuation = getattr(
                 context,
                 "has_pending_user_continuation",
@@ -225,11 +216,6 @@ class AgentLoop:
                     bool(pending_continuation())
                     if callable(pending_continuation)
                     else False
-                ),
-                source_context=(
-                    context.source_prompt_context()
-                    if callable(getattr(context, "source_prompt_context", None))
-                    else None
                 ),
                 call_budget=call_budget,
             )

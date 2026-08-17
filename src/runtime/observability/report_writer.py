@@ -329,23 +329,6 @@ class ReportWriter:
             f"- overflow_recovery_attempts: {getattr(context, 'context_recovery_attempts', 0)}",
             f"- estimated_tokens_saved: {saved_tokens}",
         ]
-        snapshot = getattr(context, "source_working_set_snapshot", None)
-        working_set = snapshot() if callable(snapshot) else {}
-        if working_set:
-            lines.extend(
-                [
-                    f"- source_working_set_budget_tokens: {working_set['budget_tokens']}",
-                    f"- active_source_files: {working_set['active_source_files']}",
-                    f"- active_source_tokens: {working_set['active_source_tokens']}",
-                    f"- source_observations_pinned: {working_set['source_observations_pinned']}",
-                    f"- source_observations_projected: {working_set['source_observations_projected']}",
-                ]
-            )
-            for source in working_set.get("top_active_sources", []):
-                lines.append(
-                    "- active_source: "
-                    f"{source['path']} ({source['estimated_tokens']} estimated tokens)"
-                )
         return lines
 
     def _source_read_efficiency(self, context: AgentContext) -> list[str]:
@@ -363,15 +346,11 @@ class ReportWriter:
             "- non_rehydration_overlap_lines: "
             f"{values['non_rehydration_overlap_lines']}",
             f"- overlap_ratio: {values['overlap_ratio']:.2%}",
-            "- non_rehydration_overlap_ratio: "
-            f"{values['non_rehydration_overlap_ratio']:.2%}",
             f"- files_fully_scanned: {values['files_fully_scanned']}",
-            f"- full_rescans: {values['full_rescans']}",
             f"- high_overlap_rereads: {values['high_overlap_rereads']}",
             f"- redundant_reads_avoided: {values['redundant_reads_avoided']}",
-            "- generic_artifacts_created_from_source_reads: "
-            f"{values['generic_artifacts_created_from_source_reads']}",
-            f"- source_snapshots_persisted: {values['source_snapshots_persisted']}",
+            "- source_observations_projected: "
+            f"{values['source_observations_projected']}",
         ]
 
     def _artifact_summary(self, context: AgentContext) -> list[str]:

@@ -12,6 +12,11 @@ from tools.read_file import ReadFileTool
 from tools.write_file import WriteFileTool
 
 
+def test_edit_file_description_explains_atomic_grounded_batches() -> None:
+    assert "edits[] is atomic" in EditFileTool.description
+    assert "recently read or searched text" in EditFileTool.description
+
+
 class FakeModelClient:
     def __init__(self, responses: list[ModelResponse]) -> None:
         self.responses = responses

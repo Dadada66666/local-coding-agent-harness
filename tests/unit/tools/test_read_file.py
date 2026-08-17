@@ -9,6 +9,7 @@ from agent.messages import ToolCall
 from runtime.config import RunConfig
 from agent.loop import AgentLoop
 from runtime.bootstrap import build_runtime
+from runtime.context.projection import ToolResultProjector
 from tools.base import ToolValidationError
 from tools.read_file import DEFAULT_LIMIT, ReadFileTool
 
@@ -210,14 +211,29 @@ def test_unchanged_fully_scanned_source_uses_lightweight_reread_response(
     runtime = build_runtime()
     tool = runtime.tool_registry.get("read_file")
     for index, offset in enumerate(range(0, 951, 200)):
-        runtime.executor.execute(
+        call_id = f"scan-{index}"
+        context.add_assistant_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": "read_file",
+                        "input": {"path": "game.js", "offset": offset, "limit": 200},
+                    }
+                ],
+            }
+        )
+        result = runtime.executor.execute(
             ToolCall(
-                f"scan-{index}",
+                call_id,
                 "read_file",
                 {"path": "game.js", "offset": offset, "limit": 200},
             ),
             context,
         )
+        context.add_tool_result(call_id, result.content)
 
     redundant = runtime.executor.execute(
         ToolCall(
@@ -231,7 +247,7 @@ def test_unchanged_fully_scanned_source_uses_lightweight_reread_response(
     assert redundant.ok is True
     assert redundant.metadata["redundant_source"] is True
     assert redundant.metadata["returned_lines"] == 0
-    assert "already fully scanned" in redundant.content
+    assert "still available in the current context" in redundant.content
     assert len(redundant.content) < 600
     assert "force" not in tool.input_schema["properties"]
     with pytest.raises(ToolValidationError, match="unknown read_file fields: force"):
@@ -250,27 +266,55 @@ def test_projected_fully_scanned_source_can_rehydrate_once(tmp_path: Path) -> No
     context = make_context(tmp_path)
     runtime = build_runtime()
 
+    context.add_assistant_message(
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "initial",
+                    "name": "read_file",
+                    "input": {"path": "index.html"},
+                }
+            ],
+        }
+    )
     initial = runtime.executor.execute(
         ToolCall("initial", "read_file", {"path": "index.html"}),
         context,
     )
+    context.add_tool_result("initial", initial.content)
     state = context.read_file_segments[str(path)]
     assert initial.metadata["fully_scanned"] is True
-    assert state.unprojected_observation_count == 1
+    assert context.source_resident_overlap(state, 0, 80) == 80
 
     context.mark_source_observation_projected("initial", initial.metadata)
-    assert state.unprojected_observation_count == 0
+    assert context.source_resident_overlap(state, 0, 80) == 0
 
+    context.add_assistant_message(
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "rehydrated",
+                    "name": "read_file",
+                    "input": {"path": "index.html"},
+                }
+            ],
+        }
+    )
     rehydrated = runtime.executor.execute(
         ToolCall("rehydrated", "read_file", {"path": "index.html"}),
         context,
     )
+    context.add_tool_result("rehydrated", rehydrated.content)
     assert rehydrated.metadata["redundant_source"] is False
     assert rehydrated.metadata["rehydration"] is True
     assert rehydrated.metadata["rehydrated_lines"] == 80
     assert rehydrated.metadata["returned_lines"] == 80
     assert "item-79" in rehydrated.content
-    assert state.unprojected_observation_count == 1
+    assert context.source_resident_overlap(state, 0, 80) == 80
     assert context.source_read_metrics.rehydration_reads == 1
     assert context.source_read_metrics.rehydrated_source_lines == 80
     snapshot = context.source_efficiency_snapshot()
@@ -288,6 +332,169 @@ def test_projected_fully_scanned_source_can_rehydrate_once(tmp_path: Path) -> No
     assert context.source_read_metrics.rehydration_reads == 1
 
 
+def test_projected_partial_source_reread_is_counted_as_rehydration(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "partial.js"
+    path.write_text(
+        "\n".join(f"const value{index} = {index};" for index in range(400)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    runtime = build_runtime()
+
+    context.add_assistant_message(
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "partial-initial",
+                    "name": "read_file",
+                    "input": {"path": "partial.js", "offset": 100, "limit": 100},
+                }
+            ],
+        }
+    )
+    initial = runtime.executor.execute(
+        ToolCall(
+            "partial-initial",
+            "read_file",
+            {"path": "partial.js", "offset": 100, "limit": 100},
+        ),
+        context,
+    )
+    context.add_tool_result("partial-initial", initial.content)
+    state = context.read_file_segments[str(path)]
+    assert state.fully_scanned is False
+    context.mark_source_observation_projected("partial-initial", initial.metadata)
+    assert context.source_resident_overlap(state, 100, 200) == 0
+
+    rehydrated = runtime.executor.execute(
+        ToolCall(
+            "partial-rehydrated",
+            "read_file",
+            {"path": "partial.js", "offset": 100, "limit": 100},
+        ),
+        context,
+    )
+
+    assert rehydrated.metadata["fully_scanned"] is False
+    assert rehydrated.metadata["rehydration"] is True
+    assert rehydrated.metadata["rehydrated_lines"] == 100
+    assert context.source_read_metrics.rehydration_reads == 1
+    assert context.source_read_metrics.rehydrated_source_lines == 100
+    assert context.source_efficiency_snapshot()["non_rehydration_overlap_lines"] == 0
+
+
+def test_source_residency_is_scoped_to_the_requested_range(tmp_path: Path) -> None:
+    path = tmp_path / "large.js"
+    path.write_text(
+        "\n".join(f"const value{index} = {index};" for index in range(800)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    runtime = build_runtime()
+
+    for call_id, offset in (("page-a", 0), ("page-b", 200)):
+        context.add_assistant_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": "read_file",
+                        "input": {"path": "large.js", "offset": offset, "limit": 200},
+                    }
+                ],
+            }
+        )
+        result = runtime.executor.execute(
+            ToolCall(
+                call_id,
+                "read_file",
+                {"path": "large.js", "offset": offset, "limit": 200},
+            ),
+            context,
+        )
+        context.add_tool_result(call_id, result.content)
+
+    projection = ToolResultProjector().compact_consumed_results(
+        context,
+        compact_before=3,
+    )
+    assert projection.count == 1
+    assert "Source observation compacted" in str(context.messages[2])
+    assert "value399" in str(context.messages[4])
+
+    page_a = runtime.executor.execute(
+        ToolCall(
+            "page-a-rehydrated",
+            "read_file",
+            {"path": "large.js", "offset": 0, "limit": 200},
+        ),
+        context,
+    )
+    assert page_a.metadata["rehydration"] is True
+    assert page_a.metadata["rehydrated_lines"] == 200
+    assert page_a.metadata["redundant_source"] is False
+
+    page_b = runtime.executor.execute(
+        ToolCall(
+            "page-b-resident",
+            "read_file",
+            {"path": "large.js", "offset": 200, "limit": 200},
+        ),
+        context,
+    )
+    assert page_b.metadata["rehydration"] is False
+    assert page_b.metadata["redundant_source"] is True
+    assert page_b.metadata["returned_lines"] == 0
+
+
+def test_source_removed_by_full_compaction_can_rehydrate(tmp_path: Path) -> None:
+    path = tmp_path / "compacted.py"
+    path.write_text(
+        "\n".join(f"value_{index} = {index}" for index in range(200)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    runtime = build_runtime()
+    context.add_assistant_message(
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "initial",
+                    "name": "read_file",
+                    "input": {"path": "compacted.py"},
+                }
+            ],
+        }
+    )
+    initial = runtime.executor.execute(
+        ToolCall("initial", "read_file", {"path": "compacted.py"}),
+        context,
+    )
+    context.add_tool_result("initial", initial.content)
+    state = context.read_file_segments[str(path)]
+    assert context.source_resident_overlap(state, 0, 200) == 200
+
+    context.messages = [
+        {"role": "user", "content": "[Runtime checkpoint]\n{}"},
+    ]
+
+    rehydrated = runtime.executor.execute(
+        ToolCall("rehydrated", "read_file", {"path": "compacted.py"}),
+        context,
+    )
+    assert rehydrated.metadata["redundant_source"] is False
+    assert rehydrated.metadata["rehydration"] is True
+    assert rehydrated.metadata["rehydrated_lines"] == 200
+
+
 def test_broad_duplicate_protection_is_independent_of_default_page_size(
     tmp_path: Path,
 ) -> None:
@@ -298,14 +505,29 @@ def test_broad_duplicate_protection_is_independent_of_default_page_size(
     context = make_context(tmp_path)
     runtime = build_runtime()
     for index, offset in enumerate(range(0, 2000, 200)):
-        runtime.executor.execute(
+        call_id = f"scan-{index}"
+        context.add_assistant_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": call_id,
+                        "name": "read_file",
+                        "input": {"path": "large.py", "offset": offset, "limit": 200},
+                    }
+                ],
+            }
+        )
+        result = runtime.executor.execute(
             ToolCall(
-                f"scan-{index}",
+                call_id,
                 "read_file",
                 {"path": "large.py", "offset": offset, "limit": 200},
             ),
             context,
         )
+        context.add_tool_result(call_id, result.content)
 
     broad = runtime.executor.execute(
         ToolCall(

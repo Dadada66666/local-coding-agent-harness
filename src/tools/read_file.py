@@ -107,14 +107,11 @@ class ReadFileTool(BaseTool):
         if high_overlap:
             metrics.high_overlap_rereads += 1
 
-        source_body_available = state.unprojected_observation_count > 0
-        rehydration = (
-            state.fully_scanned
-            and broad_read
-            and high_overlap
-            and not source_body_available
+        resident_overlap = context.source_resident_overlap(state, offset, requested_end)
+        requested_range_resident = (
+            requested_lines > 0 and resident_overlap >= requested_lines
         )
-        if state.fully_scanned and broad_read and high_overlap and source_body_available:
+        if broad_read and high_overlap and requested_range_resident:
             metrics.redundant_reads_avoided += 1
             context.record_file_snapshot(
                 target,
@@ -125,7 +122,7 @@ class ReadFileTool(BaseTool):
             return ToolResult(
                 ok=True,
                 content=(
-                    "This unchanged source file was already fully scanned in the current task.\n"
+                    "This unchanged source range is still available in the current context.\n"
                     f"Requested range lines {offset + 1}-{requested_end} is "
                     f"{overlap_ratio:.0%} previously covered.\n"
                     "Use grep for symbol discovery or a narrow read_file range for exact "
@@ -154,8 +151,8 @@ class ReadFileTool(BaseTool):
                     "overlap_ratio": round(overlap_ratio, 4),
                     "already_seen_lines": already_seen,
                     "new_lines": 0,
-                    "fully_scanned": True,
-                    "partial": False,
+                    "fully_scanned": state.fully_scanned,
+                    "partial": not state.fully_scanned,
                     "projection_kind": "source_notice",
                     "rehydration": False,
                 },
@@ -182,9 +179,15 @@ class ReadFileTool(BaseTool):
         already_seen, new_lines, became_fully_scanned = state.record_range(
             offset,
             coverage_end_offset,
-            observation_chars=sum(len(value) + 1 for value in rendered),
             turn_id=getattr(context, "current_turn_id", None),
         )
+        resident_overlap = context.source_resident_overlap(
+            state,
+            offset,
+            coverage_end_offset,
+        )
+        rehydrated_lines = max(already_seen - resident_overlap, 0)
+        rehydration = rehydrated_lines > 0
         returned_overlap_ratio = (
             already_seen / returned_count if returned_count else 0.0
         )
@@ -193,7 +196,7 @@ class ReadFileTool(BaseTool):
         metrics.duplicate_source_lines_returned += already_seen
         if rehydration and returned_count:
             metrics.rehydration_reads += 1
-            metrics.rehydrated_source_lines += already_seen
+            metrics.rehydrated_source_lines += rehydrated_lines
         if became_fully_scanned:
             metrics.fully_scanned_files.add(state.source_path)
         partial = not state.fully_scanned
@@ -247,7 +250,7 @@ class ReadFileTool(BaseTool):
                 "source_path": state.source_path,
                 "projection_kind": "source_slice",
                 "rehydration": rehydration,
-                "rehydrated_lines": already_seen if rehydration else 0,
+                "rehydrated_lines": rehydrated_lines,
                 "reconstructible": not source_line_truncated,
                 "fully_scanned": state.fully_scanned,
                 "partial": partial,

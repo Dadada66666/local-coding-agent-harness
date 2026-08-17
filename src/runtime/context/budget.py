@@ -63,6 +63,32 @@ def estimate_request_tokens(system: str, messages: list[dict], tools: list[dict]
     )
 
 
+def normalize_provider_context_anchor(
+    *,
+    local_estimate: int,
+    input_tokens: int,
+    cache_creation_input_tokens: int = 0,
+    cache_read_input_tokens: int = 0,
+    output_tokens: int = 0,
+    appended_tokens: int = 0,
+) -> int:
+    """Choose the cache accounting convention closest to the serialized request."""
+    input_tokens = max(int(input_tokens), 0)
+    cache_tokens = max(int(cache_creation_input_tokens), 0) + max(
+        int(cache_read_input_tokens),
+        0,
+    )
+    suffix_tokens = max(int(output_tokens), 0) + max(int(appended_tokens), 0)
+    candidates = {
+        input_tokens + suffix_tokens,
+        input_tokens + cache_tokens + suffix_tokens,
+    }
+    return min(
+        candidates,
+        key=lambda value: (abs(value - max(int(local_estimate), 0)), -value),
+    )
+
+
 def request_char_count(system: str, messages: list[dict], tools: list[dict]) -> int:
     return len(system) + len(render_for_tokens(tools)) + len(render_for_tokens(messages))
 
@@ -109,7 +135,11 @@ def measure_context(
     soft_limit_tokens = min(soft_limit_candidates) if soft_limit_candidates else None
     if soft_limit_tokens is not None and used_tokens >= soft_limit_tokens:
         trigger_reason = "token_budget"
-    elif fallback_char_limit is not None and request_chars >= fallback_char_limit:
+    elif (
+        soft_limit_tokens is None
+        and fallback_char_limit is not None
+        and request_chars >= fallback_char_limit
+    ):
         trigger_reason = "char_fallback"
 
     return ContextMeasurement(
