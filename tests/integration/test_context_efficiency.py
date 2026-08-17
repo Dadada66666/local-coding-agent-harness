@@ -48,7 +48,7 @@ def test_larger_pages_and_context_working_set_reduce_trace_churn(tmp_path: Path)
     assert optimized.high_overlap_rereads == legacy.high_overlap_rereads
     assert optimized.full_compactions < legacy.full_compactions
     assert optimized.tool_result_projections <= legacy.tool_result_projections
-    assert optimized.peak_tool_result_chars <= 12000
+    assert optimized.peak_tool_result_chars <= 18000
     assert legacy.peak_tool_result_chars <= 8000
 
 

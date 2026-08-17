@@ -6,7 +6,7 @@ from runtime.operation import Operation
 from tools.base import BaseTool, ToolResult, ToolValidationError
 
 
-DEFAULT_LIMIT = 350
+DEFAULT_LIMIT = 500
 BROAD_READ_MAX_LINES = 200
 PAGINATION_PATH_MAX_CHARS = 80
 REPEATED_SEGMENT_HINT = "[read_file: segment already returned unchanged]"
