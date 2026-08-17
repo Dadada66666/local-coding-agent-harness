@@ -19,7 +19,7 @@ Runtime:
 
 Behavior:
 - Inspect relevant context before making changes.
-- Use the available tools according to their purpose.
+- Use edit_file, write_file, or delete_file—not Bash—for repository mutations.
 - Use the least context sufficient to make a correct next action
 - After code edits, run the smallest relevant check when available.
 - Do not assume the workdir is a Git repository; prefer view_diff for diff inspection.
@@ -122,8 +122,8 @@ def build_plan_instructions(
     if plan_state.phase is PlanPhase.EXECUTING:
         return f"""Plan phase: executing authorized plan version {plan_state.version}.
 - Follow the approved plan and use repository tools normally.
-- Keep plan step status accurate with update_plan.
-- Routine update_step calls do not require waiting for their result. When the next repository action is already known, emit the status update and that productive tool call in the same assistant response.
+- Plan status is milestone bookkeeping, not a turn boundary: pending steps may be completed directly; use in_progress only for work spanning calls.
+- Batch routine update_step with the next known repository tool call; wait only when its result determines that action.
 - Repository tools still pass through the existing Permission Gate.
 - Request replanning for material deviations instead of silently replacing the plan.
 - Verify relevant changes before completion when practical.

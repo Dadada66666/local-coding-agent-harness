@@ -7,10 +7,9 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 class EditFileTool(BaseTool):
     name = "edit_file"
     description = (
-        "Replace exact text in one UTF-8 file. Use old_text/new_text or edits[]; "
-        "old_text must match exactly, new_text is the full replacement, "
-        "occurrence selects the Nth match, replace_all replaces all matches. "
-        "edits[] is atomic; ground batched replacements in recently read or searched text."
+        "Replace exact text in one UTF-8 file. Use old_text/new_text or atomic edits[] "
+        "grounded in recent read/grep output; occurrence selects a repeated match and "
+        "replace_all replaces all. After failure, refresh only the failed region."
     )
     input_schema = {
         "type": "object",
@@ -181,7 +180,10 @@ class EditFileTool(BaseTool):
         if count == 0:
             return ToolResult(
                 ok=False,
-                content=f"edit {index}: old_text not found in {requested_path}",
+                content=(
+                    f"edit {index}: old_text not found in {requested_path}. "
+                    "Read or search the failed region and retry with exact current text."
+                ),
                 error="old_text not found",
                 metadata={"failed_edit": index},
             )
@@ -203,7 +205,10 @@ class EditFileTool(BaseTool):
         if count > 1:
             return ToolResult(
                 ok=False,
-                content=f"edit {index}: old_text appears multiple times; provide occurrence.",
+                content=(
+                    f"edit {index}: old_text appears multiple times; provide occurrence "
+                    "or narrow old_text."
+                ),
                 error="ambiguous edit",
                 metadata={"failed_edit": index, "occurrences": count},
             )

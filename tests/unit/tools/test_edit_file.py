@@ -13,8 +13,9 @@ from tools.write_file import WriteFileTool
 
 
 def test_edit_file_description_explains_atomic_grounded_batches() -> None:
-    assert "edits[] is atomic" in EditFileTool.description
-    assert "recently read or searched text" in EditFileTool.description
+    assert "atomic edits[]" in EditFileTool.description
+    assert "recent read/grep output" in EditFileTool.description
+    assert "refresh only the failed region" in EditFileTool.description
 
 
 class FakeModelClient:
@@ -111,6 +112,7 @@ def test_edit_file_batch_failure_is_atomic(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.error == "old_text not found"
     assert result.metadata["failed_edit"] == 2
+    assert "Read or search the failed region" in result.content
     assert path.read_text(encoding="utf-8") == original
     assert context.changed_files == set()
 

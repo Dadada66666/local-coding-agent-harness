@@ -55,6 +55,26 @@ def test_read_file_returns_explicit_line_cursor_metadata(tmp_path: Path) -> None
     )
 
 
+def test_read_file_contract_uses_returned_cursor_when_char_budget_ends_page(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "dense.js").write_text(
+        "\n".join(f"const value_{index} = '{'x' * 100}';" for index in range(700)),
+        encoding="utf-8",
+    )
+    context = make_context(tmp_path)
+    tool = ReadFileTool()
+
+    result = tool.call({"path": "dense.js", "offset": 0, "limit": 500}, context)
+
+    assert result.metadata["returned_lines"] < 500
+    assert result.metadata["next_offset"] == result.metadata["returned_lines"]
+    assert f"next_offset={result.metadata['next_offset']}" in result.content
+    assert "continue from returned next_offset, never offset + limit" in tool.description
+    assert "returned next_offset" in tool.input_schema["properties"]["offset"]["description"]
+    assert "may return fewer" in tool.input_schema["properties"]["limit"]["description"]
+
+
 def test_repeated_source_segment_returns_a_non_blocking_hint(tmp_path: Path) -> None:
     (tmp_path / "demo.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
     context = make_context(tmp_path)

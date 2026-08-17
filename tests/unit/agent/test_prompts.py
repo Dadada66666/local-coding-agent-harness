@@ -44,9 +44,10 @@ def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
     prompt = build_plan_instructions(plan_state(PlanPhase.EXECUTING))
 
     assert "Follow the approved plan" in prompt
-    assert "Keep plan step status accurate" in prompt
-    assert "Routine update_step calls do not require waiting" in prompt
-    assert "that productive tool call in the same assistant response" in prompt
+    assert "milestone bookkeeping, not a turn boundary" in prompt
+    assert "pending steps may be completed directly" in prompt
+    assert "in_progress only for work spanning calls" in prompt
+    assert "Batch routine update_step with the next known repository tool call" in prompt
     assert "Request replanning for material deviations" in prompt
     assert "verification reserve" not in prompt.lower()
     assert "calls remain" not in prompt.lower()
@@ -71,3 +72,4 @@ def test_base_prompt_does_not_assume_git_workspace(tmp_path) -> None:
 
     assert "Do not assume the workdir is a Git repository" in prompt
     assert "prefer view_diff for diff inspection" in prompt
+    assert "edit_file, write_file, or delete_file—not Bash" in prompt

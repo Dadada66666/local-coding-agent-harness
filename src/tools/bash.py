@@ -18,10 +18,10 @@ EXIT_EXPECTATIONS = {"zero", "nonzero"}
 class BashTool(BaseTool):
     name = "bash"
     description = (
-        'Run a shell command from WORKDIR; purpose="verify" records validation '
-        "and enables fail-fast execution; exit_expectation declares the expected "
-        "overall status. For verification, prefer direct commands that do not create "
-        "temporary files outside WORKDIR."
+        "Run commands, tests, verification, or read-only discovery from WORKDIR. Repository "
+        "mutations use edit_file/write_file/delete_file, not Bash (including apply_patch, "
+        'sed -i, redirection, heredocs, or Python writes). purpose="verify" enables fail-fast '
+        "and must not mutate files; exit_expectation declares the expected status."
     )
     input_schema = {
         "type": "object",
@@ -32,7 +32,10 @@ class BashTool(BaseTool):
                 "description": "Timeout in seconds (1-600).",
             },
             "input": {"type": "string"},
-            "purpose": {"type": "string"},
+            "purpose": {
+                "type": "string",
+                "description": "Use verify for non-mutating validation; enables fail-fast.",
+            },
             "exit_expectation": {
                 "type": "string",
                 "enum": ["zero", "nonzero"],

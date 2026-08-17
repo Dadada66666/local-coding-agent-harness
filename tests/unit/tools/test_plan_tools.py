@@ -139,7 +139,8 @@ def test_update_plan_combines_replace_and_submission(tmp_path) -> None:
 
 
 def test_update_plan_schema_uses_action_specific_contracts() -> None:
-    schema = build_runtime().tool_registry.get("update_plan").input_schema
+    tool = build_runtime().tool_registry.get("update_plan")
+    schema = tool.input_schema
 
     assert "oneOf" in schema
     assert len(schema["oneOf"]) == 6
@@ -152,6 +153,15 @@ def test_update_plan_schema_uses_action_specific_contracts() -> None:
     assert "submit" in replace_contract["properties"]
     step_properties = replace_contract["properties"]["steps"]["items"]["properties"]
     assert set(step_properties) == {"id", "description"}
+    update_contract = next(
+        contract
+        for contract in schema["oneOf"]
+        if contract["properties"]["action"].get("const") == "update_step"
+    )
+    status_description = update_contract["properties"]["status"]["description"]
+    assert "pending may become completed directly" in status_description
+    assert "in_progress is optional" in status_description
+    assert "execution milestones" in tool.description
 
 
 def test_update_plan_schema_is_narrowed_by_plan_phase(tmp_path) -> None:

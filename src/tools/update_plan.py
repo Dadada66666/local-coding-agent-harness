@@ -21,8 +21,8 @@ PLAN_ACTIONS = {
 class UpdatePlanTool(BaseTool):
     name = "update_plan"
     description = (
-        "Create a structured plan with explicit submit intent, update authorized execution "
-        "status, or request replanning. This tool cannot approve a manual plan."
+        "Create or submit a plan, record execution milestones, or request replanning; "
+        "cannot approve a manual plan."
     )
     input_schema = {
         "oneOf": [
@@ -64,6 +64,10 @@ class UpdatePlanTool(BaseTool):
                     "status": {
                         "type": "string",
                         "enum": [status.value for status in PlanStepStatus],
+                        "description": (
+                            "Milestone status: pending may become completed directly; "
+                            "in_progress is optional for work spanning calls."
+                        ),
                     },
                 },
                 "required": ["action", "step_id", "status"],
