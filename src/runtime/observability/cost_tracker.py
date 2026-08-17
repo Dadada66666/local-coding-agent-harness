@@ -199,7 +199,6 @@ class CostTracker:
                             max(int(event.get("saved_tokens", 0)), 0)
                             for event in self.context_events
                         ),
-                        "source_working_set": self._source_working_set(context),
                     },
                     "artifacts": self._artifact_summary(context),
                     "source_read_efficiency": self._source_efficiency(context),
@@ -361,10 +360,6 @@ class CostTracker:
 
     def _source_efficiency(self, context) -> dict[str, Any]:
         snapshot = getattr(context, "source_efficiency_snapshot", None)
-        return snapshot() if callable(snapshot) else {}
-
-    def _source_working_set(self, context) -> dict[str, Any]:
-        snapshot = getattr(context, "source_working_set_snapshot", None)
         return snapshot() if callable(snapshot) else {}
 
     def _context_event_summary(self, context) -> dict[str, int]:

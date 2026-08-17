@@ -9,7 +9,8 @@ class EditFileTool(BaseTool):
     description = (
         "Replace exact text in one UTF-8 file. Use old_text/new_text or edits[]; "
         "old_text must match exactly, new_text is the full replacement, "
-        "occurrence selects the Nth match, replace_all replaces all matches."
+        "occurrence selects the Nth match, replace_all replaces all matches. "
+        "edits[] is atomic; ground batched replacements in recently read or searched text."
     )
     input_schema = {
         "type": "object",

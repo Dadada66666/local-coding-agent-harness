@@ -218,11 +218,8 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 - Bash 文件删除会返回非终止的工具路由失败，让模型改用 `delete_file`；递归或大范围破坏性命令仍会终止任务。
 - Shell 风险分析具备引号感知能力，并会记录复合副作用。网络命令如果同时创建目录或写文件，审批会同时展示目标主机和文件路径，不会用单一 `network` 标签隐藏写入行为。
 - 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
-- 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 可作为本地估算的锚点。容量软上限与默认 32K 经济上下文目标取较小值，字符阈值继续作为兼容兜底。
-- 上下文缩减采用分层策略。提前投影水位默认按经济上下文目标派生并带滞回；预算允许时，分页源码在
-  完成连贯扫描且被模型消费前暂时保留，硬上下文安全始终优先。已消费源码页转换为保持行坐标的 source
-  stub，不生成通用 artifact；Bash、grep 和日志仍保留可恢复 artifact。完整压缩会写入有界 source
-  manifest，append-only 审计历史不会被改写。
+- 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 经本地序列化估算校准后作为保守锚点。容量软上限与默认 272K 工作目标取较小值；只有 token 限制都关闭时，字符阈值才作为兼容兜底。
+- 上下文缩减只由真实压力驱动。提前投影水位按工作目标派生并带滞回，只回收受保护 recent suffix 之前的已消费结果；单轮硬预算优先回收非源码结果，再按需回收源码页。已消费源码页转换为保持行坐标的 source stub，不生成通用 artifact；Bash、grep 和日志仍保留可恢复 artifact。完整压缩会写入有界 source manifest，append-only 审计历史不会被改写。
 - 交互任务切换时，如果已完成历史超过 token 阈值，runtime 会在下一任务开始前生成确定性 checkpoint；当前 prompt 和 append-only 审计链保持完整。
 - provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
 - 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。

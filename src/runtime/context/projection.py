@@ -62,7 +62,6 @@ class ToolResultProjector:
             ordered_candidates = sorted(
                 candidates,
                 key=lambda block: self._round_budget_sort_key(
-                    context,
                     block,
                     names,
                 ),
@@ -78,10 +77,6 @@ class ToolResultProjector:
                 source = provenance.get(tool_use_id)
                 metadata = self._result_metadata(context, tool_use_id)
                 source_result = self._is_source_result(tool_name, metadata)
-                protected_source = source_result and self._protect_source(
-                    context,
-                    metadata,
-                )
                 if source_result and not source_candidates_started:
                     total, extra_savings = self._minimize_persisted_previews(
                         projected,
@@ -91,10 +86,6 @@ class ToolResultProjector:
                     saved_tokens += extra_savings
                     source_candidates_started = True
                     if total <= limit:
-                        if protected_source:
-                            metrics = getattr(context, "source_read_metrics", None)
-                            if metrics is not None:
-                                metrics.source_projection_protections += 1
                         break
                 minimum_candidate = dict(block)
                 if self._is_source_result(tool_name, metadata):
@@ -189,7 +180,6 @@ class ToolResultProjector:
         context,
         *,
         compact_before: int,
-        protect_active_sources: bool = True,
     ) -> ToolResultProjection:
         if compact_before <= 0:
             return ToolResultProjection()
@@ -211,11 +201,6 @@ class ToolResultProjector:
                 source = provenance.get(tool_use_id)
                 metadata = self._result_metadata(context, tool_use_id)
                 if self._is_source_result(tool_name, metadata):
-                    if protect_active_sources and self._protect_source(context, metadata):
-                        metrics = getattr(context, "source_read_metrics", None)
-                        if metrics is not None:
-                            metrics.source_projection_protections += 1
-                        continue
                     original = str(block["content"])
                     before_tokens = estimate_value_tokens(block)
                     block["content"] = self._source_stub(
@@ -304,19 +289,15 @@ class ToolResultProjector:
 
     def _round_budget_sort_key(
         self,
-        context,
         block: dict,
         names: dict[str, str],
     ) -> tuple[int, int]:
         tool_use_id = str(block.get("tool_use_id", ""))
         tool_name = names.get(tool_use_id, "unknown")
-        metadata = self._result_metadata(context, tool_use_id)
-        if not self._is_source_result(tool_name, metadata):
+        if tool_name != "read_file":
             priority = 0
-        elif not self._protect_source(context, metadata):
-            priority = 1
         else:
-            priority = 2
+            priority = 1
         return priority, -estimate_value_tokens(block)
 
     def _minimize_persisted_previews(
@@ -443,15 +424,8 @@ class ToolResultProjector:
         value = values.get(tool_use_id, {})
         return value if isinstance(value, dict) else {}
 
-    def _is_source_slice(self, metadata: dict[str, Any]) -> bool:
-        return metadata.get("projection_kind") == "source_slice"
-
     def _is_source_result(self, tool_name: str, metadata: dict[str, Any]) -> bool:
         return tool_name == "read_file" and metadata.get("projection_kind") != "source_notice"
-
-    def _protect_source(self, context, metadata: dict[str, Any]) -> bool:
-        checker = getattr(context, "should_protect_source_observation", None)
-        return bool(checker(metadata)) if callable(checker) else False
 
     def _mark_source_projected(
         self,

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from runtime.context.budget import estimate_text_tokens, measure_context
+from runtime.context.budget import (
+    estimate_text_tokens,
+    measure_context,
+    normalize_provider_context_anchor,
+)
 
 
 def test_non_ascii_estimate_is_more_conservative_than_ascii() -> None:
@@ -39,6 +43,29 @@ def test_provider_usage_is_used_as_a_conservative_anchor() -> None:
     assert measurement.source == "provider_usage"
     assert measurement.used_tokens == 1500
     assert measurement.trigger_reason == "token_budget"
+
+
+def test_provider_anchor_supports_exclusive_cache_accounting() -> None:
+    assert normalize_provider_context_anchor(
+        local_estimate=25_000,
+        input_tokens=1_000,
+        cache_read_input_tokens=24_000,
+    ) == 25_000
+
+
+def test_provider_anchor_avoids_duplicate_inclusive_cache_accounting() -> None:
+    assert normalize_provider_context_anchor(
+        local_estimate=25_000,
+        input_tokens=25_000,
+        cache_read_input_tokens=24_000,
+    ) == 25_000
+
+
+def test_provider_anchor_without_cache_uses_reported_input() -> None:
+    assert normalize_provider_context_anchor(
+        local_estimate=24_000,
+        input_tokens=25_000,
+    ) == 25_000
 
 
 def test_char_threshold_is_only_a_fallback_without_a_known_window() -> None:
@@ -92,7 +119,7 @@ def test_known_small_window_limits_a_larger_context_target() -> None:
     assert measurement.trigger_reason == "token_budget"
 
 
-def test_unknown_window_uses_finite_target_and_character_fallback() -> None:
+def test_unknown_window_uses_finite_token_target_before_character_fallback() -> None:
     below = measure_context(
         system="system",
         messages=[{"role": "user", "content": "x" * 100_000}],
@@ -119,4 +146,21 @@ def test_unknown_window_uses_finite_target_and_character_fallback() -> None:
     assert below.soft_limit_tokens == 48_000
     assert below.trigger_reason is None
     assert fallback.soft_limit_tokens == 48_000
-    assert fallback.trigger_reason == "char_fallback"
+    assert fallback.trigger_reason is None
+
+
+def test_character_threshold_is_ignored_when_a_token_target_exists() -> None:
+    measurement = measure_context(
+        system="system",
+        messages=[{"role": "user", "content": "x" * 180_000}],
+        tools=[],
+        context_window_tokens=None,
+        target_tokens=272_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        soft_limit_ratio=0.8,
+        fallback_char_limit=180_000,
+    )
+
+    assert measurement.soft_limit_tokens == 272_000
+    assert measurement.trigger_reason is None

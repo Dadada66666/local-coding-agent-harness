@@ -45,7 +45,8 @@ def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
 
     assert "Follow the approved plan" in prompt
     assert "Keep plan step status accurate" in prompt
-    assert "batch routine step-status updates" in prompt
+    assert "Routine update_step calls do not require waiting" in prompt
+    assert "that productive tool call in the same assistant response" in prompt
     assert "Request replanning for material deviations" in prompt
     assert "verification reserve" not in prompt.lower()
     assert "calls remain" not in prompt.lower()
@@ -63,3 +64,10 @@ def test_global_call_limit_hint_appears_only_near_hard_limit(tmp_path) -> None:
 
     assert "approaching its global model-call limit" not in normal
     assert "approaching its global model-call limit" in near_limit
+
+
+def test_base_prompt_does_not_assume_git_workspace(tmp_path) -> None:
+    prompt = build_system_prompt(tmp_path)
+
+    assert "Do not assume the workdir is a Git repository" in prompt
+    assert "prefer view_diff for diff inspection" in prompt

@@ -22,6 +22,7 @@ Behavior:
 - Use the available tools according to their purpose.
 - Use the least context sufficient to make a correct next action
 - After code edits, run the smallest relevant check when available.
+- Do not assume the workdir is a Git repository; prefer view_diff for diff inspection.
 - Report honestly if verification was not possible.
 - For commands that require stdin, use the bash tool input field.
 - When running a command to validate behavior, set bash purpose to "verify".
@@ -49,7 +50,6 @@ def build_system_prompt(
     plan_state=None,
     *,
     has_user_continuation: bool = False,
-    source_context: list[str] | None = None,
     call_budget=None,
 ) -> str:
     base = BASE_SYSTEM_PROMPT.format(
@@ -64,13 +64,6 @@ def build_system_prompt(
     sections = [base.rstrip()]
     if plan_instructions:
         sections.append(plan_instructions)
-    if source_context and getattr(plan_state, "phase", None) is not PlanPhase.AWAITING_APPROVAL:
-        entries = "\n".join(f"- {value[:300]}" for value in source_context[:5])
-        sections.append(
-            "Source context:\n"
-            f"{entries}\n"
-            "Avoid restarting a full scan of unchanged files; use grep or narrow reads."
-        )
     if call_budget is not None and call_budget.approaching_limit:
         sections.append(
             "The task is approaching its global model-call limit; prioritize completing "
@@ -130,7 +123,7 @@ def build_plan_instructions(
         return f"""Plan phase: executing authorized plan version {plan_state.version}.
 - Follow the approved plan and use repository tools normally.
 - Keep plan step status accurate with update_plan.
-- When practical, batch routine step-status updates with the next productive tool call.
+- Routine update_step calls do not require waiting for their result. When the next repository action is already known, emit the status update and that productive tool call in the same assistant response.
 - Repository tools still pass through the existing Permission Gate.
 - Request replanning for material deviations instead of silently replacing the plan.
 - Verify relevant changes before completion when practical.

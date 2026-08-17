@@ -7,7 +7,10 @@ from tools.base import BaseTool, ToolResult
 
 class ViewDiffTool(BaseTool):
     name = "view_diff"
-    description = "View the current git diff."
+    description = (
+        "Inspect workspace changes through the Runtime diff view. "
+        "It reports cleanly when the workdir is not a Git repository."
+    )
     input_schema = {"type": "object", "properties": {}}
 
     read_only = True

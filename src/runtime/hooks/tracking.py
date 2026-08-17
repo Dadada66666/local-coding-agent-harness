@@ -159,7 +159,7 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         )
         return None
 
-    if is_verification_command and _is_discovery_command(command):
+    if (is_test_command or is_verification_command) and _is_discovery_command(command):
         _record_verification_ignored(
             tool_call,
             result,
@@ -281,7 +281,11 @@ def _is_test_command(command: str) -> bool:
 
 def _is_discovery_command(command: str) -> bool:
     stripped = command.strip().lower()
+    leading, separator, remainder = stripped.partition("&&")
+    if separator and leading.strip().startswith("cd "):
+        stripped = remainder.strip()
     discovery_prefixes = (
+        "command -v ",
         "find ",
         "git status",
         "git diff",
@@ -292,6 +296,7 @@ def _is_discovery_command(command: str) -> bool:
         "pwd",
         "rg ",
         "grep ",
+        "which ",
     )
     return any(stripped == prefix.strip() or stripped.startswith(prefix) for prefix in discovery_prefixes)
 

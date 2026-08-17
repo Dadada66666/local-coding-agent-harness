@@ -28,3 +28,7 @@ def test_view_diff_reports_non_git_directory_without_error(monkeypatch, tmp_path
     assert result.ok is True
     assert result.content == "No git repository; diff unavailable."
     assert result.metadata["git_repository"] is False
+
+
+def test_view_diff_description_does_not_assume_git() -> None:
+    assert "not a Git repository" in ViewDiffTool.description
