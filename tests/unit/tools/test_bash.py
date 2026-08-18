@@ -37,7 +37,10 @@ def test_verify_commands_use_fail_fast_posix_shell(monkeypatch) -> None:
     assert tool._shell_name(fail_fast=True) == "/bin/sh -lec"
     assert 'purpose="verify"' in tool.description
     assert "fail-fast" in tool.description
-    assert "temporary files outside WORKDIR" in tool.description
+    assert "edit_file/write_file/delete_file, not Bash" in tool.description
+    assert "apply_patch" in tool.description
+    assert "must not mutate files" in tool.description
+    assert "non-mutating validation" in tool.input_schema["properties"]["purpose"]["description"]
 
 
 def test_normal_commands_keep_existing_posix_shell_behavior(monkeypatch) -> None:

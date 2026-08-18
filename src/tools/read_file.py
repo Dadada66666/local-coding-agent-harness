@@ -14,13 +14,23 @@ REPEATED_SEGMENT_HINT = "[read_file: segment already returned unchanged]"
 
 class ReadFileTool(BaseTool):
     name = "read_file"
-    description = "Read a UTF-8 text file with line numbers."
+    description = (
+        "Read numbered UTF-8 lines. limit is a ceiling and the character budget may stop "
+        "early; continue from returned next_offset, never offset + limit. Do not guess "
+        "same-file page offsets; independent files may be batched."
+    )
     input_schema = {
         "type": "object",
         "properties": {
             "path": {"type": "string"},
-            "offset": {"type": "integer"},
-            "limit": {"type": "integer"},
+            "offset": {
+                "type": "integer",
+                "description": "Zero-based; continue from returned next_offset.",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Line ceiling; the character budget may return fewer.",
+            },
         },
         "required": ["path"],
         "additionalProperties": False,
