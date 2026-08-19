@@ -305,6 +305,7 @@ class AgentLoop:
                 }
             )
             context.trace.log_model_usage(response.usage, turn_id=turn_id)
+            plan_phase = getattr(getattr(context, "plan_state", None), "phase", None)
             context.cost_tracker.record_model_call(
                 turn_id=turn_id,
                 system=context.system_prompt,
@@ -312,6 +313,8 @@ class AgentLoop:
                 tools=tool_schemas,
                 response_message=response.message,
                 usage=response.usage,
+                context_generation=getattr(context, "context_generation", 0),
+                plan_phase=getattr(plan_phase, "value", None),
             )
 
             if response.stop_reason == "model_context_window_exceeded":
@@ -509,6 +512,13 @@ class AgentLoop:
                 if result.ok and result.metadata.get("control_plane_transition"):
                     control_plane_boundary = True
 
+            # CMV2-ADM-01: bound the completed batch before its first Hot Context
+            # visibility. Normal epochs remain append-only after this admission.
+            tool_results = self.runtime.context_manager.admit_tool_results(
+                context,
+                response.tool_calls,
+                tool_results,
+            )
             context.add_tool_results(tool_results)
             context.task_tool_rounds = getattr(context, "task_tool_rounds", 0) + 1
 

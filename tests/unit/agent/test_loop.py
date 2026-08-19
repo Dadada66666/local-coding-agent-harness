@@ -266,7 +266,7 @@ def test_context_overflow_compacts_and_retries_once(tmp_path: Path) -> None:
     context = runner.create_context("inspect", include_initial_message=True)
     context.config.compact_threshold_chars = 1_000_000
     context.config.context_recent_target_tokens = 1
-    context.config.context_recent_max_tokens = 200
+    context.config.context_recent_max_tokens = 1_000
     context.config.context_min_recent_rounds = 2
     for index in range(6):
         context.messages.extend(
@@ -316,7 +316,7 @@ def test_repeated_context_overflow_stops_without_a_retry_loop(tmp_path: Path) ->
     context = runner.create_context("inspect", include_initial_message=True)
     context.config.compact_threshold_chars = 1_000_000
     context.config.context_recent_target_tokens = 1
-    context.config.context_recent_max_tokens = 200
+    context.config.context_recent_max_tokens = 1_000
     context.config.context_min_recent_rounds = 1
     for index in range(4):
         context.messages.extend(

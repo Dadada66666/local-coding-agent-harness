@@ -49,6 +49,7 @@ def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
     assert "in_progress only for work spanning calls" in prompt
     assert "Batch routine update_step with the next known repository tool call" in prompt
     assert "Request replanning for material deviations" in prompt
+    assert "make update_plan action complete the final ToolCall" in prompt
     assert "verification reserve" not in prompt.lower()
     assert "calls remain" not in prompt.lower()
 

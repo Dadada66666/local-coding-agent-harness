@@ -121,7 +121,6 @@ class AgentContext:
     tool_result_artifacts: dict[str, str] = field(default_factory=dict)
     tool_result_provenance: dict[str, str] = field(default_factory=dict)
     tool_result_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
-    eager_projection_active: bool = False
     completed_tasks: list[dict[str, Any]] = field(default_factory=list)
 
     def add_user_message(self, message: dict) -> None:
@@ -358,7 +357,6 @@ class AgentContext:
         self.task_created_files.clear()
         self.read_file_segments.clear()
         self.source_read_metrics = SourceReadMetrics()
-        self.eager_projection_active = False
         self.pending_user_continuation_id = None
         self.pending_user_continuation = None
 

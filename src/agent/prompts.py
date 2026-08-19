@@ -127,7 +127,7 @@ def build_plan_instructions(
 - Repository tools still pass through the existing Permission Gate.
 - Request replanning for material deviations instead of silently replacing the plan.
 - Verify relevant changes before completion when practical.
-- Mark all steps completed, then use update_plan action complete before the final response."""
+- Finish repository work and verification first; after all steps are completed, make update_plan action complete the final ToolCall."""
 
     if plan_state.phase is PlanPhase.COMPLETED:
         return "Plan phase: completed. Provide the concise final task report now."

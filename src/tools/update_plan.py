@@ -93,7 +93,15 @@ class UpdatePlanTool(BaseTool):
             },
             {
                 "type": "object",
-                "properties": {"action": {"const": "complete"}},
+                "properties": {
+                    "action": {
+                        "const": "complete",
+                        "description": (
+                            "Finalize only after repository work and verification; "
+                            "this must be the final ToolCall."
+                        ),
+                    }
+                },
                 "required": ["action"],
                 "additionalProperties": False,
             },
@@ -235,8 +243,7 @@ class UpdatePlanTool(BaseTool):
         state = controller.state
         step_count = len(state.steps)
         control_plane_transition = (
-            state.phase is not before_phase
-            or state.execution_path is not before_path
+            state.phase is not before_phase or state.execution_path is not before_path
         )
         return ToolResult(
             ok=True,
@@ -260,8 +267,7 @@ class UpdatePlanTool(BaseTool):
                 "step_status": args.get("status"),
                 "step_count": step_count,
                 "plan_submitted": bool(
-                    action == "submit"
-                    or (action == "replace_plan" and args.get("submit") is True)
+                    action == "submit" or (action == "replace_plan" and args.get("submit") is True)
                 ),
                 "changed": False,
                 "control_plane_transition": control_plane_transition,

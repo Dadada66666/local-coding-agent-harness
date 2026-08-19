@@ -161,6 +161,12 @@ def test_update_plan_schema_uses_action_specific_contracts() -> None:
     status_description = update_contract["properties"]["status"]["description"]
     assert "pending may become completed directly" in status_description
     assert "in_progress is optional" in status_description
+    complete_contract = next(
+        contract
+        for contract in schema["oneOf"]
+        if contract["properties"]["action"].get("const") == "complete"
+    )
+    assert "final ToolCall" in complete_contract["properties"]["action"]["description"]
     assert "execution milestones" in tool.description
 
 
