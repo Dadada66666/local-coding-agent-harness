@@ -16,6 +16,7 @@ from runtime.context.projection import (
     PERSISTED_OUTPUT_PREFIX,
     ToolResultProjection,
     ToolResultProjector,
+    ToolResultRebaseCandidate,
 )
 
 
@@ -28,9 +29,10 @@ __all__ = [
     "RUNTIME_CHECKPOINT_PREFIX",
     "ToolResultProjection",
 ]
-PROVIDER_SAVINGS_DISCOUNT = 0.8
-AUTO_EAGER_HIGH_RATIO = 0.85
-EAGER_LOW_RATIO = 0.84
+
+# CMV2-TRG-03 calibration hypotheses. They are intentionally not RunConfig fields.
+POST_REBASE_CEILING_RATIO = 0.65
+MINIMUM_REBASE_GAIN_RATIO = 0.50
 
 
 @dataclass(frozen=True)
@@ -54,18 +56,39 @@ class MessageGroup:
     tokens: int
 
 
+@dataclass(frozen=True)
+class HistoryRebaseCandidate:
+    messages: list[dict]
+    old_messages: list[dict]
+    recent_group_count: int
+    recent_tokens: int
+
+
 class ContextManager:
-    """Prepare a provider request without mutating the append-only conversation audit."""
+    """Apply CMV2 admission shaping and pressure-driven atomic history rebases."""
 
     def __init__(
         self,
-        summarizer=None,
         *,
         checkpoint_builder: RuntimeCheckpointBuilder | None = None,
         projector: ToolResultProjector | None = None,
     ) -> None:
-        self.checkpoint_builder = checkpoint_builder or RuntimeCheckpointBuilder(summarizer)
+        self.checkpoint_builder = checkpoint_builder or RuntimeCheckpointBuilder()
         self.projector = projector or ToolResultProjector()
+
+    def admit_tool_results(
+        self,
+        context,
+        tool_calls: list,
+        results: list[tuple[str, str, bool]],
+    ) -> list[tuple[str, str, bool]]:
+        """Bound a new result batch before it first enters Hot Context (CMV2-ADM)."""
+        admitted, _projection = self.projector.admit_tool_results(
+            context,
+            tool_calls,
+            results,
+        )
+        return admitted
 
     def prepare_context(
         self,
@@ -77,82 +100,21 @@ class ContextManager:
         force: bool = False,
         reason: str | None = None,
     ) -> ContextPreparation:
+        """Prepare one request while preserving append-only normal epochs.
+
+        Below real pressure this method is observational only. At pressure it
+        preflights projection and full-rebase candidates from the same original
+        history, then commits at most one accepted candidate (CMV2-INV-01/03/05).
+        """
         system = system if system is not None else getattr(context, "system_prompt", "")
         tools = tools or []
         before = self._measure(context, system, tools, max_output_tokens)
         self._log_measurement(context, before, phase="before")
-        projection = self._enforce_tool_round_budget(context)
-        current = self._measure(
-            context,
-            system,
-            tools,
-            max_output_tokens,
-            provider_context_tokens=self._adjusted_provider_anchor(before, projection),
-        )
+        if not force and not before.should_compact:
+            return ContextPreparation(measurement=before)
 
-        eager_threshold, eager_lower = self._eager_watermarks(context.config)
-        eager_active = bool(getattr(context, "eager_projection_active", False))
-        if not eager_active and eager_threshold > 0 and current.used_tokens >= eager_threshold:
-            context.eager_projection_active = True
-            eager_active = True
-        elif eager_active and current.used_tokens <= eager_lower:
-            context.eager_projection_active = False
-            eager_active = False
-        if (
-            not force
-            and not current.should_compact
-            and eager_active
-            and current.used_tokens > eager_lower
-        ):
-            eager_projection = self._project_consumed_results(context)
-            if eager_projection.count:
-                after_eager = self._measure(
-                    context,
-                    system,
-                    tools,
-                    max_output_tokens,
-                    provider_context_tokens=self._adjusted_provider_anchor(
-                        current,
-                        eager_projection,
-                    ),
-                )
-                if after_eager.used_tokens <= eager_lower:
-                    context.eager_projection_active = False
-                context.context_compaction_failures = 0
-                self._record_tool_projection_event(
-                    context,
-                    eager_projection,
-                    reason="eager_tool_result_projection",
-                    before_tokens=current.estimated_tokens,
-                    after_tokens=after_eager.estimated_tokens,
-                )
-                return self._finish_preparation(
-                    context,
-                    before,
-                    after_eager,
-                    compacted=False,
-                    microcompacted=True,
-                    projection=self._combine_projections(
-                        projection,
-                        eager_projection,
-                    ),
-                    reason="eager_tool_result_projection",
-                )
-
-        if not force and not current.should_compact:
-            if projection.count:
-                self._log_measurement(context, current, phase="after")
-            return ContextPreparation(
-                measurement=current,
-                tool_results_projected=projection.count,
-                saved_tokens=max(
-                    before.estimated_tokens - current.estimated_tokens,
-                    0,
-                ),
-            )
-
-        max_failures = int(context.config.max_context_compaction_failures)
         failures = int(getattr(context, "context_compaction_failures", 0))
+        max_failures = int(context.config.max_context_compaction_failures)
         if failures >= max_failures:
             context.trace.log(
                 {
@@ -161,118 +123,106 @@ class ContextManager:
                     "consecutive_failures": failures,
                 }
             )
-            return ContextPreparation(
-                measurement=current,
-                tool_results_projected=projection.count,
-                saved_tokens=max(
-                    before.estimated_tokens - current.estimated_tokens,
-                    0,
-                ),
-            )
+            return ContextPreparation(measurement=before)
 
-        microcompacted = False
+        pressure_reason = reason or before.trigger_reason or ("forced" if force else "automatic")
+        hard_pressure = force or (
+            before.hard_limit_tokens is not None and before.used_tokens >= before.hard_limit_tokens
+        )
+        local_before = before.estimated_tokens
+        ceiling = None
+        minimum_gain = None
+        if not hard_pressure:
+            pressure_limit = before.soft_limit_tokens or local_before
+            ceiling = int(pressure_limit * POST_REBASE_CEILING_RATIO)
+            minimum_gain = int(local_before * MINIMUM_REBASE_GAIN_RATIO)
+
         try:
-            microprojection = self._project_consumed_results(context)
-            microcompacted = microprojection.count > 0
-            after_micro = self._measure(
-                context,
+            if not hard_pressure:
+                projected = self._build_projection_candidate(
+                    context,
+                    system=system,
+                    tools=tools,
+                    ceiling_tokens=ceiling,
+                    minimum_gain_tokens=minimum_gain,
+                )
+                if projected is not None:
+                    return self._commit_projection(
+                        context,
+                        projected,
+                        before=before,
+                        system=system,
+                        tools=tools,
+                        max_output_tokens=max_output_tokens,
+                        reason=pressure_reason,
+                    )
+
+            full = self._build_history_rebase_candidate(context)
+            if full is not None and self._candidate_is_acceptable(
                 system,
                 tools,
-                max_output_tokens,
-                provider_context_tokens=self._adjusted_provider_anchor(
-                    current,
-                    microprojection,
-                ),
-            )
-            preparation_reason = (
-                reason
-                or current.trigger_reason
-                or ("forced" if force else "automatic")
-            )
-            if microcompacted:
-                self._record_tool_projection_event(
+                local_before=local_before,
+                candidate_messages=full.messages,
+                ceiling_tokens=ceiling,
+                minimum_gain_tokens=minimum_gain,
+                hard_pressure=hard_pressure,
+            ):
+                return self._commit_history_rebase(
                     context,
-                    microprojection,
-                    reason=preparation_reason,
-                    before_tokens=current.estimated_tokens,
-                    after_tokens=after_micro.estimated_tokens,
-                )
-            if not force and not after_micro.should_compact:
-                context.context_compaction_failures = 0
-                return self._finish_preparation(
-                    context,
-                    before,
-                    after_micro,
-                    compacted=False,
-                    microcompacted=microcompacted,
-                    projection=self._combine_projections(
-                        projection,
-                        microprojection,
-                    ),
-                    reason=preparation_reason,
+                    full,
+                    before=before,
+                    system=system,
+                    tools=tools,
+                    max_output_tokens=max_output_tokens,
+                    reason=pressure_reason,
                 )
 
-            compacted = self._compact_history(context)
-            after = self._measure(context, system, tools, max_output_tokens)
-            if compacted or microcompacted:
-                context.context_compaction_failures = 0
-            elif force or after.should_compact:
-                context.context_compaction_failures = failures + 1
-            return self._finish_preparation(
-                context,
-                before,
-                after,
-                compacted=compacted,
-                microcompacted=microcompacted,
-                projection=self._combine_projections(
-                    projection,
-                    microprojection,
-                ),
-                compaction_before_tokens=after_micro.estimated_tokens,
-                reason=preparation_reason,
+            context.context_compaction_failures = failures + 1
+            context.trace.log(
+                {
+                    "type": "context_compact_skipped",
+                    "reason": "no_acceptable_rebase",
+                    "before_tokens": local_before,
+                    "hard_pressure": hard_pressure,
+                }
             )
         except Exception as exc:
             context.context_compaction_failures = failures + 1
             context.trace.log(
                 {
                     "type": "context_compact_error",
-                    "reason": reason or current.trigger_reason or "automatic",
+                    "reason": pressure_reason,
                     "exception_type": exc.__class__.__name__,
                     "exception": str(exc)[:500],
                     "consecutive_failures": context.context_compaction_failures,
                 }
             )
-            current = self._measure(context, system, tools, max_output_tokens)
-            return ContextPreparation(
-                measurement=current,
-                compacted=False,
-                microcompacted=microcompacted,
-                tool_results_projected=projection.count,
-                saved_tokens=max(
-                    before.estimated_tokens - current.estimated_tokens,
-                    0,
-                ),
-            )
+
+        after = self._measure(context, system, tools, max_output_tokens)
+        return ContextPreparation(measurement=after)
 
     def compact_task_boundary(self, context) -> bool:
+        """Keep the existing task-boundary checkpoint separate from pressure policy."""
         threshold = int(getattr(context.config, "context_task_boundary_tokens", 0))
         if threshold <= 0 or len(context.messages) <= 1:
             return False
-
         current_message = context.messages[-1]
         old_messages = context.messages[:-1]
-        old_tokens = estimate_messages_tokens(old_messages)
-        if old_tokens < threshold:
+        if estimate_messages_tokens(old_messages) < threshold:
             return False
 
-        checkpoint = self.checkpoint_builder.build(context, old_messages)
-        projected = [{"role": "user", "content": checkpoint}, deepcopy(current_message)]
+        projected = [
+            {"role": "user", "content": self.checkpoint_builder.build(context, old_messages)},
+            deepcopy(current_message),
+        ]
         before_tokens = estimate_messages_tokens(context.messages)
         after_tokens = estimate_messages_tokens(projected)
         if after_tokens >= before_tokens:
             return False
 
+        observations = self.projector.source_observations(context, old_messages)
         context.messages = projected
+        self.projector.mark_projected_sources(context, observations)
         context.context_compactions = int(getattr(context, "context_compactions", 0)) + 1
         context.last_model_consumed_message_count = 0
         self._mark_context_changed(context)
@@ -286,81 +236,177 @@ class ContextManager:
             "message_count": len(context.messages),
             "context_generation": getattr(context, "context_generation", 0),
         }
-        context.trace.log(event)
-        tracker = getattr(context, "cost_tracker", None)
-        if tracker is not None and hasattr(tracker, "record_context_event"):
-            tracker.record_context_event(event)
+        self._record_event(context, event)
         return True
 
-    def _finish_preparation(
+    def _build_projection_candidate(
         self,
         context,
-        before: ContextMeasurement,
-        after: ContextMeasurement,
         *,
-        compacted: bool,
-        microcompacted: bool,
-        projection: ToolResultProjection,
-        compaction_before_tokens: int | None = None,
-        reason: str,
-    ) -> ContextPreparation:
-        saved_tokens = max(
-            before.estimated_tokens - after.estimated_tokens,
-            0,
+        system: str,
+        tools: list[dict],
+        ceiling_tokens: int | None,
+        minimum_gain_tokens: int | None,
+    ) -> ToolResultRebaseCandidate | None:
+        if ceiling_tokens is None or minimum_gain_tokens is None:
+            return None
+        consumed_count = min(
+            max(int(getattr(context, "last_model_consumed_message_count", 0)), 0),
+            len(context.messages),
         )
-        self._log_measurement(context, after, phase="after")
-        if compacted:
-            compaction_saved_tokens = max(
-                int(compaction_before_tokens or 0) - after.estimated_tokens,
-                0,
-            )
-            event = {
-                "type": "context_compact",
-                "reason": reason,
-                "mode": "full",
-                "before_tokens": int(compaction_before_tokens or 0),
-                "after_tokens": after.estimated_tokens,
-                "saved_tokens": compaction_saved_tokens,
-                "message_count": len(context.messages),
-                "context_generation": getattr(context, "context_generation", 0),
-            }
-            context.trace.log(event)
-            tracker = getattr(context, "cost_tracker", None)
-            if tracker is not None and hasattr(tracker, "record_context_event"):
-                tracker.record_context_event(event)
-        return ContextPreparation(
-            measurement=after,
-            compacted=compacted,
-            microcompacted=microcompacted,
-            tool_results_projected=projection.count,
-            saved_tokens=saved_tokens,
+        if consumed_count <= 0:
+            return None
+
+        groups = self._group_messages_by_api_round(context.messages)
+        recent = self._select_recent_groups(groups, context.config)
+        recent_start = recent[0].start if recent else len(context.messages)
+        eligible_end = min(consumed_count, recent_start)
+        eligible = [group for group in groups if group.end <= eligible_end]
+        if not eligible:
+            return None
+
+        static_tokens = estimate_request_tokens(system, [], tools)
+        local_before = estimate_request_tokens(system, context.messages, tools)
+        request_target = min(ceiling_tokens, local_before - minimum_gain_tokens)
+        message_target = max(request_target - static_tokens, 0)
+        return self.projector.build_consumed_rebase_candidate(
+            context,
+            group_ranges=[(group.start, group.end) for group in reversed(eligible)],
+            target_message_tokens=message_target,
         )
 
-    def _record_tool_projection_event(
+    def _candidate_is_acceptable(
+        self,
+        system: str,
+        tools: list[dict],
+        *,
+        local_before: int,
+        candidate_messages: list[dict],
+        ceiling_tokens: int | None,
+        minimum_gain_tokens: int | None,
+        hard_pressure: bool,
+    ) -> bool:
+        local_after = estimate_request_tokens(system, candidate_messages, tools)
+        if local_after >= local_before:
+            return False
+        if hard_pressure:
+            return True
+        return bool(
+            ceiling_tokens is not None
+            and minimum_gain_tokens is not None
+            and local_after <= ceiling_tokens
+            and local_before - local_after >= minimum_gain_tokens
+        )
+
+    def _commit_projection(
         self,
         context,
-        projection: ToolResultProjection,
+        candidate: ToolResultRebaseCandidate,
         *,
+        before: ContextMeasurement,
+        system: str,
+        tools: list[dict],
+        max_output_tokens: int,
         reason: str,
-        before_tokens: int,
-        after_tokens: int,
-    ) -> None:
-        saved_tokens = max(before_tokens - after_tokens, 0)
+    ) -> ContextPreparation:
+        local_before = estimate_request_tokens(system, context.messages, tools)
+        local_after = estimate_request_tokens(system, candidate.messages, tools)
+        if local_after >= local_before:
+            return ContextPreparation(measurement=before)
+        context.messages = candidate.messages
+        self.projector.mark_projected_sources(context, candidate.projected_sources)
+        self._mark_context_changed(context)
+        context.context_compaction_failures = 0
         event = {
             "type": "context_tool_results_projected",
             "reason": reason,
             "mode": "tool_results",
-            "projected_results": projection.count,
-            "before_tokens": before_tokens,
-            "after_tokens": after_tokens,
-            "saved_tokens": saved_tokens,
+            "projected_results": candidate.projection.count,
+            "before_tokens": local_before,
+            "after_tokens": local_after,
+            "saved_tokens": local_before - local_after,
             "message_count": len(context.messages),
             "context_generation": getattr(context, "context_generation", 0),
         }
-        context.trace.log(event)
-        tracker = getattr(context, "cost_tracker", None)
-        if tracker is not None and hasattr(tracker, "record_context_event"):
-            tracker.record_context_event(event)
+        self._record_event(context, event)
+        after = self._measure(context, system, tools, max_output_tokens)
+        self._log_measurement(context, after, phase="after")
+        return ContextPreparation(
+            measurement=after,
+            microcompacted=True,
+            tool_results_projected=candidate.projection.count,
+            saved_tokens=local_before - local_after,
+        )
+
+    def _build_history_rebase_candidate(self, context) -> HistoryRebaseCandidate | None:
+        groups = self._group_messages_by_api_round(context.messages)
+        if len(groups) <= 1:
+            return None
+        recent = self._select_recent_groups(groups, context.config)
+        if not recent or recent[0].start <= 0:
+            return None
+        old_messages = context.messages[: recent[0].start]
+        if len(old_messages) == 1 and self._is_runtime_checkpoint_message(old_messages[0]):
+            return None
+        recent_messages = deepcopy(context.messages[recent[0].start :])
+        checkpoint = self.checkpoint_builder.build(context, old_messages)
+        return HistoryRebaseCandidate(
+            messages=[{"role": "user", "content": checkpoint}, *recent_messages],
+            old_messages=old_messages,
+            recent_group_count=len(recent),
+            recent_tokens=sum(group.tokens for group in recent),
+        )
+
+    def _commit_history_rebase(
+        self,
+        context,
+        candidate: HistoryRebaseCandidate,
+        *,
+        before: ContextMeasurement,
+        system: str,
+        tools: list[dict],
+        max_output_tokens: int,
+        reason: str,
+    ) -> ContextPreparation:
+        local_before = estimate_request_tokens(system, context.messages, tools)
+        local_after = estimate_request_tokens(system, candidate.messages, tools)
+        if local_after >= local_before:
+            return ContextPreparation(measurement=before)
+        observations = self.projector.source_observations(context, candidate.old_messages)
+        context.messages = candidate.messages
+        self.projector.mark_projected_sources(context, observations)
+        context.context_compactions = int(getattr(context, "context_compactions", 0)) + 1
+        context.last_model_consumed_message_count = 0
+        self._mark_context_changed(context)
+        context.context_compaction_failures = 0
+        context.trace.log(
+            {
+                "type": "context_boundary",
+                "compaction": context.context_compactions,
+                "old_message_count": len(candidate.old_messages),
+                "recent_message_count": len(context.messages) - 1,
+                "recent_round_count": candidate.recent_group_count,
+                "recent_tokens": candidate.recent_tokens,
+            }
+        )
+        event = {
+            "type": "context_compact",
+            "reason": reason,
+            "mode": "full",
+            "before_tokens": local_before,
+            "after_tokens": local_after,
+            "saved_tokens": local_before - local_after,
+            "message_count": len(context.messages),
+            "context_generation": getattr(context, "context_generation", 0),
+        }
+        self._record_event(context, event)
+        after = self._measure(context, system, tools, max_output_tokens)
+        self._log_measurement(context, after, phase="after")
+        return ContextPreparation(
+            measurement=after,
+            compacted=True,
+            saved_tokens=local_before - local_after,
+        )
 
     def _measure(
         self,
@@ -368,14 +414,8 @@ class ContextManager:
         system: str,
         tools: list[dict],
         max_output_tokens: int,
-        provider_context_tokens: int | None = None,
     ) -> ContextMeasurement:
-        provider_anchor = provider_context_tokens
-        if provider_anchor is None:
-            provider_anchor = self._provider_context_anchor(
-                context,
-                local_estimate=estimate_request_tokens(system, context.messages, tools),
-            )
+        local_estimate = estimate_request_tokens(system, context.messages, tools)
         return measure_context(
             system=system,
             messages=context.messages,
@@ -385,36 +425,14 @@ class ContextManager:
             max_output_tokens=max_output_tokens,
             safety_margin_tokens=context.config.context_safety_margin_tokens,
             soft_limit_ratio=context.config.context_soft_limit_ratio,
-            provider_context_tokens=provider_anchor,
+            provider_context_tokens=self._provider_context_anchor(
+                context,
+                local_estimate=local_estimate,
+            ),
             fallback_char_limit=context.config.compact_threshold_chars,
         )
 
-    def _adjusted_provider_anchor(
-        self,
-        measurement: ContextMeasurement,
-        projection: ToolResultProjection,
-    ) -> int | None:
-        if measurement.provider_tokens is None or projection.count <= 0:
-            return measurement.provider_tokens
-        conservative_savings = int(projection.saved_tokens * PROVIDER_SAVINGS_DISCOUNT)
-        return max(measurement.provider_tokens - conservative_savings, 0)
-
-    def _combine_projections(
-        self,
-        first: ToolResultProjection,
-        second: ToolResultProjection,
-    ) -> ToolResultProjection:
-        return ToolResultProjection(
-            count=first.count + second.count,
-            saved_tokens=first.saved_tokens + second.saved_tokens,
-        )
-
-    def _provider_context_anchor(
-        self,
-        context,
-        *,
-        local_estimate: int,
-    ) -> int | None:
+    def _provider_context_anchor(self, context, *, local_estimate: int) -> int | None:
         usage = getattr(context, "last_model_usage", None)
         response_index = getattr(context, "last_model_usage_message_index", None)
         generation = getattr(context, "last_model_usage_generation", None)
@@ -424,126 +442,28 @@ class ContextManager:
             return None
         if response_index < 0 or response_index >= len(context.messages):
             return None
-
         appended = context.messages[response_index + 1 :]
         return normalize_provider_context_anchor(
             local_estimate=local_estimate,
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            cache_creation_input_tokens=(
-                getattr(usage, "cache_creation_input_tokens", 0) or 0
-            ),
-            cache_read_input_tokens=(
-                getattr(usage, "cache_read_input_tokens", 0) or 0
-            ),
+            cache_creation_input_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_input_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
             output_tokens=getattr(usage, "output_tokens", 0) or 0,
             appended_tokens=estimate_messages_tokens(appended) if appended else 0,
         )
 
-    def _log_measurement(self, context, measurement: ContextMeasurement, *, phase: str) -> None:
-        event = {
-            "type": "context_measurement",
-            "phase": phase,
-            **asdict(measurement),
-            "message_count": len(context.messages),
-            "context_generation": getattr(context, "context_generation", 0),
-        }
-        context.trace.log(event)
-
-    def _compact_history(self, context) -> bool:
-        groups = self._group_messages_by_api_round(context.messages)
-        if len(groups) <= 1:
-            context.trace.log(
-                {
-                    "type": "context_compact_skipped",
-                    "reason": "no_safe_prefix",
-                    "message_count": len(context.messages),
-                }
-            )
-            return False
-
-        recent_groups = self._select_recent_groups(groups, context.config)
-        if not recent_groups:
-            return False
-        recent_start = recent_groups[0].start
-        if recent_start <= 0:
-            context.trace.log(
-                {
-                    "type": "context_compact_skipped",
-                    "reason": "recent_suffix_covers_all_messages",
-                    "message_count": len(context.messages),
-                }
-            )
-            return False
-
-        old_messages = context.messages[:recent_start]
-        recent_messages = deepcopy(context.messages[recent_start:])
-        if len(old_messages) == 1 and self._is_runtime_checkpoint_message(
-            old_messages[0]
-        ):
-            context.trace.log(
-                {
-                    "type": "context_compact_skipped",
-                    "reason": "checkpoint_only_prefix",
-                    "message_count": len(context.messages),
-                }
-            )
-            return False
-
-        checkpoint = self.checkpoint_builder.build(context, old_messages)
-        projected = [
-            {"role": "user", "content": checkpoint},
-            *recent_messages,
-        ]
-        before_tokens = estimate_messages_tokens(context.messages)
-        after_tokens = estimate_messages_tokens(projected)
-        if after_tokens >= before_tokens:
-            context.trace.log(
-                {
-                    "type": "context_compact_skipped",
-                    "reason": "no_token_reduction",
-                    "before_tokens": before_tokens,
-                    "after_tokens": after_tokens,
-                    "message_count": len(context.messages),
-                }
-            )
-            return False
-
-        context.messages = projected
-        context.context_compactions = int(getattr(context, "context_compactions", 0)) + 1
-        context.last_model_consumed_message_count = 0
-        self._mark_context_changed(context)
-        context.trace.log(
-            {
-                "type": "context_boundary",
-                "compaction": context.context_compactions,
-                "old_message_count": len(old_messages),
-                "recent_message_count": len(recent_messages),
-                "recent_round_count": len(recent_groups),
-                "recent_tokens": sum(group.tokens for group in recent_groups),
-            }
-        )
-        return True
-
-    def _is_runtime_checkpoint_message(self, message: dict) -> bool:
-        content = message.get("content")
-        return (
-            message.get("role") == "user"
-            and isinstance(content, str)
-            and content.startswith(RUNTIME_CHECKPOINT_PREFIX)
-        )
-
     def _select_recent_groups(self, groups: list[MessageGroup], config) -> list[MessageGroup]:
+        """Select the minimum raw tail satisfying rounds and target, never filler."""
         selected: list[MessageGroup] = []
         selected_tokens = 0
+        target = int(config.context_recent_target_tokens)
+        maximum = int(config.context_recent_max_tokens)
+        minimum_rounds = int(config.context_min_recent_rounds)
         for group in reversed(groups):
-            minimum_met = len(selected) >= config.context_min_recent_rounds
-            target_met = selected_tokens >= config.context_recent_target_tokens
-            would_exceed_max = (
-                selected
-                and selected_tokens + group.tokens > config.context_recent_max_tokens
-            )
-            if minimum_met and (target_met or would_exceed_max):
+            if len(selected) >= minimum_rounds and selected_tokens >= target:
                 break
+            if selected_tokens + group.tokens > maximum:
+                return []
             selected.append(group)
             selected_tokens += group.tokens
         selected.reverse()
@@ -552,87 +472,49 @@ class ContextManager:
     def _group_messages_by_api_round(self, messages: list[dict]) -> list[MessageGroup]:
         if not messages:
             return []
-
         boundaries = [0]
         for index, message in enumerate(messages):
             if index > 0 and message.get("role") == "assistant":
                 boundaries.append(index)
         boundaries.append(len(messages))
+        return [
+            MessageGroup(
+                start=start,
+                end=end,
+                messages=messages[start:end],
+                tokens=estimate_messages_tokens(messages[start:end]),
+            )
+            for start, end in zip(boundaries, boundaries[1:])
+            if messages[start:end]
+        ]
 
-        groups = []
-        for start, end in zip(boundaries, boundaries[1:]):
-            grouped = messages[start:end]
-            if grouped:
-                groups.append(
-                    MessageGroup(
-                        start=start,
-                        end=end,
-                        messages=grouped,
-                        tokens=estimate_messages_tokens(grouped),
-                    )
-                )
-        return groups
-
-    def _microcompact_consumed_results(self, context) -> bool:
-        return self._project_consumed_results(context).count > 0
-
-    def _project_consumed_results(
-        self,
-        context,
-    ) -> ToolResultProjection:
-        consumed_count = min(
-            max(int(getattr(context, "last_model_consumed_message_count", 0)), 0),
-            len(context.messages),
-        )
-        if consumed_count <= 0:
-            return ToolResultProjection()
-
-        groups = self._group_messages_by_api_round(context.messages)
-        recent_groups = self._select_recent_groups(groups, context.config)
-        recent_start = recent_groups[0].start if recent_groups else len(context.messages)
-        compact_before = min(consumed_count, recent_start)
-        return self.projector.compact_consumed_results(
-            context,
-            compact_before=compact_before,
+    def _is_runtime_checkpoint_message(self, message: dict) -> bool:
+        content = message.get("content")
+        return bool(
+            message.get("role") == "user"
+            and isinstance(content, str)
+            and content.startswith(RUNTIME_CHECKPOINT_PREFIX)
         )
 
-    def _eager_watermarks(self, config) -> tuple[int, int]:
-        explicit = getattr(config, "context_eager_projection_tokens", 0)
-        if explicit is not None and int(explicit) > 0:
-            high = int(explicit)
-        else:
-            target = getattr(config, "context_target_tokens", None)
-            high = int(target * AUTO_EAGER_HIGH_RATIO) if target else 0
-        low = int(high * EAGER_LOW_RATIO) if high else 0
-        return high, low
+    def _log_measurement(self, context, measurement: ContextMeasurement, *, phase: str) -> None:
+        context.trace.log(
+            {
+                "type": "context_measurement",
+                "phase": phase,
+                **asdict(measurement),
+                "message_count": len(context.messages),
+                "context_generation": getattr(context, "context_generation", 0),
+            }
+        )
 
-    # These small delegates preserve the existing ContextManager extension surface.
-    def _enforce_tool_round_budget(self, context) -> ToolResultProjection:
-        return self.projector.enforce_round_budget(context)
+    def _record_event(self, context, event: dict) -> None:
+        context.trace.log(event)
+        tracker = getattr(context, "cost_tracker", None)
+        if tracker is not None and hasattr(tracker, "record_context_event"):
+            tracker.record_context_event(event)
 
     def _persist_tool_result(self, context, tool_use_id: str, content: str) -> str | None:
         return self.projector.persist_tool_result(context, tool_use_id, content)
-
-    def _split_leading_orphan_tool_results(
-        self,
-        messages: list[dict],
-    ) -> tuple[list[dict], list[dict]]:
-        remaining = list(messages)
-        orphan_tool_results = []
-        while remaining and self._is_tool_result_message(remaining[0]):
-            orphan_tool_results.append(remaining.pop(0))
-        return orphan_tool_results, remaining
-
-    def _is_tool_result_message(self, message: dict) -> bool:
-        content = message.get("content")
-        return (
-            isinstance(content, list)
-            and bool(content)
-            and all(
-                isinstance(block, dict) and block.get("type") == "tool_result"
-                for block in content
-            )
-        )
 
     def _head_tail(self, text: str, max_chars: int) -> str:
         return self.projector.head_tail(text, max_chars)

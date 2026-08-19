@@ -29,7 +29,6 @@ def test_larger_pages_and_context_working_set_reduce_trace_churn(tmp_path: Path)
             max_tool_result_chars=8000,
             compact_threshold_chars=120000,
             context_target_tokens=32000,
-            context_eager_projection_tokens=23040,
             context_recent_target_tokens=8000,
             context_recent_max_tokens=16000,
         ),

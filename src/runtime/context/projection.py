@@ -4,7 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from runtime.context.budget import estimate_value_tokens
+from runtime.context.budget import estimate_messages_tokens, estimate_value_tokens
 from runtime.observability.text_preview import head_tail_preview
 
 
@@ -28,105 +28,123 @@ class ToolResultProjection:
     saved_tokens: int = 0
 
 
+@dataclass(frozen=True)
+class ToolResultRebaseCandidate:
+    """Immutable preflight result; applying it is a separate atomic commit."""
+
+    messages: list[dict]
+    projection: ToolResultProjection
+    projected_sources: tuple[tuple[str, dict[str, Any]], ...] = ()
+
+
 class ToolResultProjector:
     """Replace expensive observations with bounded, recoverable projections."""
 
-    def enforce_round_budget(self, context) -> ToolResultProjection:
-        limit = int(context.config.max_tool_round_tokens)
-        if limit <= 0 or not hasattr(context, "artifacts"):
-            return ToolResultProjection()
+    def admit_tool_results(
+        self,
+        context,
+        tool_calls: list[Any],
+        results: list[tuple[str, str, bool]],
+    ) -> tuple[list[tuple[str, str, bool]], ToolResultProjection]:
+        """Shape one new ToolResult batch before its first provider visibility.
 
-        names = self._tool_names_by_id(context.messages)
+        Implements CMV2-ADM-01 through CMV2-ADM-06. Existing messages and the
+        Context generation are deliberately untouched.
+        """
+        limit = int(context.config.max_tool_round_tokens)
+        if limit <= 0 or not results or not hasattr(context, "artifacts"):
+            return list(results), ToolResultProjection()
+
+        names = {
+            str(getattr(tool_call, "id", "")): str(getattr(tool_call, "name", "unknown"))
+            for tool_call in tool_calls
+        }
         provenance = getattr(context, "tool_result_provenance", {})
-        messages = deepcopy(context.messages)
+        blocks = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                **({"is_error": True} if is_error else {}),
+            }
+            for tool_use_id, content, is_error in results
+        ]
+        total = sum(estimate_value_tokens(block) for block in blocks)
+        if total <= limit:
+            return list(results), ToolResultProjection()
+
         replacement_count = 0
         saved_tokens = 0
-        for message in messages:
-            content = message.get("content")
-            if message.get("role") != "user" or not isinstance(content, list):
-                continue
-            candidates = [
-                block
-                for block in content
-                if isinstance(block, dict)
-                and block.get("type") == "tool_result"
-                and isinstance(block.get("content"), str)
-                and not block["content"].startswith(CLEARED_OUTPUT_PREFIX)
-                and not block["content"].startswith(SOURCE_OUTPUT_PREFIX)
-            ]
-            total = sum(estimate_value_tokens(block) for block in candidates)
+        projected: list[tuple[dict, str, str, str | None]] = []
+        projected_sources: list[tuple[str, dict[str, Any]]] = []
+        ordered_candidates = sorted(
+            blocks,
+            key=lambda block: self._round_budget_sort_key(block, names),
+        )
+        source_candidates_started = False
+        for block in ordered_candidates:
             if total <= limit:
-                continue
-
-            projected: list[tuple[dict, str, str, str | None]] = []
-            ordered_candidates = sorted(
-                candidates,
-                key=lambda block: self._round_budget_sort_key(
-                    block,
-                    names,
-                ),
-            )
-            source_candidates_started = False
-            for block in ordered_candidates:
+                break
+            tool_use_id = str(block.get("tool_use_id", ""))
+            original = str(block.get("content", ""))
+            before_tokens = estimate_value_tokens(block)
+            tool_name = names.get(tool_use_id, "unknown")
+            source = provenance.get(tool_use_id)
+            metadata = self._result_metadata(context, tool_use_id)
+            source_result = self._is_source_result(tool_name, metadata)
+            if source_result and not source_candidates_started:
+                total, extra_savings = self._minimize_persisted_previews(
+                    projected,
+                    total=total,
+                    limit=limit,
+                )
+                saved_tokens += extra_savings
+                source_candidates_started = True
                 if total <= limit:
                     break
-                tool_use_id = str(block.get("tool_use_id", ""))
-                original = str(block.get("content", ""))
-                before_tokens = estimate_value_tokens(block)
-                tool_name = names.get(tool_use_id, "unknown")
-                source = provenance.get(tool_use_id)
-                metadata = self._result_metadata(context, tool_use_id)
-                source_result = self._is_source_result(tool_name, metadata)
-                if source_result and not source_candidates_started:
-                    total, extra_savings = self._minimize_persisted_previews(
-                        projected,
-                        total=total,
-                        limit=limit,
-                    )
-                    saved_tokens += extra_savings
-                    source_candidates_started = True
-                    if total <= limit:
-                        break
-                minimum_candidate = dict(block)
-                if self._is_source_result(tool_name, metadata):
-                    minimum_candidate["content"] = self._source_stub(
-                        context,
-                        metadata,
-                        provenance=source,
-                    )
-                else:
-                    minimum_candidate["content"] = self._persisted_stub(
+
+            if source_result:
+                replacement = self._source_stub(
+                    context,
+                    metadata,
+                    provenance=source,
+                )
+                block["content"] = replacement
+                after_tokens = estimate_value_tokens(block)
+                if after_tokens >= before_tokens:
+                    block["content"] = original
+                    continue
+                projected_sources.append((tool_use_id, metadata))
+            else:
+                artifact_id = getattr(context, "tool_result_artifacts", {}).get(tool_use_id)
+                if original.startswith(PERSISTED_OUTPUT_PREFIX) and not artifact_id:
+                    continue
+                if artifact_id is None:
+                    placeholder = dict(block)
+                    placeholder["content"] = self._persisted_stub(
                         "artifact_0000000000000000",
                         tool_name,
                         source,
                     )
-                if estimate_value_tokens(minimum_candidate) >= before_tokens:
-                    continue
-                if self._is_source_result(tool_name, metadata):
-                    block["content"] = minimum_candidate["content"]
-                    after_tokens = estimate_value_tokens(block)
-                    reduction = max(before_tokens - after_tokens, 0)
-                    total -= reduction
-                    saved_tokens += reduction
-                    replacement_count += 1
-                    self._mark_source_projected(context, tool_use_id, metadata)
-                    continue
-                artifact_id = self.persist_tool_result(context, tool_use_id, original)
+                    if estimate_value_tokens(placeholder) >= before_tokens:
+                        continue
+                    artifact_id = self.persist_tool_result(
+                        context,
+                        tool_use_id,
+                        original,
+                    )
                 if artifact_id is None:
                     continue
-                if original.startswith(PERSISTED_OUTPUT_PREFIX):
-                    replacement = self._persisted_stub(
-                        artifact_id,
-                        tool_name,
-                        source,
-                    )
-                else:
-                    replacement = self._persisted_preview(
+                replacement = (
+                    self._persisted_stub(artifact_id, tool_name, source)
+                    if original.startswith(PERSISTED_OUTPUT_PREFIX)
+                    else self._persisted_preview(
                         original,
                         artifact_id=artifact_id,
                         tool_name=tool_name,
                         provenance=source,
                     )
+                )
                 block["content"] = replacement
                 after_tokens = estimate_value_tokens(block)
                 if after_tokens >= before_tokens:
@@ -139,117 +157,192 @@ class ToolResultProjector:
                 if after_tokens >= before_tokens:
                     block["content"] = original
                     continue
-                reduction = max(before_tokens - after_tokens, 0)
-                total -= reduction
-                saved_tokens += reduction
-                replacement_count += 1
                 projected.append((block, artifact_id, tool_name, source))
 
-            if total > limit:
-                total, extra_savings = self._minimize_persisted_previews(
-                    projected,
-                    total=total,
-                    limit=limit,
-                )
-                saved_tokens += extra_savings
+            reduction = max(before_tokens - after_tokens, 0)
+            total -= reduction
+            saved_tokens += reduction
+            replacement_count += 1
+
+        if total > limit:
+            total, extra_savings = self._minimize_persisted_previews(
+                projected,
+                total=total,
+                limit=limit,
+            )
+            saved_tokens += extra_savings
 
         if replacement_count:
-            context.messages = messages
-            self.mark_context_changed(context)
+            self.mark_projected_sources(context, projected_sources)
             event = {
                 "type": "tool_result_budget",
                 "replaced_results": replacement_count,
                 "saved_tokens": saved_tokens,
                 "round_limit_tokens": limit,
-                "budget_satisfied": all(
-                    self._message_tool_result_tokens(message) <= limit
-                    for message in messages
-                ),
+                "budget_satisfied": total <= limit,
             }
             context.trace.log(event)
             tracker = getattr(context, "cost_tracker", None)
             if tracker is not None and hasattr(tracker, "record_context_event"):
                 tracker.record_context_event(event)
-        return ToolResultProjection(
+        shaped = [
+            (
+                str(block.get("tool_use_id", "")),
+                str(block.get("content", "")),
+                bool(block.get("is_error", False)),
+            )
+            for block in blocks
+        ]
+        return shaped, ToolResultProjection(
             count=replacement_count,
             saved_tokens=saved_tokens,
         )
 
-    def compact_consumed_results(
+    def build_consumed_rebase_candidate(
         self,
         context,
         *,
-        compact_before: int,
-    ) -> ToolResultProjection:
-        if compact_before <= 0:
-            return ToolResultProjection()
+        group_ranges: list[tuple[int, int]],
+        target_message_tokens: int,
+    ) -> ToolResultRebaseCandidate | None:
+        """Preflight a prefix-local ToolResult rebase without mutating Context."""
+        if not group_ranges or target_message_tokens < 0:
+            return None
 
         names = self._tool_names_by_id(context.messages)
         provenance = getattr(context, "tool_result_provenance", {})
-        compacted_ids: list[str] = []
-        saved_tokens = 0
         messages = deepcopy(context.messages)
-        for message in messages[:compact_before]:
-            content = message.get("content")
-            if message.get("role") != "user" or not isinstance(content, list):
-                continue
-            for block in content:
-                if not self._is_compactable_result(block, names):
+        before_tokens = self._messages_tokens(messages)
+        compacted_ids: list[str] = []
+        projected_sources: list[tuple[str, dict[str, Any]]] = []
+
+        for start, end in group_ranges:
+            candidates: list[tuple[bool, dict, str, str, str | None, dict[str, Any]]] = []
+            for message in messages[start:end]:
+                content = message.get("content")
+                if message.get("role") != "user" or not isinstance(content, list):
                     continue
-                tool_use_id = str(block["tool_use_id"])
-                tool_name = names.get(tool_use_id, "unknown")
-                source = provenance.get(tool_use_id)
-                metadata = self._result_metadata(context, tool_use_id)
-                if self._is_source_result(tool_name, metadata):
-                    original = str(block["content"])
-                    before_tokens = estimate_value_tokens(block)
+                for block in content:
+                    if not self._is_compactable_result(block, names):
+                        continue
+                    tool_use_id = str(block["tool_use_id"])
+                    tool_name = names.get(tool_use_id, "unknown")
+                    source = provenance.get(tool_use_id)
+                    metadata = self._result_metadata(context, tool_use_id)
+                    candidates.append(
+                        (
+                            self._is_source_result(tool_name, metadata),
+                            block,
+                            tool_use_id,
+                            tool_name,
+                            source,
+                            metadata,
+                        )
+                    )
+
+            candidates.sort(key=lambda candidate: candidate[0])
+            for (
+                source_result,
+                block,
+                tool_use_id,
+                tool_name,
+                source,
+                metadata,
+            ) in candidates:
+                original = str(block["content"])
+                before_block_tokens = estimate_value_tokens(block)
+                if source_result:
                     block["content"] = self._source_stub(
                         context,
                         metadata,
                         provenance=source,
                     )
-                    reduction = max(before_tokens - estimate_value_tokens(block), 0)
-                    if reduction < MIN_PROJECTION_SAVINGS_TOKENS:
-                        block["content"] = original
+                else:
+                    artifact_id = getattr(context, "tool_result_artifacts", {}).get(tool_use_id)
+                    if original.startswith(PERSISTED_OUTPUT_PREFIX) and not artifact_id:
                         continue
-                    saved_tokens += reduction
-                    compacted_ids.append(tool_use_id)
-                    self._mark_source_projected(context, tool_use_id, metadata)
-                    continue
-                before_tokens = estimate_value_tokens(block)
-                preview_block = deepcopy(block)
-                preview_block["content"] = self._cleared_output(
-                    tool_name,
-                    "artifact_0000000000000000",
-                    source,
-                )
-                if (
-                    before_tokens - estimate_value_tokens(preview_block)
-                    < MIN_PROJECTION_SAVINGS_TOKENS
-                ):
-                    continue
-                artifact_id = self.persist_tool_result(context, tool_use_id, block["content"])
-                if artifact_id is None:
-                    continue
-                block["content"] = self._cleared_output(
-                    tool_name,
-                    artifact_id,
-                    source,
-                )
-                reduction = max(before_tokens - estimate_value_tokens(block), 0)
-                if reduction < MIN_PROJECTION_SAVINGS_TOKENS:
-                    continue
-                saved_tokens += reduction
-                compacted_ids.append(tool_use_id)
+                    preview_block = deepcopy(block)
+                    preview_block["content"] = self._cleared_output(
+                        tool_name,
+                        "artifact_0000000000000000",
+                        source,
+                    )
+                    if (
+                        before_block_tokens - estimate_value_tokens(preview_block)
+                        < MIN_PROJECTION_SAVINGS_TOKENS
+                    ):
+                        continue
+                    if artifact_id is None:
+                        artifact_id = self.persist_tool_result(
+                            context,
+                            tool_use_id,
+                            original,
+                        )
+                    if artifact_id is None:
+                        continue
+                    block["content"] = self._cleared_output(
+                        tool_name,
+                        artifact_id,
+                        source,
+                    )
 
-        if not compacted_ids:
-            return ToolResultProjection()
-        context.messages = messages
-        self.mark_context_changed(context)
-        return ToolResultProjection(
-            count=len(compacted_ids),
-            saved_tokens=saved_tokens,
-        )
+                reduction = max(
+                    before_block_tokens - estimate_value_tokens(block),
+                    0,
+                )
+                if reduction < MIN_PROJECTION_SAVINGS_TOKENS:
+                    block["content"] = original
+                    continue
+                compacted_ids.append(tool_use_id)
+                if source_result:
+                    projected_sources.append((tool_use_id, metadata))
+                if self._messages_tokens(messages) <= target_message_tokens:
+                    after_tokens = self._messages_tokens(messages)
+                    return ToolResultRebaseCandidate(
+                        messages=messages,
+                        projection=ToolResultProjection(
+                            count=len(compacted_ids),
+                            saved_tokens=max(before_tokens - after_tokens, 0),
+                        ),
+                        projected_sources=tuple(projected_sources),
+                    )
+
+        return None
+
+    def source_observations(
+        self,
+        context,
+        messages: list[dict],
+    ) -> tuple[tuple[str, dict[str, Any]], ...]:
+        names = self._tool_names_by_id(context.messages)
+        observations: list[tuple[str, dict[str, Any]]] = []
+        seen: set[str] = set()
+        for message in messages:
+            content = message.get("content")
+            if message.get("role") != "user" or not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                tool_use_id = str(block.get("tool_use_id", ""))
+                if not tool_use_id or tool_use_id in seen:
+                    continue
+                metadata = self._result_metadata(context, tool_use_id)
+                if self._is_source_result(names.get(tool_use_id, "unknown"), metadata):
+                    observations.append((tool_use_id, metadata))
+                    seen.add(tool_use_id)
+        return tuple(observations)
+
+    def mark_projected_sources(
+        self,
+        context,
+        observations: list[tuple[str, dict[str, Any]]] | tuple[tuple[str, dict[str, Any]], ...],
+    ) -> None:
+        for tool_use_id, metadata in observations:
+            self._mark_source_projected(context, tool_use_id, metadata)
+
+    def _messages_tokens(self, messages: list[dict]) -> int:
+        return estimate_messages_tokens(messages)
 
     def persist_tool_result(self, context, tool_use_id: str, content: str) -> str | None:
         artifact_map = getattr(context, "tool_result_artifacts", None)
@@ -294,10 +387,13 @@ class ToolResultProjector:
     ) -> tuple[int, int]:
         tool_use_id = str(block.get("tool_use_id", ""))
         tool_name = names.get(tool_use_id, "unknown")
-        if tool_name != "read_file":
+        content = str(block.get("content", ""))
+        if content.startswith(PERSISTED_OUTPUT_PREFIX):
             priority = 0
-        else:
+        elif tool_name != "read_file":
             priority = 1
+        else:
+            priority = 2
         return priority, -estimate_value_tokens(block)
 
     def _minimize_persisted_previews(
@@ -372,21 +468,7 @@ class ToolResultProjector:
         provenance: str | None = None,
     ) -> str:
         source = f"; source={provenance}" if provenance else ""
-        return (
-            f"{CLEARED_OUTPUT_PREFIX} "
-            f"tool={tool_name}; "
-            f"artifact_id={artifact_id}{source}]"
-        )
-
-    def _message_tool_result_tokens(self, message: dict) -> int:
-        content = message.get("content")
-        if message.get("role") != "user" or not isinstance(content, list):
-            return 0
-        return sum(
-            estimate_value_tokens(block)
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "tool_result"
-        )
+        return f"{CLEARED_OUTPUT_PREFIX} tool={tool_name}; artifact_id={artifact_id}{source}]"
 
     def _is_compactable_result(self, block: Any, names: dict[str, str]) -> bool:
         if not isinstance(block, dict) or block.get("type") != "tool_result":
@@ -447,8 +529,7 @@ class ToolResultProjector:
         if not metadata:
             source = provenance or "source metadata unavailable"
             return (
-                f"{SOURCE_OUTPUT_PREFIX} {source}; "
-                "reopen=read_file with the recorded line cursor]"
+                f"{SOURCE_OUTPUT_PREFIX} {source}; reopen=read_file with the recorded line cursor]"
             )
         path = str(metadata.get("source_path") or metadata.get("resolved_path") or "unknown")
         sha = str(metadata.get("source_sha256") or "")[:16] or "unknown"

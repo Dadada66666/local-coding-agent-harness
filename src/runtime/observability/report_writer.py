@@ -324,8 +324,6 @@ class ReportWriter:
             f"- round_budget_projection_events: {len(round_budget_events)}",
             "- round_budget_results_projected: "
             f"{sum(max(int(event.get('replaced_results', 0)), 0) for event in round_budget_events)}",
-            "- eager_projection_events: "
-            f"{sum(event.get('reason') == 'eager_tool_result_projection' for event in projection_events)}",
             f"- overflow_recovery_attempts: {getattr(context, 'context_recovery_attempts', 0)}",
             f"- estimated_tokens_saved: {saved_tokens}",
         ]

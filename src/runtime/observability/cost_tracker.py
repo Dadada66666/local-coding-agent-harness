@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,10 @@ def _render(value: Any) -> str:
 
 def _estimate_tokens(text: str) -> int:
     return estimate_text_tokens(text)
+
+
+def _fingerprint(value: Any) -> str:
+    return hashlib.sha256(_render(value).encode("utf-8")).hexdigest()
 
 
 def _add_text(bucket: dict[str, dict[str, int]], category: str, value: Any) -> None:
@@ -90,6 +95,7 @@ class CostTracker:
         self.logical_input_tokens = 0
         self.turns: list[dict[str, Any]] = []
         self.context_events: list[dict[str, Any]] = []
+        self._previous_message_hashes: tuple[str, ...] | None = None
 
     def add_usage(self, usage) -> None:
         if not usage:
@@ -117,6 +123,8 @@ class CostTracker:
         tools: list[dict],
         response_message: dict,
         usage,
+        context_generation: int = 0,
+        plan_phase: str | None = None,
     ) -> None:
         if not usage:
             return
@@ -129,6 +137,13 @@ class CostTracker:
         logical_input_tokens = input_tokens + cache_creation + cache_read
         input_breakdown = self._input_breakdown(system, messages, tools)
         output_breakdown = self._output_breakdown(response_message)
+        request_prefix = self._request_prefix(
+            system,
+            messages,
+            tools,
+            context_generation=context_generation,
+            plan_phase=plan_phase,
+        )
 
         _allocate_actual_tokens(input_breakdown, logical_input_tokens)
         _allocate_actual_tokens(output_breakdown, output_tokens)
@@ -151,6 +166,7 @@ class CostTracker:
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
                 "logical_total_tokens": logical_input_tokens + output_tokens,
+                "request_prefix": request_prefix,
                 "input_breakdown": input_breakdown,
                 "output_breakdown": output_breakdown,
                 "top_input_categories": self._top_categories(input_breakdown),
@@ -158,13 +174,37 @@ class CostTracker:
             }
         )
 
+    def _request_prefix(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        context_generation: int,
+        plan_phase: str | None,
+    ) -> dict[str, Any]:
+        message_hashes = tuple(_fingerprint(message) for message in messages)
+        previous = self._previous_message_hashes
+        previous_messages_preserved = (
+            None
+            if previous is None
+            else len(message_hashes) >= len(previous)
+            and message_hashes[: len(previous)] == previous
+        )
+        self._previous_message_hashes = message_hashes
+        return {
+            "system_hash": _fingerprint(system),
+            "tools_hash": _fingerprint(tools),
+            "previous_messages_preserved": previous_messages_preserved,
+            "context_generation": max(int(context_generation), 0),
+            "plan_phase": plan_phase,
+        }
+
     def record_context_event(self, event: dict[str, Any]) -> None:
         self.context_events.append(dict(event))
 
     def snapshot(self) -> dict[str, int]:
-        return self._with_totals(
-            {field: int(getattr(self, field, 0)) for field in USAGE_FIELDS}
-        )
+        return self._with_totals({field: int(getattr(self, field, 0)) for field in USAGE_FIELDS})
 
     def delta(self, baseline: dict[str, int] | None = None) -> dict[str, int]:
         baseline = baseline or {}
@@ -246,9 +286,7 @@ class CostTracker:
         if isinstance(content, str):
             compacted_prefixes = ("[Compacted history]", "[Runtime checkpoint]")
             category = (
-                "compacted_history"
-                if content.startswith(compacted_prefixes)
-                else "user_messages"
+                "compacted_history" if content.startswith(compacted_prefixes) else "user_messages"
             )
             _add_text(bucket, category, content)
             return
@@ -322,7 +360,9 @@ class CostTracker:
             allocated = item.get("allocated_tokens", 0)
             item["share"] = round(allocated / total_tokens, 4) if total_tokens else 0
 
-    def _top_categories(self, bucket: dict[str, dict[str, int]], limit: int = 3) -> list[dict[str, Any]]:
+    def _top_categories(
+        self, bucket: dict[str, dict[str, int]], limit: int = 3
+    ) -> list[dict[str, Any]]:
         ranked = sorted(
             (
                 {
@@ -369,27 +409,17 @@ class CostTracker:
             if event.get("type") == "context_tool_results_projected"
         ]
         round_budget_events = [
-            event
-            for event in self.context_events
-            if event.get("type") == "tool_result_budget"
+            event for event in self.context_events if event.get("type") == "tool_result_budget"
         ]
         return {
-            "full_history_compactions": int(
-                getattr(context, "context_compactions", 0)
-            ),
+            "full_history_compactions": int(getattr(context, "context_compactions", 0)),
             "tool_result_projection_events": len(projection_events),
             "tool_results_projected": sum(
-                max(int(event.get("projected_results", 0)), 0)
-                for event in projection_events
+                max(int(event.get("projected_results", 0)), 0) for event in projection_events
             ),
             "round_budget_projection_events": len(round_budget_events),
             "round_budget_results_projected": sum(
-                max(int(event.get("replaced_results", 0)), 0)
-                for event in round_budget_events
-            ),
-            "eager_projection_events": sum(
-                event.get("reason") == "eager_tool_result_projection"
-                for event in projection_events
+                max(int(event.get("replaced_results", 0)), 0) for event in round_budget_events
             ),
         }
 
@@ -402,7 +432,5 @@ class CostTracker:
         return {
             **values,
             "total_tokens": values["input_tokens"] + values["output_tokens"],
-            "logical_total_tokens": (
-                values["logical_input_tokens"] + values["output_tokens"]
-            ),
+            "logical_total_tokens": (values["logical_input_tokens"] + values["output_tokens"]),
         }

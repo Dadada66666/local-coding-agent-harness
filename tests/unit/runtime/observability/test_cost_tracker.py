@@ -62,6 +62,8 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
             cache_creation_input_tokens=20,
             cache_read_input_tokens=40,
         ),
+        context_generation=3,
+        plan_phase="executing",
     )
 
     path = tracker.write()
@@ -86,8 +88,78 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
     assert turn["logical_input_tokens"] == 100
     assert turn["total_tokens"] == 60
     assert turn["logical_total_tokens"] == 120
+    assert turn["request_prefix"]["previous_messages_preserved"] is None
+    assert turn["request_prefix"]["context_generation"] == 3
+    assert turn["request_prefix"]["plan_phase"] == "executing"
+    assert len(turn["request_prefix"]["system_hash"]) == 64
+    assert len(turn["request_prefix"]["tools_hash"]) == 64
     assert _allocated_total(turn["input_breakdown"]) == 100
     assert _allocated_total(turn["output_breakdown"]) == 20
+
+
+def test_request_prefix_detects_append_only_and_rewritten_history() -> None:
+    tracker = CostTracker(Path("unused-run-dir"))
+    usage = TokenUsage(input_tokens=10, output_tokens=2)
+    initial = [{"role": "user", "content": "inspect secret-marker"}]
+
+    tracker.record_model_call(
+        turn_id=1,
+        system="system",
+        messages=initial,
+        tools=[],
+        response_message={"role": "assistant", "content": "working"},
+        usage=usage,
+    )
+    tracker.record_model_call(
+        turn_id=2,
+        system="system",
+        messages=[*initial, {"role": "assistant", "content": "working"}],
+        tools=[],
+        response_message={"role": "assistant", "content": "continue"},
+        usage=usage,
+    )
+    tracker.record_model_call(
+        turn_id=3,
+        system="system",
+        messages=[{"role": "user", "content": "[Runtime checkpoint]\n{}"}],
+        tools=[],
+        response_message={"role": "assistant", "content": "continue"},
+        usage=usage,
+        context_generation=1,
+    )
+
+    assert tracker.turns[1]["request_prefix"]["previous_messages_preserved"] is True
+    assert tracker.turns[2]["request_prefix"]["previous_messages_preserved"] is False
+    assert "secret-marker" not in json.dumps(
+        tracker.turns[0]["request_prefix"],
+        ensure_ascii=False,
+    )
+
+
+def test_request_prefix_hashes_identify_static_prefix_changes() -> None:
+    tracker = CostTracker(Path("unused-run-dir"))
+    usage = TokenUsage(input_tokens=10, output_tokens=2)
+    messages = [{"role": "user", "content": "inspect"}]
+
+    for turn_id, system, tools in (
+        (1, "system-a", [{"name": "read_file"}]),
+        (2, "system-b", [{"name": "read_file"}]),
+        (3, "system-b", [{"name": "read_file"}, {"name": "edit_file"}]),
+    ):
+        tracker.record_model_call(
+            turn_id=turn_id,
+            system=system,
+            messages=messages,
+            tools=tools,
+            response_message={"role": "assistant", "content": "continue"},
+            usage=usage,
+        )
+
+    first, second, third = [turn["request_prefix"] for turn in tracker.turns]
+    assert first["system_hash"] != second["system_hash"]
+    assert second["system_hash"] == third["system_hash"]
+    assert first["tools_hash"] == second["tools_hash"]
+    assert second["tools_hash"] != third["tools_hash"]
 
 
 def test_runtime_checkpoint_is_counted_as_compacted_history() -> None:
@@ -149,7 +221,6 @@ def test_cost_tracker_writes_context_and_artifact_summaries(monkeypatch) -> None
     assert management["tool_results_projected"] == 2
     assert management["round_budget_projection_events"] == 1
     assert management["round_budget_results_projected"] == 1
-    assert management["eager_projection_events"] == 1
     assert data["artifacts"]["chars_persisted"] == 900
 
 

@@ -42,6 +42,9 @@ class FakeHooks:
 
 
 class FakeContextManager:
+    def admit_tool_results(self, context, tool_calls, results):
+        return results
+
     def prepare_context(self, context, **kwargs):
         return SimpleNamespace(
             measurement=SimpleNamespace(

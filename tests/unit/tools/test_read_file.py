@@ -9,6 +9,7 @@ from agent.messages import ToolCall
 from runtime.config import RunConfig
 from agent.loop import AgentLoop
 from runtime.bootstrap import build_runtime
+from runtime.context.budget import estimate_messages_tokens
 from runtime.context.projection import ToolResultProjector
 from tools.base import ToolValidationError
 from tools.read_file import DEFAULT_LIMIT, ReadFileTool
@@ -443,11 +444,17 @@ def test_source_residency_is_scoped_to_the_requested_range(tmp_path: Path) -> No
         )
         context.add_tool_result(call_id, result.content)
 
-    projection = ToolResultProjector().compact_consumed_results(
+    projector = ToolResultProjector()
+    before_tokens = estimate_messages_tokens(context.messages)
+    candidate = projector.build_consumed_rebase_candidate(
         context,
-        compact_before=3,
+        group_ranges=[(1, 3)],
+        target_message_tokens=before_tokens - 1,
     )
-    assert projection.count == 1
+    assert candidate is not None
+    context.messages = candidate.messages
+    projector.mark_projected_sources(context, candidate.projected_sources)
+    assert candidate.projection.count == 1
     assert "Source observation compacted" in str(context.messages[2])
     assert "value399" in str(context.messages[4])
 
