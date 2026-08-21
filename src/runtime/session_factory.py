@@ -43,8 +43,11 @@ def create_agent_session(
 
     session_config = config or RunConfig(permission_mode=permission_mode)
     session_config.permission_mode = permission_mode
-    if session_config.context_window_tokens is None and model_context_window_tokens:
-        session_config.context_window_tokens = int(model_context_window_tokens)
+    if model_context_window_tokens:
+        session_config.context_window_tokens = min(
+            session_config.context_window_tokens,
+            int(model_context_window_tokens),
+        )
 
     access_policy = AccessPolicy()
     environment_policy = EnvironmentPolicy(session_config.bash_env_allowlist)
@@ -80,6 +83,8 @@ def create_agent_session(
         system_prompt=system_prompt,
         config=session_config,
         conversation_messages=list(initial_messages),
+        message_audit_ordinals=list(range(len(initial_messages))),
+        history_window_starts=[0],
         permission_mode=session_config.permission_mode,
         permission_gate=PermissionGate(),
         trace=trace,

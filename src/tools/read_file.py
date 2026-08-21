@@ -173,6 +173,7 @@ class ReadFileTool(BaseTool):
         suffix_reserve = self._pagination_suffix_reserve(
             path=display_path,
             total_lines=len(lines),
+            sha256=snapshot.sha256,
         )
         rendered, page_limited, source_line_truncated = self._render_bounded_page(
             selected,
@@ -228,6 +229,7 @@ class ReadFileTool(BaseTool):
                 next_offset=next_offset,
                 complete=state.fully_scanned and not has_more,
                 source_line_truncated=source_line_truncated,
+                sha256=snapshot.sha256,
             )
         )
 
@@ -305,7 +307,13 @@ class ReadFileTool(BaseTool):
         head_chars = PAGINATION_PATH_MAX_CHARS - tail_chars - 3
         return f"{requested_path[:head_chars]}...{requested_path[-tail_chars:]}"
 
-    def _pagination_suffix_reserve(self, *, path: str, total_lines: int) -> int:
+    def _pagination_suffix_reserve(
+        self,
+        *,
+        path: str,
+        total_lines: int,
+        sha256: str,
+    ) -> int:
         maximum_line = max(total_lines, 1)
         variants = (
             self._pagination_footer(
@@ -316,6 +324,7 @@ class ReadFileTool(BaseTool):
                 next_offset=maximum_line,
                 complete=False,
                 source_line_truncated=True,
+                sha256=sha256,
             ),
             self._pagination_footer(
                 path=path,
@@ -325,6 +334,7 @@ class ReadFileTool(BaseTool):
                 next_offset=None,
                 complete=True,
                 source_line_truncated=False,
+                sha256=sha256,
             ),
         )
         return max(len(value) for value in variants) + len(REPEATED_SEGMENT_HINT) + 2
@@ -339,6 +349,7 @@ class ReadFileTool(BaseTool):
         next_offset: int | None,
         complete: bool,
         source_line_truncated: bool,
+        sha256: str,
     ) -> str:
         returned_range = f"{start}-{end}" if start is not None and end is not None else "none"
         if source_line_truncated:
@@ -352,7 +363,8 @@ class ReadFileTool(BaseTool):
         else:
             status = "incomplete"
         return (
-            f"[read_file: {path} | lines {returned_range} / {total_lines} | {status}]"
+            f"[read_file: {path} | sha={sha256[:16]} | "
+            f"lines {returned_range} / {total_lines} | {status}]"
         )
 
     def _source_metadata(

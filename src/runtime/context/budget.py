@@ -8,22 +8,25 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ContextMeasurement:
-    estimated_tokens: int
-    provider_tokens: int | None
-    used_tokens: int
+    local_input_tokens: int
+    provider_input_tokens: int | None
+    pressure_input_tokens: int
     source: str
     request_chars: int
-    context_window_tokens: int | None
-    target_tokens: int | None
+    context_window_tokens: int
     max_output_tokens: int
     safety_margin_tokens: int
-    soft_limit_tokens: int | None
-    hard_limit_tokens: int | None
+    auto_compact_trigger_tokens: int
+    hard_input_limit_tokens: int
     trigger_reason: str | None
 
     @property
-    def should_compact(self) -> bool:
+    def should_rebase(self) -> bool:
         return self.trigger_reason is not None
+
+    @property
+    def hard_pressure(self) -> bool:
+        return self.pressure_input_tokens >= self.hard_input_limit_tokens
 
 
 def estimate_text_tokens(text: str) -> int:
@@ -55,7 +58,8 @@ def estimate_messages_tokens(messages: list[dict]) -> int:
     return estimate_value_tokens(messages)
 
 
-def estimate_request_tokens(system: str, messages: list[dict], tools: list[dict]) -> int:
+def estimate_input_tokens(system: str, messages: list[dict], tools: list[dict]) -> int:
+    """Estimate provider-visible input only (CMV3-TRG-001)."""
     return (
         estimate_text_tokens(system)
         + estimate_value_tokens(tools)
@@ -65,27 +69,30 @@ def estimate_request_tokens(system: str, messages: list[dict], tools: list[dict]
 
 def normalize_provider_context_anchor(
     *,
-    local_estimate: int,
+    local_input_tokens: int,
     input_tokens: int,
     cache_creation_input_tokens: int = 0,
     cache_read_input_tokens: int = 0,
-    output_tokens: int = 0,
-    appended_tokens: int = 0,
+    assistant_response_tokens: int = 0,
+    appended_input_tokens: int = 0,
 ) -> int:
-    """Choose the cache accounting convention closest to the serialized request."""
+    """Normalize supported cache conventions into next-request input usage."""
     input_tokens = max(int(input_tokens), 0)
     cache_tokens = max(int(cache_creation_input_tokens), 0) + max(
         int(cache_read_input_tokens),
         0,
     )
-    suffix_tokens = max(int(output_tokens), 0) + max(int(appended_tokens), 0)
+    visible_growth = max(int(assistant_response_tokens), 0) + max(
+        int(appended_input_tokens),
+        0,
+    )
     candidates = {
-        input_tokens + suffix_tokens,
-        input_tokens + cache_tokens + suffix_tokens,
+        input_tokens + visible_growth,
+        input_tokens + cache_tokens + visible_growth,
     }
     return min(
         candidates,
-        key=lambda value: (abs(value - max(int(local_estimate), 0)), -value),
+        key=lambda value: (abs(value - max(int(local_input_tokens), 0)), -value),
     )
 
 
@@ -98,61 +105,51 @@ def measure_context(
     system: str,
     messages: list[dict],
     tools: list[dict],
-    context_window_tokens: int | None,
-    target_tokens: int | None = None,
+    context_window_tokens: int,
     max_output_tokens: int,
     safety_margin_tokens: int,
-    soft_limit_ratio: float,
-    provider_context_tokens: int | None = None,
-    fallback_char_limit: int | None = None,
+    auto_compact_ratio: float,
+    provider_input_tokens: int | None = None,
 ) -> ContextMeasurement:
-    estimated_tokens = estimate_request_tokens(system, messages, tools)
+    """Measure CMV3 pressure using input-only quantities."""
+    local_input_tokens = estimate_input_tokens(system, messages, tools)
     request_chars = request_char_count(system, messages, tools)
-    provider_tokens = (
-        max(int(provider_context_tokens), 0)
-        if provider_context_tokens is not None
-        else None
+    normalized_provider_input = (
+        max(int(provider_input_tokens), 0) if provider_input_tokens is not None else None
     )
-    used_tokens = max(estimated_tokens, provider_tokens or 0)
+    pressure_input_tokens = max(local_input_tokens, normalized_provider_input or 0)
     source = (
         "provider_usage"
-        if provider_tokens is not None and provider_tokens >= estimated_tokens
+        if normalized_provider_input is not None and normalized_provider_input >= local_input_tokens
         else "estimate"
     )
 
-    hard_limit_tokens = None
-    soft_limit_candidates = []
-    trigger_reason = None
-    if context_window_tokens is not None:
-        hard_limit_tokens = max(
-            int(context_window_tokens) - max(int(max_output_tokens), 0) - max(int(safety_margin_tokens), 0),
-            1,
-        )
-        soft_limit_candidates.append(max(1, int(hard_limit_tokens * soft_limit_ratio)))
-    if target_tokens is not None:
-        soft_limit_candidates.append(max(int(target_tokens), 1))
+    window = max(int(context_window_tokens), 1)
+    output = max(int(max_output_tokens), 0)
+    safety = max(int(safety_margin_tokens), 0)
+    hard_input_limit_tokens = max(window - output - safety, 1)
+    auto_compact_trigger_tokens = min(
+        max(math.floor(window * float(auto_compact_ratio)), 1),
+        hard_input_limit_tokens,
+    )
 
-    soft_limit_tokens = min(soft_limit_candidates) if soft_limit_candidates else None
-    if soft_limit_tokens is not None and used_tokens >= soft_limit_tokens:
-        trigger_reason = "token_budget"
-    elif (
-        soft_limit_tokens is None
-        and fallback_char_limit is not None
-        and request_chars >= fallback_char_limit
-    ):
-        trigger_reason = "char_fallback"
+    if pressure_input_tokens >= hard_input_limit_tokens:
+        trigger_reason = "hard_pressure"
+    elif pressure_input_tokens >= auto_compact_trigger_tokens:
+        trigger_reason = "auto_pressure"
+    else:
+        trigger_reason = None
 
     return ContextMeasurement(
-        estimated_tokens=estimated_tokens,
-        provider_tokens=provider_tokens,
-        used_tokens=used_tokens,
+        local_input_tokens=local_input_tokens,
+        provider_input_tokens=normalized_provider_input,
+        pressure_input_tokens=pressure_input_tokens,
         source=source,
         request_chars=request_chars,
-        context_window_tokens=context_window_tokens,
-        target_tokens=target_tokens,
-        max_output_tokens=max_output_tokens,
-        safety_margin_tokens=safety_margin_tokens,
-        soft_limit_tokens=soft_limit_tokens,
-        hard_limit_tokens=hard_limit_tokens,
+        context_window_tokens=window,
+        max_output_tokens=output,
+        safety_margin_tokens=safety,
+        auto_compact_trigger_tokens=auto_compact_trigger_tokens,
+        hard_input_limit_tokens=hard_input_limit_tokens,
         trigger_reason=trigger_reason,
     )

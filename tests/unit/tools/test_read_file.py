@@ -9,8 +9,6 @@ from agent.messages import ToolCall
 from runtime.config import RunConfig
 from agent.loop import AgentLoop
 from runtime.bootstrap import build_runtime
-from runtime.context.budget import estimate_messages_tokens
-from runtime.context.projection import ToolResultProjector
 from tools.base import ToolValidationError
 from tools.read_file import DEFAULT_LIMIT, ReadFileTool
 
@@ -51,9 +49,8 @@ def test_read_file_returns_explicit_line_cursor_metadata(tmp_path: Path) -> None
     assert result.metadata["returned_line_end"] == 3
     assert result.metadata["next_offset"] == 3
     assert result.metadata["has_more"] is True
-    assert result.content.endswith(
-        "[read_file: demo.py | lines 2-3 / 4 | next_offset=3]"
-    )
+    assert result.content.endswith("| lines 2-3 / 4 | next_offset=3]")
+    assert "| sha=" in result.content
 
 
 def test_read_file_contract_uses_returned_cursor_when_char_budget_ends_page(
@@ -149,9 +146,9 @@ def test_default_pagination_reduces_round_trips_for_a_1200_line_source(
     assert optimized_pages[-1].metadata["fully_scanned"] is True
     final_page = optimized_pages[-1]
     assert final_page.content.endswith(
-        "[read_file: large_demo.js | lines "
-        f"{final_page.metadata['returned_line_start']}-1200 / 1200 | complete]"
+        f"| lines {final_page.metadata['returned_line_start']}-1200 / 1200 | complete]"
     )
+    assert "[read_file: large_demo.js | sha=" in final_page.content
 
 
 def test_char_limited_pages_have_continuous_offsets_without_duplicate_lines(
@@ -444,19 +441,14 @@ def test_source_residency_is_scoped_to_the_requested_range(tmp_path: Path) -> No
         )
         context.add_tool_result(call_id, result.content)
 
-    projector = ToolResultProjector()
-    before_tokens = estimate_messages_tokens(context.messages)
-    candidate = projector.build_consumed_rebase_candidate(
-        context,
-        group_ranges=[(1, 3)],
-        target_message_tokens=before_tokens - 1,
-    )
-    assert candidate is not None
-    context.messages = candidate.messages
-    projector.mark_projected_sources(context, candidate.projected_sources)
-    assert candidate.projection.count == 1
-    assert "Source observation compacted" in str(context.messages[2])
-    assert "value399" in str(context.messages[4])
+    page_a_metadata = context.tool_result_metadata["page-a"]
+    context.mark_source_observation_projected("page-a", page_a_metadata)
+    context.messages = [context.messages[0], *context.messages[3:]]
+    context.message_audit_ordinals = [
+        context.message_audit_ordinals[0],
+        *context.message_audit_ordinals[3:],
+    ]
+    assert "value399" in str(context.messages[2])
 
     page_a = runtime.executor.execute(
         ToolCall(
@@ -513,7 +505,7 @@ def test_source_removed_by_full_compaction_can_rehydrate(tmp_path: Path) -> None
     assert context.source_resident_overlap(state, 0, 200) == 200
 
     context.messages = [
-        {"role": "user", "content": "[Runtime checkpoint]\n{}"},
+        {"role": "user", "content": "[Context checkpoint v3]\n{}"},
     ]
 
     rehydrated = runtime.executor.execute(

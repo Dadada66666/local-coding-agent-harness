@@ -432,7 +432,7 @@ def test_execution_reuses_planning_source_and_recovers_after_denied_verification
                         "old_text": "const value_0 = 0;",
                         "new_text": "const value_0 = 1;",
                     },
-                )
+                ),
             ),
             tool_response(
                 ToolCall(
@@ -538,8 +538,6 @@ def test_natural_language_approval_continues_the_same_task(tmp_path) -> None:
         ],
     )
     context = runner.start_interactive()
-    context.config.context_task_boundary_tokens = 1
-
     runner.start_task(context, "plan the task")
     task_id = context.task_id
     compactions = context.context_compactions

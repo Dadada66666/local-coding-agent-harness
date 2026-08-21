@@ -305,22 +305,15 @@ class ReportWriter:
         tracker = context.cost_tracker
         events = getattr(tracker, "context_events", [])
         saved_tokens = sum(max(int(event.get("saved_tokens", 0)), 0) for event in events)
-        projection_events = [
-            event
-            for event in events
-            if event.get("type") == "context_tool_results_projected"
-        ]
+        rebase_events = [event for event in events if event.get("type") == "context_rebase"]
         round_budget_events = [
             event for event in events if event.get("type") == "tool_result_budget"
         ]
         lines = [
             "- scope: session",
             f"- window_tokens: {getattr(context.config, 'context_window_tokens', None) or 'unknown'}",
-            f"- target_tokens: {getattr(context.config, 'context_target_tokens', None) or 'disabled'}",
-            f"- full_history_compactions: {getattr(context, 'context_compactions', 0)}",
-            f"- tool_result_projection_events: {len(projection_events)}",
-            "- tool_results_projected: "
-            f"{sum(max(int(event.get('projected_results', 0)), 0) for event in projection_events)}",
+            f"- auto_compact_ratio: {context.config.context_auto_compact_ratio}",
+            f"- full_rebase_events: {len(rebase_events)}",
             f"- round_budget_projection_events: {len(round_budget_events)}",
             "- round_budget_results_projected: "
             f"{sum(max(int(event.get('replaced_results', 0)), 0) for event in round_budget_events)}",
@@ -361,8 +354,6 @@ class ReportWriter:
             f"- created: {values['created']}",
             f"- chars_persisted: {values['chars_persisted']}",
             f"- large_output_artifacts: {values['large_output_artifacts']}",
-            "- context_projection_artifacts: "
-            f"{values['context_projection_artifacts']}",
         ]
 
     def _plan_section(self, context: AgentContext) -> list[str]:

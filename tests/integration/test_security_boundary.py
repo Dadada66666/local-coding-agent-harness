@@ -210,7 +210,6 @@ def test_large_tool_output_is_persisted_once_and_recoverable(monkeypatch, tmp_pa
         "created": 1,
         "chars_persisted": len(full_output),
         "large_output_artifacts": 1,
-        "context_projection_artifacts": 0,
     }
 
     artifact_result = runner.runtime.executor.execute(

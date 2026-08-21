@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from inspect import signature
 from pathlib import Path
 
-from agent.model_client import ModelClient, ModelContextOverflowError
+from agent.model_client import DEFAULT_MAX_TOKENS, ModelClient, ModelContextOverflowError
 from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.bootstrap import RuntimeBundle
 from runtime.call_budget import TaskCallBudget
@@ -76,7 +76,6 @@ class AgentLoop:
                 task=prompt,
                 context=context,
             )
-            self.runtime.context_manager.compact_task_boundary(context)
             self.run_until_idle(context)
         except KeyboardInterrupt as exc:
             self.abort(context, reason="interrupted", message="Stopped: interrupted by user (Ctrl+C).", exc=exc)
@@ -220,13 +219,27 @@ class AgentLoop:
                 call_budget=call_budget,
             )
             tool_schemas = self._tool_schemas(context)
-            max_output_tokens = int(getattr(self.model_client, "max_tokens", 4096))
+            max_output_tokens = int(
+                getattr(self.model_client, "max_tokens", DEFAULT_MAX_TOKENS)
+            )
             preparation = self.runtime.context_manager.prepare_context(
                 context,
                 system=context.system_prompt,
                 tools=tool_schemas,
                 max_output_tokens=max_output_tokens,
+                model_client=self.model_client,
             )
+            if preparation.failure_reason and preparation.measurement.hard_pressure:
+                self._stop_for_context_overflow(
+                    context,
+                    turn_id=turn_id,
+                    detail=(
+                        "Context remained above the hard input limit after "
+                        f"rebase failure: {preparation.failure_reason}"
+                    ),
+                )
+                self._log_turn_end(context, turn_id, turn_started)
+                break
 
             context.trace.log(
                 {
@@ -234,9 +247,11 @@ class AgentLoop:
                     "turn_id": turn_id,
                     "message_count": len(context.messages),
                     "tool_schema_count": len(tool_schemas),
-                    "context_tokens": preparation.measurement.used_tokens,
+                    "context_tokens": preparation.measurement.pressure_input_tokens,
                     "context_source": preparation.measurement.source,
-                    "context_soft_limit": preparation.measurement.soft_limit_tokens,
+                    "context_auto_compact_trigger": (
+                        preparation.measurement.auto_compact_trigger_tokens
+                    ),
                     "remaining_model_calls": call_budget.remaining_calls,
                 }
             )
@@ -339,7 +354,11 @@ class AgentLoop:
 
             context.mark_model_request_consumed(request_message_count)
             context.add_assistant_message(response.message)
-            context.record_model_usage(response.usage, len(context.messages) - 1)
+            context.record_model_usage(
+                response.usage,
+                len(context.messages) - 1,
+                local_input_tokens=preparation.measurement.local_input_tokens,
+            )
 
             response_action = self._response_action(response)
             if self._plan_response_protocol_violation(
@@ -512,8 +531,7 @@ class AgentLoop:
                 if result.ok and result.metadata.get("control_plane_transition"):
                     control_plane_boundary = True
 
-            # CMV2-ADM-01: bound the completed batch before its first Hot Context
-            # visibility. Normal epochs remain append-only after this admission.
+            # CMV3-ADM-001: bound the completed batch before first provider visibility.
             tool_results = self.runtime.context_manager.admit_tool_results(
                 context,
                 response.tool_calls,
@@ -853,6 +871,7 @@ class AgentLoop:
             max_output_tokens=max_output_tokens,
             force=True,
             reason="context_overflow",
+            model_client=self.model_client,
         )
         recovered = preparation.changed and preparation.saved_tokens > 0
         context.trace.log(
@@ -864,9 +883,8 @@ class AgentLoop:
                 "attempt": context.context_recovery_attempts,
                 "recovered": recovered,
                 "compacted": preparation.compacted,
-                "microcompacted": preparation.microcompacted,
                 "saved_tokens": preparation.saved_tokens,
-                "context_tokens": preparation.measurement.used_tokens,
+                "context_tokens": preparation.measurement.pressure_input_tokens,
             }
         )
         return recovered
@@ -958,7 +976,9 @@ class AgentLoop:
                 "saturated_invalid_calls": progress.saturated_invalid_calls,
                 "output_budget_saturated": progress.output_budget_saturated,
                 "output_tokens": getattr(response.usage, "output_tokens", None),
-                "max_output_tokens": int(getattr(self.model_client, "max_tokens", 4096)),
+                "max_output_tokens": int(
+                    getattr(self.model_client, "max_tokens", DEFAULT_MAX_TOKENS)
+                ),
                 "tools": list(progress.tools),
                 "errors": list(progress.errors),
             }

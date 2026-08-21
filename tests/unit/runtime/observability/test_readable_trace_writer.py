@@ -111,19 +111,13 @@ def test_readable_trace_distinguishes_projection_compaction_and_artifacts(tmp_pa
             "saved_tokens": 100,
         },
         {
-            "type": "context_tool_results_projected",
-            "reason": "eager_tool_result_projection",
-            "projected_results": 2,
-            "saved_tokens": 200,
-        },
-        {
-            "type": "context_compact",
-            "mode": "full",
+            "type": "context_rebase",
+            "reason": "auto",
             "saved_tokens": 300,
         },
         {
             "type": "artifact_persisted",
-            "creation_reason": "context_projection",
+            "creation_reason": "tool_result_budget",
             "chars_persisted": 400,
         },
         {
@@ -151,7 +145,6 @@ def test_readable_trace_distinguishes_projection_compaction_and_artifacts(tmp_pa
     content = ReadableTraceWriter().write(context).read_text(encoding="utf-8")
 
     assert "context round-budget tool-results projected" in content
-    assert "context tool-results projected (eager_tool_result_projection)" in content
-    assert "context compacted (full)" in content
-    assert "artifact persisted (context_projection)" in content
+    assert "context full rebase (auto)" in content
+    assert "artifact persisted (tool_result_budget)" in content
     assert "source rehydrated: game.js lines 1-350" in content

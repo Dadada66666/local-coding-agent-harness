@@ -12,18 +12,14 @@ class RunConfig:
     max_tool_result_chars: int = 18000
     max_tool_round_tokens: int = 12000
     grep_max_matches: int = 50
-    compact_threshold_chars: int = 180000
-    context_window_tokens: int | None = None
-    context_target_tokens: int | None = 272000
-    context_soft_limit_ratio: float = 0.8
+    context_window_tokens: int = 272000
+    context_auto_compact_ratio: float = 0.90
     context_safety_margin_tokens: int = 4096
-    context_recent_target_tokens: int = 12000
-    context_recent_max_tokens: int = 24000
-    context_min_recent_rounds: int = 2
-    context_checkpoint_max_chars: int = 6000
-    context_task_boundary_tokens: int = 12000
+    context_recent_raw_tokens: int = 64000
+    semantic_checkpoint_max_tokens: int = 8192
+    deterministic_checkpoint_max_tokens: int = 4096
+    context_post_rebase_ceiling_tokens: int = 136000
     max_context_recovery_attempts: int = 1
-    max_context_compaction_failures: int = 3
     artifact_read_max_chars: int = 6000
     permission_mode: str = "manual_approval"
     sandbox_enabled: bool = False
@@ -51,37 +47,27 @@ class RunConfig:
             raise ValueError("max_turns must be > 0")
         if self.max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be >= 0")
-        if self.max_tool_result_chars < 256:
-            raise ValueError("max_tool_result_chars must be >= 256")
-        if self.max_tool_round_tokens < 0:
-            raise ValueError("max_tool_round_tokens must be >= 0")
+        if not 256 <= self.max_tool_result_chars <= 18000:
+            raise ValueError("max_tool_result_chars must be between 256 and 18000")
+        if not 0 < self.max_tool_round_tokens <= 12000:
+            raise ValueError("max_tool_round_tokens must be between 1 and 12000")
         if self.grep_max_matches <= 0:
             raise ValueError("grep_max_matches must be > 0")
-        if self.compact_threshold_chars <= 0:
-            raise ValueError("compact_threshold_chars must be > 0")
-        if self.context_window_tokens is not None and self.context_window_tokens <= 0:
-            raise ValueError("context_window_tokens must be > 0")
-        if self.context_target_tokens is not None and self.context_target_tokens <= 0:
-            raise ValueError("context_target_tokens must be > 0")
-        if not 0 < self.context_soft_limit_ratio <= 1:
-            raise ValueError("context_soft_limit_ratio must be between 0 and 1")
-        if self.context_safety_margin_tokens < 0:
-            raise ValueError("context_safety_margin_tokens must be >= 0")
-        if self.context_recent_target_tokens <= 0:
-            raise ValueError("context_recent_target_tokens must be > 0")
-        if self.context_recent_max_tokens < self.context_recent_target_tokens:
-            raise ValueError(
-                "context_recent_max_tokens must be >= context_recent_target_tokens"
-            )
-        if self.context_min_recent_rounds <= 0:
-            raise ValueError("context_min_recent_rounds must be > 0")
-        if self.context_checkpoint_max_chars < 512:
-            raise ValueError("context_checkpoint_max_chars must be >= 512")
-        if self.context_task_boundary_tokens < 0:
-            raise ValueError("context_task_boundary_tokens must be >= 0")
+        if not 0 < self.context_window_tokens <= 272000:
+            raise ValueError("context_window_tokens must be between 1 and 272000")
+        if not 0 < self.context_auto_compact_ratio <= 0.90:
+            raise ValueError("context_auto_compact_ratio must be between 0 and 0.90")
+        if self.context_safety_margin_tokens < 4096:
+            raise ValueError("context_safety_margin_tokens must be >= 4096")
+        if not 0 < self.context_recent_raw_tokens <= 64000:
+            raise ValueError("context_recent_raw_tokens must be between 1 and 64000")
+        if not 0 < self.semantic_checkpoint_max_tokens <= 8192:
+            raise ValueError("semantic_checkpoint_max_tokens must be between 1 and 8192")
+        if not 0 < self.deterministic_checkpoint_max_tokens <= 4096:
+            raise ValueError("deterministic_checkpoint_max_tokens must be between 1 and 4096")
+        if not 0 < self.context_post_rebase_ceiling_tokens <= 136000:
+            raise ValueError("context_post_rebase_ceiling_tokens must be between 1 and 136000")
         if self.max_context_recovery_attempts < 0:
             raise ValueError("max_context_recovery_attempts must be >= 0")
-        if self.max_context_compaction_failures <= 0:
-            raise ValueError("max_context_compaction_failures must be > 0")
         if self.artifact_read_max_chars <= 0:
             raise ValueError("artifact_read_max_chars must be > 0")
