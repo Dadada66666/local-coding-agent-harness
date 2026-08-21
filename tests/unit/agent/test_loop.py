@@ -17,10 +17,35 @@ class FakeModelClient:
     def __init__(self, responses: list[ModelResponse | Exception]) -> None:
         self.responses = responses
         self.calls = 0
+        self.semantic_calls = 0
         self.max_tokens = 4096
         self.context_window_tokens = None
 
-    def call(self, system: str, messages: list[dict], tools: list[dict]) -> ModelResponse:
+    def call(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        max_tokens: int | None = None,
+    ) -> ModelResponse:
+        if max_tokens is not None:
+            self.semantic_calls += 1
+            headings = (
+                "## USER_CONSTRAINTS",
+                "## CONFIRMED",
+                "## REJECTED_OR_OBSOLETE",
+                "## UNRESOLVED",
+                "## NEXT_ACTIONS",
+                "## CRITICAL_REFERENCES",
+            )
+            text = "\n\n".join(f"{heading}\n\n- None." for heading in headings)
+            return ModelResponse(
+                message={"role": "assistant", "content": [{"type": "text", "text": text}]},
+                text=text,
+                usage=TokenUsage(),
+                stop_reason="end_turn",
+            )
         response = self.responses[self.calls]
         self.calls += 1
         if isinstance(response, Exception):
@@ -211,10 +236,7 @@ def test_model_call_limit_counts_final_and_tool_turns(tmp_path: Path) -> None:
 
 
 def test_saturated_invalid_tool_loop_stops_after_one_bounded_retry(tmp_path: Path) -> None:
-    responses = [
-        tool_response(ToolCall(f"call_{index}", "write_file", {}))
-        for index in range(3)
-    ]
+    responses = [tool_response(ToolCall(f"call_{index}", "write_file", {})) for index in range(3)]
     for response in responses:
         response.usage = TokenUsage(output_tokens=4097)
     model = FakeModelClient(responses)
@@ -239,10 +261,7 @@ def test_saturated_invalid_tool_loop_stops_after_one_bounded_retry(tmp_path: Pat
 
 def test_repeated_invalid_tool_loop_stops_before_model_call_limit(tmp_path: Path) -> None:
     model = FakeModelClient(
-        [
-            tool_response(ToolCall(f"call_{index}", "write_file", {}))
-            for index in range(4)
-        ]
+        [tool_response(ToolCall(f"call_{index}", "write_file", {})) for index in range(4)]
     )
     runner = make_runner(tmp_path, model)
     context = runner.create_context("write a file", include_initial_message=True)
@@ -264,36 +283,22 @@ def test_context_overflow_compacts_and_retries_once(tmp_path: Path) -> None:
     )
     runner = make_runner(tmp_path, model)
     context = runner.create_context("inspect", include_initial_message=True)
-    context.config.compact_threshold_chars = 1_000_000
-    context.config.context_recent_target_tokens = 1
-    context.config.context_recent_max_tokens = 1_000
-    context.config.context_min_recent_rounds = 2
+    context.config.context_recent_raw_tokens = 1_000
     for index in range(6):
-        context.messages.extend(
-            [
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": f"call_{index}",
-                            "name": "read_file",
-                            "input": {"path": "demo.py"},
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": f"call_{index}",
-                            "content": "result " * 100,
-                        }
-                    ],
-                },
-            ]
+        context.add_assistant_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"call_{index}",
+                        "name": "read_file",
+                        "input": {"path": "demo.py"},
+                    }
+                ],
+            }
         )
+        context.add_tool_result(f"call_{index}", "result " * 100)
 
     runner.run_until_idle(context)
 
@@ -314,36 +319,22 @@ def test_repeated_context_overflow_stops_without_a_retry_loop(tmp_path: Path) ->
     )
     runner = make_runner(tmp_path, model)
     context = runner.create_context("inspect", include_initial_message=True)
-    context.config.compact_threshold_chars = 1_000_000
-    context.config.context_recent_target_tokens = 1
-    context.config.context_recent_max_tokens = 1_000
-    context.config.context_min_recent_rounds = 1
+    context.config.context_recent_raw_tokens = 1_000
     for index in range(4):
-        context.messages.extend(
-            [
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "tool_use",
-                            "id": f"call_{index}",
-                            "name": "list_dir",
-                            "input": {},
-                        }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": f"call_{index}",
-                            "content": "entry\n" * 100,
-                        }
-                    ],
-                },
-            ]
+        context.add_assistant_message(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": f"call_{index}",
+                        "name": "list_dir",
+                        "input": {},
+                    }
+                ],
+            }
         )
+        context.add_tool_result(f"call_{index}", "entry\n" * 10_000)
 
     runner.run_until_idle(context)
 
@@ -352,6 +343,22 @@ def test_repeated_context_overflow_stops_without_a_retry_loop(tmp_path: Path) ->
     assert context.context_recovery_attempts == 1
     assert model.calls == 2
     assert _has_trace_type(context.trace.path, "context_recovery_skipped")
+
+
+def test_unrecoverable_local_hard_pressure_stops_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    model = FakeModelClient([final_response("must not be called")])
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("inspect", include_initial_message=True)
+    context.config.context_window_tokens = 1
+
+    runner.run_until_idle(context)
+
+    assert model.calls == 0
+    assert context.success is False
+    assert context.abort_reason == "model_context_overflow"
+    assert _has_trace_type(context.trace.path, "context_rebase_failure")
 
 
 def _has_trace_type(path: Path, event_type: str) -> bool:

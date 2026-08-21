@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 import agent.model_client as model_client_module
 from agent.model_client import ModelClient
@@ -47,3 +48,31 @@ def test_explicit_lcah_env_file_keeps_configuration_semantics(tmp_path, monkeypa
         "base_url": "https://provider.example",
         "api_key": "explicit-key",
     }
+
+
+def test_main_default_remains_16000_and_semantic_call_can_override(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            content=[{"type": "text", "text": "ok"}],
+            usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+            stop_reason="end_turn",
+        )
+
+    monkeypatch.setenv("MODEL_ID", "test-model")
+    monkeypatch.delenv("LCAH_ENV_FILE", raising=False)
+    monkeypatch.setattr(
+        model_client_module,
+        "Anthropic",
+        lambda **_kwargs: SimpleNamespace(messages=SimpleNamespace(create=create)),
+    )
+    client = ModelClient()
+
+    client.call("system", [], [], max_tokens=8_000)
+
+    assert client.max_tokens == 16_000
+    assert calls[0]["max_tokens"] == 8_000

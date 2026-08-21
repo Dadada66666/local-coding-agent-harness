@@ -22,6 +22,8 @@ def test_create_agent_session_composes_runtime_services(tmp_path) -> None:
     assert context.config.context_window_tokens == 64000
     assert context.messages == initial_messages
     assert context.conversation_messages == initial_messages
+    assert context.message_audit_ordinals == [0]
+    assert context.history_window_starts == [0]
     assert context.messages is not initial_messages
     assert context.run_dir == tmp_path / ".agent" / "runs" / context.run_id
     assert context.run_dir.is_dir()

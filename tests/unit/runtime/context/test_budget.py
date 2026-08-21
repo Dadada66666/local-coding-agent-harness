@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from runtime.context.budget import (
+    estimate_input_tokens,
     estimate_text_tokens,
     measure_context,
     normalize_provider_context_anchor,
@@ -11,156 +12,153 @@ def test_non_ascii_estimate_is_more_conservative_than_ascii() -> None:
     assert estimate_text_tokens("上下文管理能力") > estimate_text_tokens("context")
 
 
-def test_measurement_includes_system_tools_and_output_reserve() -> None:
+def test_main_input_accounting_excludes_output_reservation() -> None:
+    system = "s" * ((236_000 - 2) * 4)
+    messages = []
+    tools = []
+    local_input_tokens = estimate_input_tokens(system, messages, tools)
+
     measurement = measure_context(
-        system="s" * 800,
-        messages=[{"role": "user", "content": "m" * 800}],
-        tools=[{"name": "read_file", "description": "t" * 800}],
-        context_window_tokens=1000,
-        max_output_tokens=100,
-        safety_margin_tokens=100,
-        soft_limit_ratio=0.5,
+        system=system,
+        messages=messages,
+        tools=tools,
+        context_window_tokens=272_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        auto_compact_ratio=0.90,
     )
 
-    assert measurement.estimated_tokens >= 600
-    assert measurement.hard_limit_tokens == 800
-    assert measurement.soft_limit_tokens == 400
-    assert measurement.trigger_reason == "token_budget"
+    assert local_input_tokens == 236_000
+    assert measurement.local_input_tokens == 236_000
+    assert measurement.hard_input_limit_tokens == 251_904
+    assert measurement.auto_compact_trigger_tokens == 244_800
+    assert measurement.trigger_reason is None
 
 
-def test_provider_usage_is_used_as_a_conservative_anchor() -> None:
-    measurement = measure_context(
-        system="system",
-        messages=[{"role": "user", "content": "small"}],
+def test_auto_trigger_uses_input_only_boundary() -> None:
+    below = measure_context(
+        system="s" * ((244_799 - 2) * 4),
+        messages=[],
         tools=[],
-        context_window_tokens=2000,
-        max_output_tokens=200,
-        safety_margin_tokens=200,
-        soft_limit_ratio=0.8,
-        provider_context_tokens=1500,
+        context_window_tokens=272_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        auto_compact_ratio=0.90,
+    )
+    at = measure_context(
+        system="s" * ((244_800 - 2) * 4),
+        messages=[],
+        tools=[],
+        context_window_tokens=272_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        auto_compact_ratio=0.90,
     )
 
-    assert measurement.source == "provider_usage"
-    assert measurement.used_tokens == 1500
-    assert measurement.trigger_reason == "token_budget"
+    assert below.local_input_tokens == 244_799
+    assert below.trigger_reason is None
+    assert at.local_input_tokens == 244_800
+    assert at.trigger_reason == "auto_pressure"
+
+
+def test_hard_limit_uses_input_only_boundary() -> None:
+    below = measure_context(
+        system="s" * ((251_903 - 2) * 4),
+        messages=[],
+        tools=[],
+        context_window_tokens=272_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        auto_compact_ratio=0.90,
+    )
+    at = measure_context(
+        system="s" * ((251_904 - 2) * 4),
+        messages=[],
+        tools=[],
+        context_window_tokens=272_000,
+        max_output_tokens=16_000,
+        safety_margin_tokens=4_096,
+        auto_compact_ratio=0.90,
+    )
+
+    assert below.hard_pressure is False
+    assert at.hard_pressure is True
+    assert at.trigger_reason == "hard_pressure"
+
+
+def test_explicit_output_override_changes_only_hard_limit() -> None:
+    kwargs = {
+        "system": "system",
+        "messages": [{"role": "user", "content": "inspect"}],
+        "tools": [],
+        "context_window_tokens": 272_000,
+        "safety_margin_tokens": 4_096,
+        "auto_compact_ratio": 0.90,
+    }
+    default = measure_context(max_output_tokens=16_000, **kwargs)
+    overridden = measure_context(max_output_tokens=8_000, **kwargs)
+
+    assert overridden.local_input_tokens == default.local_input_tokens
+    assert default.hard_input_limit_tokens == 251_904
+    assert overridden.hard_input_limit_tokens == 259_904
+    assert overridden.auto_compact_trigger_tokens == 244_800
 
 
 def test_provider_anchor_supports_exclusive_cache_accounting() -> None:
-    assert normalize_provider_context_anchor(
-        local_estimate=25_000,
-        input_tokens=1_000,
-        cache_read_input_tokens=24_000,
-    ) == 25_000
+    assert (
+        normalize_provider_context_anchor(
+            local_input_tokens=25_000,
+            input_tokens=1_000,
+            cache_read_input_tokens=24_000,
+        )
+        == 25_000
+    )
 
 
 def test_provider_anchor_avoids_duplicate_inclusive_cache_accounting() -> None:
-    assert normalize_provider_context_anchor(
-        local_estimate=25_000,
-        input_tokens=25_000,
-        cache_read_input_tokens=24_000,
-    ) == 25_000
+    assert (
+        normalize_provider_context_anchor(
+            local_input_tokens=25_000,
+            input_tokens=25_000,
+            cache_read_input_tokens=24_000,
+        )
+        == 25_000
+    )
 
 
 def test_provider_anchor_without_cache_uses_reported_input() -> None:
-    assert normalize_provider_context_anchor(
-        local_estimate=24_000,
-        input_tokens=25_000,
-    ) == 25_000
-
-
-def test_char_threshold_is_only_a_fallback_without_a_known_window() -> None:
-    measurement = measure_context(
-        system="system",
-        messages=[{"role": "user", "content": "x" * 100}],
-        tools=[],
-        context_window_tokens=None,
-        max_output_tokens=100,
-        safety_margin_tokens=100,
-        soft_limit_ratio=0.8,
-        fallback_char_limit=50,
+    assert (
+        normalize_provider_context_anchor(
+            local_input_tokens=24_000,
+            input_tokens=25_000,
+        )
+        == 25_000
     )
 
-    assert measurement.soft_limit_tokens is None
-    assert measurement.trigger_reason == "char_fallback"
 
-
-def test_absolute_target_limits_cost_before_capacity_pressure() -> None:
-    measurement = measure_context(
-        system="s" * 1200,
-        messages=[{"role": "user", "content": "m" * 1200}],
-        tools=[],
-        context_window_tokens=200000,
-        target_tokens=500,
-        max_output_tokens=4096,
-        safety_margin_tokens=4096,
-        soft_limit_ratio=0.8,
+def test_provider_anchor_adds_only_visible_tail_growth() -> None:
+    assert (
+        normalize_provider_context_anchor(
+            local_input_tokens=26_000,
+            input_tokens=20_000,
+            assistant_response_tokens=4_000,
+            appended_input_tokens=2_000,
+        )
+        == 26_000
     )
 
-    assert measurement.hard_limit_tokens == 191808
-    assert measurement.soft_limit_tokens == 500
-    assert measurement.trigger_reason == "token_budget"
 
-
-def test_known_small_window_limits_a_larger_context_target() -> None:
+def test_known_smaller_window_limits_default_capacity() -> None:
     measurement = measure_context(
         system="system",
         messages=[{"role": "user", "content": "x" * 80_000}],
         tools=[],
         context_window_tokens=32_000,
-        target_tokens=48_000,
         max_output_tokens=8_000,
         safety_margin_tokens=4_096,
-        soft_limit_ratio=0.8,
-        fallback_char_limit=180_000,
+        auto_compact_ratio=0.90,
     )
 
-    assert measurement.hard_limit_tokens == 19_904
-    assert measurement.soft_limit_tokens == 15_923
-    assert measurement.trigger_reason == "token_budget"
-
-
-def test_unknown_window_uses_finite_token_target_before_character_fallback() -> None:
-    below = measure_context(
-        system="system",
-        messages=[{"role": "user", "content": "x" * 100_000}],
-        tools=[],
-        context_window_tokens=None,
-        target_tokens=48_000,
-        max_output_tokens=16_000,
-        safety_margin_tokens=4_096,
-        soft_limit_ratio=0.8,
-        fallback_char_limit=180_000,
-    )
-    fallback = measure_context(
-        system="system",
-        messages=[{"role": "user", "content": "x" * 180_000}],
-        tools=[],
-        context_window_tokens=None,
-        target_tokens=48_000,
-        max_output_tokens=16_000,
-        safety_margin_tokens=4_096,
-        soft_limit_ratio=0.8,
-        fallback_char_limit=180_000,
-    )
-
-    assert below.soft_limit_tokens == 48_000
-    assert below.trigger_reason is None
-    assert fallback.soft_limit_tokens == 48_000
-    assert fallback.trigger_reason is None
-
-
-def test_character_threshold_is_ignored_when_a_token_target_exists() -> None:
-    measurement = measure_context(
-        system="system",
-        messages=[{"role": "user", "content": "x" * 180_000}],
-        tools=[],
-        context_window_tokens=None,
-        target_tokens=272_000,
-        max_output_tokens=16_000,
-        safety_margin_tokens=4_096,
-        soft_limit_ratio=0.8,
-        fallback_char_limit=180_000,
-    )
-
-    assert measurement.soft_limit_tokens == 272_000
-    assert measurement.trigger_reason is None
+    assert measurement.hard_input_limit_tokens == 19_904
+    assert measurement.auto_compact_trigger_tokens == 19_904
+    assert measurement.trigger_reason == "hard_pressure"

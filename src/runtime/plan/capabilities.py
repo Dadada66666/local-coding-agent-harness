@@ -6,7 +6,17 @@ from runtime.plan.models import ExecutionPath, PlanPhase, PlanPolicy
 
 
 READ_ONLY_INSPECTION_TOOLS = frozenset(
-    {"list_dir", "grep", "read_file", "read_artifact", "view_diff"}
+    {
+        "list_dir",
+        "grep",
+        "read_file",
+        "read_artifact",
+        "view_diff",
+        "history_list_windows",
+        "history_list_items",
+        "history_search_contents",
+        "history_read_item",
+    }
 )
 PLANNING_ACTIONS = frozenset({"replace_plan", "submit", "cancel"})
 EXECUTING_ACTIONS = frozenset(

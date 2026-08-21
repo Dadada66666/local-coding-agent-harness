@@ -93,6 +93,8 @@ class CostTracker:
         self.cache_read_input_tokens = 0
         self.cache_deleted_input_tokens = 0
         self.logical_input_tokens = 0
+        self.compaction_calls = 0
+        self.compaction_usage = {field: 0 for field in USAGE_FIELDS if field != "calls"}
         self.turns: list[dict[str, Any]] = []
         self.context_events: list[dict[str, Any]] = []
         self._previous_message_hashes: tuple[str, ...] | None = None
@@ -174,6 +176,22 @@ class CostTracker:
             }
         )
 
+    def record_compaction_call(self, usage) -> None:
+        if not usage:
+            return
+        input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+        cache_creation = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+        cache_deleted = int(getattr(usage, "cache_deleted_input_tokens", 0) or 0)
+        self.compaction_calls += 1
+        self.compaction_usage["input_tokens"] += input_tokens
+        self.compaction_usage["logical_input_tokens"] += input_tokens + cache_creation + cache_read
+        self.compaction_usage["cache_creation_input_tokens"] += cache_creation
+        self.compaction_usage["cache_read_input_tokens"] += cache_read
+        self.compaction_usage["cache_deleted_input_tokens"] += cache_deleted
+        self.compaction_usage["output_tokens"] += output_tokens
+
     def _request_prefix(
         self,
         system: str,
@@ -230,6 +248,10 @@ class CostTracker:
                     "total_tokens": self.input_tokens + self.output_tokens,
                     "logical_total_tokens": self.logical_input_tokens + self.output_tokens,
                     "estimated_cost_usd": None,
+                    "context_compaction_provider_usage": {
+                        "calls": self.compaction_calls,
+                        **self.compaction_usage,
+                    },
                     "current_task": self._current_task_cost(context),
                     "completed_tasks": list(getattr(context, "completed_tasks", [])),
                     "context_management": {
@@ -284,7 +306,7 @@ class CostTracker:
 
     def _add_user_content(self, bucket: dict[str, dict[str, int]], content: Any) -> None:
         if isinstance(content, str):
-            compacted_prefixes = ("[Compacted history]", "[Runtime checkpoint]")
+            compacted_prefixes = ("[Context checkpoint v3]",)
             category = (
                 "compacted_history" if content.startswith(compacted_prefixes) else "user_messages"
             )
@@ -403,20 +425,14 @@ class CostTracker:
         return snapshot() if callable(snapshot) else {}
 
     def _context_event_summary(self, context) -> dict[str, int]:
-        projection_events = [
-            event
-            for event in self.context_events
-            if event.get("type") == "context_tool_results_projected"
+        rebase_events = [
+            event for event in self.context_events if event.get("type") == "context_rebase"
         ]
         round_budget_events = [
             event for event in self.context_events if event.get("type") == "tool_result_budget"
         ]
         return {
-            "full_history_compactions": int(getattr(context, "context_compactions", 0)),
-            "tool_result_projection_events": len(projection_events),
-            "tool_results_projected": sum(
-                max(int(event.get("projected_results", 0)), 0) for event in projection_events
-            ),
+            "full_rebase_events": len(rebase_events),
             "round_budget_projection_events": len(round_budget_events),
             "round_budget_results_projected": sum(
                 max(int(event.get("replaced_results", 0)), 0) for event in round_budget_events

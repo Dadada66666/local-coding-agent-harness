@@ -24,6 +24,12 @@ from tools.bash import BashTool
 from tools.delete_file import DeleteFileTool
 from tools.edit_file import EditFileTool
 from tools.grep import GrepTool
+from tools.history import (
+    HistoryListItemsTool,
+    HistoryListWindowsTool,
+    HistoryReadItemTool,
+    HistorySearchContentsTool,
+)
 from tools.list_dir import ListDirTool
 from tools.read_artifact import ReadArtifactTool
 from tools.read_file import ReadFileTool
@@ -51,6 +57,10 @@ def build_tool_registry() -> ToolRegistry:
     registry.register(GrepTool())
     registry.register(ReadFileTool())
     registry.register(ReadArtifactTool())
+    registry.register(HistoryListWindowsTool())
+    registry.register(HistoryListItemsTool())
+    registry.register(HistorySearchContentsTool())
+    registry.register(HistoryReadItemTool())
     registry.register(WriteFileTool())
     registry.register(EditFileTool())
     registry.register(DeleteFileTool())

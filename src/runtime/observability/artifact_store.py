@@ -94,10 +94,6 @@ class ArtifactStore:
             "large_output_artifacts": sum(
                 reference.creation_reason == "large_output" for reference in records
             ),
-            "context_projection_artifacts": sum(
-                reference.creation_reason == "context_projection"
-                for reference in records
-            ),
         }
 
     def _read_chars(self, path: Path, *, offset: int, limit: int) -> str:

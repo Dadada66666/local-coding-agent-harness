@@ -121,7 +121,7 @@ def test_request_prefix_detects_append_only_and_rewritten_history() -> None:
     tracker.record_model_call(
         turn_id=3,
         system="system",
-        messages=[{"role": "user", "content": "[Runtime checkpoint]\n{}"}],
+        messages=[{"role": "user", "content": "[Context checkpoint v3]\n{}"}],
         tools=[],
         response_message={"role": "assistant", "content": "continue"},
         usage=usage,
@@ -162,12 +162,12 @@ def test_request_prefix_hashes_identify_static_prefix_changes() -> None:
     assert second["tools_hash"] != third["tools_hash"]
 
 
-def test_runtime_checkpoint_is_counted_as_compacted_history() -> None:
+def test_v3_checkpoint_is_counted_as_compacted_history() -> None:
     tracker = CostTracker(Path("unused-run-dir"))
 
     breakdown = tracker._input_breakdown(
         "system",
-        [{"role": "user", "content": "[Runtime checkpoint]\n{}"}],
+        [{"role": "user", "content": "[Context checkpoint v3]\n{}"}],
         [],
     )
 
@@ -193,9 +193,8 @@ def test_cost_tracker_writes_context_and_artifact_summaries(monkeypatch) -> None
     )
     tracker.record_context_event(
         {
-            "type": "context_tool_results_projected",
-            "reason": "eager_tool_result_projection",
-            "projected_results": 2,
+            "type": "context_rebase",
+            "reason": "auto",
             "saved_tokens": 200,
         }
     )
@@ -207,7 +206,6 @@ def test_cost_tracker_writes_context_and_artifact_summaries(monkeypatch) -> None
                 "created": 3,
                 "chars_persisted": 900,
                 "large_output_artifacts": 1,
-                "context_projection_artifacts": 2,
             }
         ),
     )
@@ -216,9 +214,7 @@ def test_cost_tracker_writes_context_and_artifact_summaries(monkeypatch) -> None
     data = json.loads(captured["text"])
 
     management = data["context_management"]
-    assert management["full_history_compactions"] == 1
-    assert management["tool_result_projection_events"] == 1
-    assert management["tool_results_projected"] == 2
+    assert management["full_rebase_events"] == 1
     assert management["round_budget_projection_events"] == 1
     assert management["round_budget_results_projected"] == 1
     assert data["artifacts"]["chars_persisted"] == 900

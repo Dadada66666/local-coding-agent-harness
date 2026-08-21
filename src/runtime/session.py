@@ -101,6 +101,8 @@ class AgentContext:
     task_changed_files: set[str] = field(default_factory=set)
     created_files: set[str] = field(default_factory=set)
     task_created_files: set[str] = field(default_factory=set)
+    deleted_files: set[str] = field(default_factory=set)
+    task_deleted_files: set[str] = field(default_factory=set)
     approved_permission_scopes: set[str] = field(default_factory=set)
     denied_permission_scopes: set[str] = field(default_factory=set)
     access_policy: AccessPolicy = field(default_factory=AccessPolicy)
@@ -112,20 +114,23 @@ class AgentContext:
     sandbox_auto_allowed_unknown_bash_count: int = 0
     context_generation: int = 0
     context_compactions: int = 0
-    context_compaction_failures: int = 0
+    last_auto_compaction_failed_generation: int | None = None
     context_recovery_attempts: int = 0
     last_model_usage: Any | None = None
     last_model_usage_message_index: int | None = None
     last_model_usage_generation: int | None = None
+    last_model_usage_local_input_tokens: int | None = None
     last_model_consumed_message_count: int = 0
     tool_result_artifacts: dict[str, str] = field(default_factory=dict)
     tool_result_provenance: dict[str, str] = field(default_factory=dict)
     tool_result_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     completed_tasks: list[dict[str, Any]] = field(default_factory=list)
+    message_audit_ordinals: list[int | None] = field(default_factory=list)
+    history_window_starts: list[int] = field(default_factory=lambda: [0])
 
     def add_user_message(self, message: dict) -> None:
         self.messages.append(message)
-        self.conversation_messages.append(message)
+        self.message_audit_ordinals.append(self._append_audit_message(message))
 
     def safe_path(self, path: str) -> Path:
         resolved = (self.repo_path / path).resolve()
@@ -248,8 +253,9 @@ class AgentContext:
             return
         state = self.read_file_segments.get(str(metadata.get("resolved_path") or ""))
         identifier = str(tool_call_id)
-        if state is not None:
-            state.projected_observation_ids.add(identifier)
+        if state is None or identifier in state.projected_observation_ids:
+            return
+        state.projected_observation_ids.add(identifier)
         self.source_read_metrics.source_observations_projected += 1
 
     def source_context_manifest(self, *, limit: int = 12) -> list[dict[str, Any]]:
@@ -302,11 +308,15 @@ class AgentContext:
 
     def record_changed_file(self, path: str) -> None:
         self.read_file_segments.pop(str((self.repo_path / path).resolve()), None)
+        self.deleted_files.discard(path)
+        self.task_deleted_files.discard(path)
         self.changed_files.add(path)
         self.task_changed_files.add(path)
         self.record_mutation()
 
     def record_created_file(self, path: str) -> None:
+        self.deleted_files.discard(path)
+        self.task_deleted_files.discard(path)
         self.created_files.add(path)
         self.task_created_files.add(path)
         self.record_changed_file(path)
@@ -328,6 +338,8 @@ class AgentContext:
             self.changed_files.discard(path)
         else:
             self.changed_files.add(path)
+            self.deleted_files.add(path)
+        self.task_deleted_files.add(path)
         self.task_changed_files.add(path)
         self.record_mutation()
 
@@ -349,12 +361,12 @@ class AgentContext:
         self.task_saturated_invalid_calls = 0
         self.repair_attempts = 0
         self.context_recovery_attempts = 0
-        self.context_compaction_failures = 0
         snapshot = getattr(self.cost_tracker, "snapshot", None)
         self.task_cost_start = snapshot() if callable(snapshot) else {}
         self.task_tool_failures.clear()
         self.task_changed_files.clear()
         self.task_created_files.clear()
+        self.task_deleted_files.clear()
         self.read_file_segments.clear()
         self.source_read_metrics = SourceReadMetrics()
         self.pending_user_continuation_id = None
@@ -537,7 +549,7 @@ class AgentContext:
 
     def add_assistant_message(self, message: dict) -> None:
         self.messages.append(message)
-        self.conversation_messages.append(message)
+        self.message_audit_ordinals.append(self._append_audit_message(message))
 
     def add_tool_result(self, tool_call_id: str, content: str) -> None:
         self.add_tool_results([(tool_call_id, content, False)])
@@ -558,27 +570,100 @@ class AgentContext:
             ],
         }
         self.messages.append(message)
-        self.conversation_messages.append(message)
+        self.message_audit_ordinals.append(self._append_audit_message(message))
 
     def add_runtime_message(self, message: dict) -> None:
         self.messages.append(message)
         audit_message = dict(message)
         audit_message["runtime_origin"] = True
-        self.conversation_messages.append(audit_message)
+        self.message_audit_ordinals.append(self._append_audit_message(audit_message))
 
     def mark_context_changed(self) -> None:
+        self.history_window_starts.append(len(self.conversation_messages))
         self.context_generation += 1
         self.last_model_usage = None
         self.last_model_usage_message_index = None
         self.last_model_usage_generation = None
+        self.last_model_usage_local_input_tokens = None
+
+    def audit_item_id(self, ordinal: int) -> str:
+        return f"{self.run_id}:item:{int(ordinal)}"
+
+    def history_window_id(self, generation: int) -> str:
+        return f"{self.run_id}:window:{int(generation)}"
+
+    def history_windows(self) -> list[dict[str, Any]]:
+        audit_count = len(self.conversation_messages)
+        starts = [*self.history_window_starts]
+        if not starts:
+            starts = [0]
+        windows: list[dict[str, Any]] = []
+        for generation, start in enumerate(starts):
+            end = starts[generation + 1] if generation + 1 < len(starts) else audit_count
+            windows.append(
+                {
+                    "window_id": self.history_window_id(generation),
+                    "generation": generation,
+                    "start_ordinal": start,
+                    "end_ordinal": end,
+                    "item_count": max(end - start, 0),
+                    "current": generation == self.context_generation,
+                    "closed": generation != self.context_generation,
+                }
+            )
+        return windows
+
+    def history_window_for_ordinal(self, ordinal: int) -> dict[str, Any] | None:
+        for window in self.history_windows():
+            if window["start_ordinal"] <= ordinal < window["end_ordinal"]:
+                return window
+        return None
+
+    def history_ranges_for_ordinals(self, ordinals: list[int]) -> list[dict[str, Any]]:
+        ordered = sorted(set(ordinal for ordinal in ordinals if ordinal >= 0))
+        ranges: list[dict[str, Any]] = []
+        for ordinal in ordered:
+            window = self.history_window_for_ordinal(ordinal)
+            if window is None:
+                continue
+            if (
+                ranges
+                and ranges[-1]["window_id"] == window["window_id"]
+                and ranges[-1]["end_ordinal"] + 1 == ordinal
+            ):
+                ranges[-1]["end_ordinal"] = ordinal
+                ranges[-1]["end_item_id"] = self.audit_item_id(ordinal)
+                continue
+            ranges.append(
+                {
+                    "window_id": window["window_id"],
+                    "start_ordinal": ordinal,
+                    "end_ordinal": ordinal,
+                    "start_item_id": self.audit_item_id(ordinal),
+                    "end_item_id": self.audit_item_id(ordinal),
+                }
+            )
+        return ranges
+
+    def _append_audit_message(self, message: dict) -> int:
+        ordinal = len(self.conversation_messages)
+        self.conversation_messages.append(message)
+        return ordinal
 
     def mark_model_request_consumed(self, message_count: int) -> None:
         self.last_model_consumed_message_count = max(message_count, 0)
 
-    def record_model_usage(self, usage: Any, response_message_index: int) -> None:
+    def record_model_usage(
+        self,
+        usage: Any,
+        response_message_index: int,
+        *,
+        local_input_tokens: int | None = None,
+    ) -> None:
         self.last_model_usage = usage
         self.last_model_usage_message_index = response_message_index
         self.last_model_usage_generation = self.context_generation
+        self.last_model_usage_local_input_tokens = local_input_tokens
 
     def record_tool_result_provenance(self, tool_call_id: str, value: str | None) -> None:
         if not value:
@@ -612,8 +697,6 @@ class AgentContext:
         identifier = str(tool_call_id)
         self.tool_result_metadata[identifier] = bounded
         self.record_source_observation(identifier, bounded)
-        while len(self.tool_result_metadata) > 200:
-            self.tool_result_metadata.pop(next(iter(self.tool_result_metadata)))
 
     def archive_terminal_task(self) -> bool:
         if (

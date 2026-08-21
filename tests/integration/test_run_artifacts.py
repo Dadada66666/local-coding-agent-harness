@@ -47,10 +47,12 @@ class FakeContextManager:
 
     def prepare_context(self, context, **kwargs):
         return SimpleNamespace(
+            failure_reason=None,
             measurement=SimpleNamespace(
-                used_tokens=0,
+                pressure_input_tokens=0,
                 source="estimate",
-                soft_limit_tokens=None,
+                auto_compact_trigger_tokens=244_800,
+                local_input_tokens=0,
             )
         )
 

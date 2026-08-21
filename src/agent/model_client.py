@@ -65,11 +65,21 @@ class ModelClient:
 
         self.client = Anthropic(**kwargs)
 
-    def call(self, system: str, messages: list[dict], tools: list[dict]) -> ModelResponse:
+    def call(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict],
+        *,
+        max_tokens: int | None = None,
+    ) -> ModelResponse:
+        output_limit = self.max_tokens if max_tokens is None else int(max_tokens)
+        if output_limit <= 0:
+            raise ValueError("max_tokens must be > 0")
         try:
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=self.max_tokens,
+                max_tokens=output_limit,
                 system=system,
                 messages=messages,
                 tools=tools,
