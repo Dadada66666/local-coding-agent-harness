@@ -218,7 +218,12 @@ class ContextManager:
         tools: list[dict],
         model_client,
     ) -> FullRebaseCandidate:
-        deterministic = self._authoritative_state(context)
+        target_generation = snapshot.generation + 1
+        deterministic = self._authoritative_state(
+            context,
+            context_generation=target_generation,
+            current_window_id=context.history_window_id(target_generation),
+        )
         wrapper_tokens = self.checkpoint_builder.checkpoint_wrapper_tokens()
         semantic_actual_max = self.checkpoint_builder.semantic_actual_max(
             context,
@@ -340,9 +345,12 @@ class ContextManager:
         ]
         ranges = context.history_ranges_for_ordinals(removed_ordinals)
         try:
+            target_generation = snapshot.generation + 1
             deterministic = self.checkpoint_builder.build_authoritative_state(
                 context,
                 required_removed_history_ranges=ranges,
+                context_generation=target_generation,
+                current_window_id=context.history_window_id(target_generation),
                 max_tokens=EMERGENCY_DETERMINISTIC_RESERVE,
             )
         except ValueError as exc:
@@ -552,12 +560,21 @@ class ContextManager:
             tool_ids = self._tool_use_ids(message)
             complete = True
             if tool_ids:
-                pending = set(tool_ids)
+                expected = set(tool_ids)
+                seen: set[str] = set()
+                complete = len(expected) == len(tool_ids)
                 index += 1
-                while index < len(messages) and pending:
-                    pending -= self._tool_result_ids(messages[index])
+                while index < len(messages) and seen != expected:
+                    result_ids = self._tool_result_ids(messages[index])
+                    if not result_ids:
+                        complete = False
+                        break
+                    for tool_use_id in result_ids:
+                        if tool_use_id not in expected or tool_use_id in seen:
+                            complete = False
+                        seen.add(tool_use_id)
                     index += 1
-                complete = not pending
+                complete = complete and seen == expected
             else:
                 complete = not self._tool_result_ids(message)
                 index += 1
@@ -578,25 +595,25 @@ class ContextManager:
         groups = self._group_messages_by_api_round(messages, [None] * len(messages))
         return all(group.complete for group in groups)
 
-    def _tool_use_ids(self, message: dict[str, Any]) -> set[str]:
+    def _tool_use_ids(self, message: dict[str, Any]) -> list[str]:
         content = message.get("content")
         if message.get("role") != "assistant" or not isinstance(content, list):
-            return set()
-        return {
+            return []
+        return [
             str(block.get("id"))
             for block in content
             if isinstance(block, dict) and block.get("type") == "tool_use"
-        }
+        ]
 
-    def _tool_result_ids(self, message: dict[str, Any]) -> set[str]:
+    def _tool_result_ids(self, message: dict[str, Any]) -> list[str]:
         content = message.get("content")
         if message.get("role") != "user" or not isinstance(content, list):
-            return set()
-        return {
+            return []
+        return [
             str(block.get("tool_use_id"))
             for block in content
             if isinstance(block, dict) and block.get("type") == "tool_result"
-        }
+        ]
 
     def _require_meaningful_removal(
         self,
@@ -610,9 +627,19 @@ class ContextManager:
                 "removed trajectory contains no new trajectory beyond the current checkpoint",
             )
 
-    def _authoritative_state(self, context) -> AuthoritativeState:
+    def _authoritative_state(
+        self,
+        context,
+        *,
+        context_generation: int,
+        current_window_id: str,
+    ) -> AuthoritativeState:
         try:
-            return self.checkpoint_builder.build_authoritative_state(context)
+            return self.checkpoint_builder.build_authoritative_state(
+                context,
+                context_generation=context_generation,
+                current_window_id=current_window_id,
+            )
         except ValueError as exc:
             raise RebaseFailure("checkpoint_construction", str(exc)) from exc
 

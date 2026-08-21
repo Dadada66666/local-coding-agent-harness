@@ -19,6 +19,7 @@ from runtime.context.checkpoint import (
     RuntimeCheckpointBuilder,
 )
 from runtime.context.manager import ContextManager
+from runtime.context.projection import ToolResultAdmissionError
 
 
 VALID_HANDOFF = "\n\n".join(f"{heading}\n\n- None." for heading in MANDATORY_SEMANTIC_HEADINGS)
@@ -118,6 +119,26 @@ def test_admission_shapes_oversized_batch_before_context_visibility(tmp_path) ->
     assert admitted[1][2] is True
 
 
+def test_admission_rejects_batch_when_minimum_form_exceeds_hard_budget(tmp_path) -> None:
+    context, _client = make_context(
+        tmp_path,
+        config=RunConfig(permission_mode="accept_edits", max_tool_round_tokens=1),
+    )
+    before_messages = deepcopy(context.messages)
+    before_audit = deepcopy(context.conversation_messages)
+
+    with pytest.raises(ToolResultAdmissionError, match="hard round budget"):
+        ContextManager().admit_tool_results(
+            context,
+            [ToolCall("one", "grep", {})],
+            [("one", "x", False)],
+        )
+
+    assert context.messages == before_messages
+    assert context.conversation_messages == before_audit
+    assert context.context_generation == 0
+
+
 def test_admission_prefers_non_source_and_uses_source_only_as_last_resort(tmp_path) -> None:
     source_path = tmp_path / "demo.py"
     source_path.write_text("\n".join(f"value_{line} = {line}" for line in range(500)))
@@ -189,6 +210,17 @@ def test_semantic_rebase_selects_final_rounds_before_summary(tmp_path) -> None:
     assert context.messages[0]["content"].startswith(CONTEXT_CHECKPOINT_PREFIX)
     assert context.conversation_messages == audit_before
     assert context.context_generation == 1
+    checkpoint = context.messages[0]["content"]
+    deterministic = json.loads(
+        checkpoint.split("AUTHORITATIVE_RUNTIME_STATE:\n", 1)[1].split("\n\nSEMANTIC_HANDOFF:", 1)[
+            0
+        ]
+    )
+    assert deterministic["context_generation"] == context.context_generation
+    assert deterministic["history_recovery"]["current_window_id"] == (
+        context.history_window_id(context.context_generation)
+    )
+    assert deterministic["history_windows"] == context.history_windows()
     assert context.context_compactions == 1
     assert _tool_protocol_is_paired(context.messages)
     event = next(
@@ -445,6 +477,82 @@ def test_parallel_tool_round_is_retained_complete(tmp_path) -> None:
     assert '"id": "b"' in rendered and '"tool_use_id": "b"' in rendered
 
 
+def test_protocol_validator_accepts_parallel_tool_results() -> None:
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "a", "name": "grep", "input": {}},
+                {"type": "tool_use", "id": "b", "name": "grep", "input": {}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+                {"type": "tool_result", "tool_use_id": "b", "content": "two"},
+            ],
+        },
+    ]
+
+    assert ContextManager()._protocol_is_complete(messages) is True
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "a", "name": "grep", "input": {}},
+                    {"type": "tool_use", "id": "b", "name": "grep", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "a", "content": "one"}],
+            },
+        ],
+        [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "a", "name": "grep", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+                    {"type": "tool_result", "tool_use_id": "c", "content": "orphan"},
+                ],
+            },
+        ],
+        [
+            {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "a", "name": "grep", "input": {}}],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "a", "content": "one"},
+                    {"type": "tool_result", "tool_use_id": "a", "content": "duplicate"},
+                ],
+            },
+        ],
+        [
+            {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "a", "content": "orphan"}],
+            }
+        ],
+    ],
+    ids=("missing", "orphan", "duplicate", "standalone"),
+)
+def test_protocol_validator_rejects_invalid_tool_results(messages) -> None:
+    assert ContextManager()._protocol_is_complete(messages) is False
+
+
 def test_repeated_rebases_consolidate_one_previous_checkpoint(tmp_path) -> None:
     context, client = make_context(
         tmp_path,
@@ -620,6 +728,10 @@ def test_emergency_budget_and_history_ranges_are_frozen_before_tail_selection(
     )[0]
     deterministic = json.loads(deterministic_text)
     assert deterministic["history_recovery"]["removed_ranges"]
+    assert deterministic["context_generation"] == context.context_generation
+    assert deterministic["history_recovery"]["current_window_id"] == (
+        context.history_window_id(context.context_generation)
+    )
 
 
 def test_full_rebase_source_recovery_uses_read_file_and_history(tmp_path) -> None:

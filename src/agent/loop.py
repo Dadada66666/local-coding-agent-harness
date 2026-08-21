@@ -10,6 +10,7 @@ from agent.prompts import build_initial_messages, build_system_prompt
 from runtime.bootstrap import RuntimeBundle
 from runtime.call_budget import TaskCallBudget
 from runtime.config import RunConfig
+from runtime.context.projection import ToolResultAdmissionError
 from runtime.hooks import HookEvent
 from runtime.plan import (
     PLAN_APPROVAL_CHOICES,
@@ -353,19 +354,22 @@ class AgentLoop:
                 break
 
             context.mark_model_request_consumed(request_message_count)
-            context.add_assistant_message(response.message)
-            context.record_model_usage(
-                response.usage,
-                len(context.messages) - 1,
-                local_input_tokens=preparation.measurement.local_input_tokens,
-            )
-
             response_action = self._response_action(response)
-            if self._plan_response_protocol_violation(
+            plan_protocol_violation = self._plan_response_protocol_violation(
                 context,
                 response,
                 response_action=response_action,
-            ):
+            )
+            defer_tool_round = response_action == "tools" and not plan_protocol_violation
+            if not defer_tool_round:
+                context.add_assistant_message(response.message)
+                context.record_model_usage(
+                    response.usage,
+                    len(context.messages) - 1,
+                    local_input_tokens=preparation.measurement.local_input_tokens,
+                )
+
+            if plan_protocol_violation:
                 cancelled = [
                     self._cancelled_tool_result(
                         context,
@@ -532,10 +536,26 @@ class AgentLoop:
                     control_plane_boundary = True
 
             # CMV3-ADM-001: bound the completed batch before first provider visibility.
-            tool_results = self.runtime.context_manager.admit_tool_results(
-                context,
-                response.tool_calls,
-                tool_results,
+            try:
+                tool_results = self.runtime.context_manager.admit_tool_results(
+                    context,
+                    response.tool_calls,
+                    tool_results,
+                )
+            except ToolResultAdmissionError as exc:
+                self.abort(
+                    context,
+                    reason="tool_result_admission_failed",
+                    message=f"Stopped: {self._preview_error(str(exc))}.",
+                    exc=exc,
+                )
+                self._log_turn_end(context, turn_id, turn_started)
+                break
+            context.add_assistant_message(response.message)
+            context.record_model_usage(
+                response.usage,
+                len(context.messages) - 1,
+                local_input_tokens=preparation.measurement.local_input_tokens,
             )
             context.add_tool_results(tool_results)
             context.task_tool_rounds = getattr(context, "task_tool_rounds", 0) + 1

@@ -216,6 +216,24 @@ def test_parallel_tool_results_are_returned_in_one_user_message(tmp_path: Path) 
     assert context.task_model_calls == 2
 
 
+def test_unshapable_tool_result_batch_fails_before_round_visibility(tmp_path: Path) -> None:
+    model = FakeModelClient([tool_response(ToolCall("call_1", "missing_tool", {}))])
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("run tool", include_initial_message=True)
+    context.config.max_tool_round_tokens = 1
+    before_messages = list(context.messages)
+    before_audit = list(context.conversation_messages)
+
+    runner.run_until_idle(context)
+
+    assert context.finished is True
+    assert context.success is False
+    assert context.abort_reason == "tool_result_admission_failed"
+    assert context.messages == before_messages
+    assert context.conversation_messages == before_audit
+    assert context.context_generation == 0
+
+
 def test_model_call_limit_counts_final_and_tool_turns(tmp_path: Path) -> None:
     model = FakeModelClient(
         [

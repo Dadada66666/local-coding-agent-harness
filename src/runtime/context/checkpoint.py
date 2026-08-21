@@ -52,6 +52,8 @@ class RuntimeCheckpointBuilder:
         context,
         *,
         required_removed_history_ranges: list[dict[str, Any]] | None = None,
+        context_generation: int | None = None,
+        current_window_id: str | None = None,
         max_tokens: int | None = None,
     ) -> AuthoritativeState:
         limit = int(
@@ -59,11 +61,26 @@ class RuntimeCheckpointBuilder:
             if max_tokens is not None
             else context.config.deterministic_checkpoint_max_tokens
         )
-        core = self._core_state(context, required_removed_history_ranges or [])
+        generation = int(
+            context_generation
+            if context_generation is not None
+            else getattr(context, "context_generation", 0)
+        )
+        window_id = current_window_id or context.history_window_id(generation)
+        core = self._core_state(
+            context,
+            required_removed_history_ranges or [],
+            context_generation=generation,
+            current_window_id=window_id,
+        )
         manifests = {
             "artifact_references": self._artifact_references(context),
             "source_manifest": self._source_manifest(context),
-            "history_windows": self._history_windows(context),
+            "history_windows": self._history_windows(
+                context,
+                context_generation=generation,
+                current_window_id=window_id,
+            ),
         }
         payload = {**core, **manifests, "omitted_manifest_counts": {}}
         state = self._state(payload)
@@ -216,6 +233,9 @@ class RuntimeCheckpointBuilder:
         self,
         context,
         required_removed_history_ranges: list[dict[str, Any]],
+        *,
+        context_generation: int,
+        current_window_id: str,
     ) -> dict[str, Any]:
         task_status = getattr(getattr(context, "task_status", None), "value", None)
         plan_state = getattr(context, "plan_state", None)
@@ -262,9 +282,9 @@ class RuntimeCheckpointBuilder:
                 ),
             },
             "artifact_totals": artifact_snapshot() if callable(artifact_snapshot) else {},
-            "context_generation": int(getattr(context, "context_generation", 0)),
+            "context_generation": context_generation,
             "history_recovery": {
-                "current_window_id": context.history_window_id(context.context_generation),
+                "current_window_id": current_window_id,
                 "removed_ranges": required_removed_history_ranges,
             },
         }
@@ -282,9 +302,34 @@ class RuntimeCheckpointBuilder:
         values = manifest(limit=max(len(getattr(context, "read_file_segments", {})), 1))
         return values if isinstance(values, list) else []
 
-    def _history_windows(self, context) -> list[dict[str, Any]]:
+    def _history_windows(
+        self,
+        context,
+        *,
+        context_generation: int,
+        current_window_id: str,
+    ) -> list[dict[str, Any]]:
         windows = getattr(context, "history_windows", None)
-        return windows() if callable(windows) else []
+        values = windows() if callable(windows) else []
+        live_generation = int(getattr(context, "context_generation", 0))
+        if context_generation == live_generation:
+            return values
+        if context_generation != live_generation + 1:
+            raise ValueError("prospective checkpoint generation must be the next epoch")
+        audit_count = len(getattr(context, "conversation_messages", []))
+        prospective = [{**value, "current": False, "closed": True} for value in values]
+        prospective.append(
+            {
+                "window_id": current_window_id,
+                "generation": context_generation,
+                "start_ordinal": audit_count,
+                "end_ordinal": audit_count,
+                "item_count": 0,
+                "current": True,
+                "closed": False,
+            }
+        )
+        return prospective
 
     def _state(self, payload: dict[str, Any]) -> AuthoritativeState:
         serialized = json.dumps(

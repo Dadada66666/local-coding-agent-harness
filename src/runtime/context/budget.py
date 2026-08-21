@@ -86,14 +86,15 @@ def normalize_provider_context_anchor(
         int(appended_input_tokens),
         0,
     )
-    candidates = {
-        input_tokens + visible_growth,
-        input_tokens + cache_tokens + visible_growth,
+    base_candidates = {
+        input_tokens,
+        input_tokens + cache_tokens,
     }
-    return min(
-        candidates,
+    base = min(
+        base_candidates,
         key=lambda value: (abs(value - max(int(local_input_tokens), 0)), -value),
     )
+    return base + visible_growth
 
 
 def request_char_count(system: str, messages: list[dict], tools: list[dict]) -> int:
