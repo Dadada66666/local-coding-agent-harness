@@ -17,6 +17,18 @@ class ToolResultProjection:
     saved_tokens: int = 0
 
 
+class ToolResultAdmissionError(RuntimeError):
+    """The first-visibility ToolResult batch cannot satisfy its hard budget."""
+
+    def __init__(self, *, estimated_tokens: int, limit_tokens: int) -> None:
+        self.estimated_tokens = int(estimated_tokens)
+        self.limit_tokens = int(limit_tokens)
+        super().__init__(
+            "tool-result admission exceeds the hard round budget "
+            f"({self.estimated_tokens} > {self.limit_tokens} tokens)"
+        )
+
+
 class ToolResultProjector:
     """Bound new ToolResults before their first provider visibility."""
 
@@ -32,7 +44,7 @@ class ToolResultProjector:
         (CMV3-ADM-001..009).
         """
         limit = int(context.config.max_tool_round_tokens)
-        if limit <= 0 or not results or not hasattr(context, "artifacts"):
+        if not results:
             return list(results), ToolResultProjection()
 
         names = {
@@ -152,6 +164,7 @@ class ToolResultProjector:
             )
             saved_tokens += extra_savings
 
+        budget_satisfied = total <= limit
         if replacement_count:
             self.mark_projected_sources(context, projected_sources)
             event = {
@@ -159,12 +172,17 @@ class ToolResultProjector:
                 "replaced_results": replacement_count,
                 "saved_tokens": saved_tokens,
                 "round_limit_tokens": limit,
-                "budget_satisfied": total <= limit,
+                "budget_satisfied": budget_satisfied,
             }
             context.trace.log(event)
             tracker = getattr(context, "cost_tracker", None)
             if tracker is not None and hasattr(tracker, "record_context_event"):
                 tracker.record_context_event(event)
+        if not budget_satisfied:
+            raise ToolResultAdmissionError(
+                estimated_tokens=total,
+                limit_tokens=limit,
+            )
         shaped = [
             (
                 str(block.get("tool_use_id", "")),

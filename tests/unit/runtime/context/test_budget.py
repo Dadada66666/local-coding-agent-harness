@@ -148,6 +148,19 @@ def test_provider_anchor_adds_only_visible_tail_growth() -> None:
     )
 
 
+def test_provider_anchor_selects_cache_interpretation_before_visible_growth() -> None:
+    assert (
+        normalize_provider_context_anchor(
+            local_input_tokens=27_000,
+            input_tokens=20_000,
+            cache_read_input_tokens=10_000,
+            assistant_response_tokens=6_000,
+            appended_input_tokens=4_000,
+        )
+        == 40_000
+    )
+
+
 def test_known_smaller_window_limits_default_capacity() -> None:
     measurement = measure_context(
         system="system",
