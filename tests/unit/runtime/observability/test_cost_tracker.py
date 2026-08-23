@@ -5,7 +5,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from agent.messages import TokenUsage
+from runtime.context.budget import measure_context
 from runtime.observability.cost_tracker import CostTracker
+from runtime.observability.trace_logger import TraceLogger
 
 
 def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
@@ -57,10 +59,10 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
         ],
         response_message={"role": "assistant", "content": [{"type": "text", "text": "done"}]},
         usage=TokenUsage(
-            input_tokens=40,
+            input_tokens=80_000,
             output_tokens=20,
-            cache_creation_input_tokens=20,
-            cache_read_input_tokens=40,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=79_000,
         ),
         context_generation=3,
         plan_phase="executing",
@@ -72,29 +74,42 @@ def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
 
     assert path == Path("unused-run-dir") / "cost.json"
     assert data["calls"] == 1
-    assert data["input_tokens"] == 40
-    assert data["logical_input_tokens"] == 100
-    assert data["cache_creation_input_tokens"] == 20
-    assert data["cache_read_input_tokens"] == 40
+    assert data["input_tokens"] == 80_000
+    assert data["cache_creation_input_tokens"] == 0
+    assert data["cache_read_input_tokens"] == 79_000
     assert data["output_tokens"] == 20
-    assert data["total_tokens"] == 60
-    assert data["logical_total_tokens"] == 120
+    assert data["total_tokens"] == 80_020
+    assert "logical_input_tokens" not in data
+    assert "logical_total_tokens" not in data
     assert turn["turn_id"] == 1
     assert turn["input_breakdown"]["system_prompt"]["estimated_tokens"] > 0
     assert turn["input_breakdown"]["tool_schemas"]["estimated_tokens"] > 0
     assert turn["input_breakdown"]["assistant_tool_calls"]["estimated_tokens"] > 0
     assert turn["input_breakdown"]["tool_results"]["estimated_tokens"] > 0
     assert turn["output_breakdown"]["assistant_text"]["estimated_tokens"] > 0
-    assert turn["logical_input_tokens"] == 100
-    assert turn["total_tokens"] == 60
-    assert turn["logical_total_tokens"] == 120
+    assert turn["total_tokens"] == 80_020
+    assert "logical_input_tokens" not in turn
+    assert "logical_total_tokens" not in turn
     assert turn["request_prefix"]["previous_messages_preserved"] is None
     assert turn["request_prefix"]["context_generation"] == 3
     assert turn["request_prefix"]["plan_phase"] == "executing"
     assert len(turn["request_prefix"]["system_hash"]) == 64
     assert len(turn["request_prefix"]["tools_hash"]) == 64
-    assert _allocated_total(turn["input_breakdown"]) == 100
+    assert all(
+        set(item) == {"chars", "estimated_tokens", "estimated_share"}
+        for item in turn["input_breakdown"].values()
+    )
+    assert 0.999 <= _share_total(turn["input_breakdown"], "estimated_share") <= 1.001
+    assert set(turn["top_input_categories"][0]) == {
+        "category",
+        "estimated_tokens",
+        "estimated_share",
+    }
     assert _allocated_total(turn["output_breakdown"]) == 20
+    assert all(
+        "allocated_tokens" not in item
+        for item in data["token_breakdown"]["aggregate"]["input"].values()
+    )
 
 
 def test_request_prefix_detects_append_only_and_rewritten_history() -> None:
@@ -134,6 +149,80 @@ def test_request_prefix_detects_append_only_and_rewritten_history() -> None:
         tracker.turns[0]["request_prefix"],
         ensure_ascii=False,
     )
+
+
+def test_cost_tracker_preserves_no_cache_usage_without_derived_total() -> None:
+    tracker = CostTracker(Path("unused-run-dir"))
+
+    tracker.record_model_call(
+        turn_id=1,
+        system="system",
+        messages=[],
+        tools=[],
+        response_message={"role": "assistant", "content": "done"},
+        usage=TokenUsage(input_tokens=123, output_tokens=7),
+    )
+
+    turn = tracker.turns[0]
+    assert turn["input_tokens"] == 123
+    assert turn["cache_creation_input_tokens"] == 0
+    assert turn["cache_read_input_tokens"] == 0
+    assert turn["output_tokens"] == 7
+    assert "logical_input_tokens" not in turn
+    assert "logical_total_tokens" not in turn
+
+
+def test_trace_preserves_raw_usage_without_logical_total(tmp_path: Path) -> None:
+    trace = TraceLogger(tmp_path, "run-1")
+
+    trace.log_model_usage(
+        TokenUsage(
+            input_tokens=80_000,
+            output_tokens=17,
+            cache_creation_input_tokens=3,
+            cache_read_input_tokens=79_000,
+            cache_deleted_input_tokens=5,
+        ),
+        turn_id=4,
+    )
+
+    event = json.loads(trace.path.read_text(encoding="utf-8"))
+    assert event["input_tokens"] == 80_000
+    assert event["cache_creation_input_tokens"] == 3
+    assert event["cache_read_input_tokens"] == 79_000
+    assert event["cache_deleted_input_tokens"] == 5
+    assert event["output_tokens"] == 17
+    assert "logical_input_tokens" not in event
+
+
+def test_cost_recording_does_not_change_context_pressure() -> None:
+    kwargs = {
+        "system": "system",
+        "messages": [{"role": "user", "content": "inspect"}],
+        "tools": [{"name": "read_file"}],
+        "context_window_tokens": 272_000,
+        "max_output_tokens": 16_000,
+        "safety_margin_tokens": 4_096,
+        "auto_compact_ratio": 0.90,
+    }
+    before = measure_context(**kwargs)
+    tracker = CostTracker(Path("unused-run-dir"))
+
+    tracker.record_model_call(
+        turn_id=1,
+        system=kwargs["system"],
+        messages=kwargs["messages"],
+        tools=kwargs["tools"],
+        response_message={"role": "assistant", "content": "done"},
+        usage=TokenUsage(
+            input_tokens=80_000,
+            cache_read_input_tokens=79_000,
+            output_tokens=5,
+        ),
+    )
+    after = measure_context(**kwargs)
+
+    assert after == before
 
 
 def test_request_prefix_hashes_identify_static_prefix_changes() -> None:
@@ -222,3 +311,7 @@ def test_cost_tracker_writes_context_and_artifact_summaries(monkeypatch) -> None
 
 def _allocated_total(breakdown: dict) -> int:
     return sum(item["allocated_tokens"] for item in breakdown.values())
+
+
+def _share_total(breakdown: dict, field: str) -> float:
+    return sum(item[field] for item in breakdown.values())

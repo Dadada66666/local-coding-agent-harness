@@ -81,7 +81,8 @@ class ReportWriter:
             *self._diff_summary(context),
             "",
             *self._completed_tasks_section(context),
-            "## Summary",
+            "## Model-authored Summary",
+            "Verification authority: see the structured `Test Result` section above.",
             self._final_summary(context),
             "",
             "## Artifacts",
@@ -287,7 +288,8 @@ class ReportWriter:
         return (
             f"calls={values['calls']}, "
             f"input_tokens={values['input_tokens']}, "
-            f"logical_input_tokens={values['logical_input_tokens']}, "
+            "cache_creation_input_tokens="
+            f"{values['cache_creation_input_tokens']}, "
             f"cache_read_input_tokens={values['cache_read_input_tokens']}, "
             f"output_tokens={values['output_tokens']}"
         )

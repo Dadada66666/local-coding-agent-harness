@@ -159,7 +159,11 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         )
         return None
 
-    if (is_test_command or is_verification_command) and _is_discovery_command(command):
+    if (
+        (is_test_command or is_verification_command)
+        and _is_discovery_command(command)
+        and not (is_verification_command and _is_git_diff_check(command))
+    ):
         _record_verification_ignored(
             tool_call,
             result,
@@ -280,10 +284,7 @@ def _is_test_command(command: str) -> bool:
 
 
 def _is_discovery_command(command: str) -> bool:
-    stripped = command.strip().lower()
-    leading, separator, remainder = stripped.partition("&&")
-    if separator and leading.strip().startswith("cd "):
-        stripped = remainder.strip()
+    stripped = _normalize_single_cd_wrapper(command)
     discovery_prefixes = (
         "command -v ",
         "find ",
@@ -299,6 +300,24 @@ def _is_discovery_command(command: str) -> bool:
         "which ",
     )
     return any(stripped == prefix.strip() or stripped.startswith(prefix) for prefix in discovery_prefixes)
+
+
+def _normalize_single_cd_wrapper(command: str) -> str:
+    stripped = command.strip().lower()
+    leading, separator, remainder = stripped.partition("&&")
+    if separator and leading.strip().startswith("cd "):
+        return remainder.strip()
+    return stripped
+
+
+def _is_git_diff_check(command: str) -> bool:
+    normalized = _normalize_single_cd_wrapper(command)
+    tokens = normalized.split()
+    if len(tokens) < 3 or tokens[:2] != ["git", "diff"]:
+        return False
+    if any(operator in tokens for operator in ("&&", "||", "|", ";")):
+        return False
+    return "--check" in tokens
 
 
 def _is_verification_command(tool_call, result) -> bool:

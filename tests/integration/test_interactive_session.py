@@ -163,5 +163,9 @@ def test_report_keeps_tool_failures(tmp_path: Path) -> None:
     report = context.report_writer.write(context).read_text(encoding="utf-8")
 
     assert "## Tool Failures\n- turn 3 bash: command exited 22" in report
-    assert "## Summary\ndone" in report
-    assert "## Summary\n## Summary" not in report
+    assert (
+        "## Model-authored Summary\n"
+        "Verification authority: see the structured `Test Result` section above.\n"
+        "done\n\n## Artifacts"
+    ) in report
+    assert "## Summary\ndone" not in report
