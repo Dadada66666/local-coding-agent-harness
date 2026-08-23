@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -187,6 +188,37 @@ def test_stop_report_writes_standard_run_artifacts(tmp_path) -> None:
         "cost.json",
     ):
         assert (context.run_dir / artifact_name).is_file()
+
+    cost = json.loads((context.run_dir / "cost.json").read_text(encoding="utf-8"))
+    assert "logical_input_tokens" not in cost
+    assert "logical_total_tokens" not in cost
+
+
+def test_report_keeps_structured_verification_authoritative(tmp_path) -> None:
+    context = create_agent_session(
+        repo_path=tmp_path,
+        task="verify the project",
+        permission_mode="accept_edits",
+        config=RunConfig(permission_mode="accept_edits"),
+        initial_messages=[{"role": "user", "content": "verify the project"}],
+        system_prompt="system prompt",
+        include_initial_message=True,
+    )
+    context.success = False
+    context.final_text = "Whitespace verification passed."
+    context.task_test_result = {
+        "command": "git diff --check",
+        "ok": False,
+        "error": "command exited 2",
+        "verification_level": "static",
+    }
+
+    report = context.report_writer.write(context).read_text(encoding="utf-8")
+
+    assert "## Test Result\nCommand: git diff --check\nResult: failed" in report
+    assert "## Model-authored Summary" in report
+    assert "Verification authority: see the structured `Test Result` section above." in report
+    assert "Whitespace verification passed." in report
 
 
 def test_terminal_tool_error_does_not_cache_denied_scope() -> None:

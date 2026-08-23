@@ -217,7 +217,7 @@ class AgentLoop:
                     if callable(pending_continuation)
                     else False
                 ),
-                call_budget=call_budget,
+                task_test_result=getattr(context, "task_test_result", None),
             )
             tool_schemas = self._tool_schemas(context)
             max_output_tokens = int(

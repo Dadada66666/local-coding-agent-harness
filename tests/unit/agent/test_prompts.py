@@ -54,18 +54,64 @@ def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
     assert "calls remain" not in prompt.lower()
 
 
-def test_global_call_limit_hint_appears_only_near_hard_limit(tmp_path) -> None:
-    normal = build_system_prompt(
+def test_executing_prompt_has_no_dynamic_call_budget_warning(tmp_path) -> None:
+    six_remaining = TaskCallBudget.from_limits(max_calls=40, used_calls=34)
+    five_remaining = TaskCallBudget.from_limits(max_calls=40, used_calls=35)
+    first = build_system_prompt(tmp_path, plan_state(PlanPhase.EXECUTING))
+    second = build_system_prompt(tmp_path, plan_state(PlanPhase.EXECUTING))
+
+    assert six_remaining.approaching_limit is False
+    assert five_remaining.approaching_limit is True
+    assert first == second
+    assert "approaching its global model-call limit" not in first
+
+
+def test_completed_prompt_exposes_failed_verification_fact(tmp_path) -> None:
+    prompt = build_system_prompt(
         tmp_path,
-        call_budget=TaskCallBudget.from_limits(max_calls=40, used_calls=34),
-    )
-    near_limit = build_system_prompt(
-        tmp_path,
-        call_budget=TaskCallBudget.from_limits(max_calls=40, used_calls=35),
+        plan_state(PlanPhase.COMPLETED),
+        task_test_result={
+            "ok": False,
+            "verification_level": "static",
+            "command": "git diff --check",
+            "error": "command exited 2\nsecond line",
+        },
     )
 
-    assert "approaching its global model-call limit" not in normal
-    assert "approaching its global model-call limit" in near_limit
+    assert 'status: "failed"' in prompt
+    assert 'level: "static"' in prompt
+    assert 'command: "git diff --check"' in prompt
+    assert 'error: "command exited 2\\nsecond line"' in prompt
+    assert "Do not report failed or unavailable verification as passed" in prompt
+
+
+def test_completed_prompt_exposes_passed_verification_fact(tmp_path) -> None:
+    prompt = build_system_prompt(
+        tmp_path,
+        plan_state(PlanPhase.COMPLETED),
+        task_test_result={
+            "ok": True,
+            "verification_level": "test_suite",
+            "command": "pytest",
+        },
+    )
+
+    assert 'status: "passed"' in prompt
+    assert 'level: "test_suite"' in prompt
+    assert 'command: "pytest"' in prompt
+
+
+def test_completed_prompt_marks_missing_verification_unavailable(tmp_path) -> None:
+    prompt = build_system_prompt(
+        tmp_path,
+        plan_state(PlanPhase.COMPLETED),
+        task_test_result=None,
+    )
+
+    assert 'status: "unavailable"' in prompt
+    assert 'level: "unavailable"' in prompt
+    assert 'command: "unavailable"' in prompt
+    assert 'status: "passed"' not in prompt
 
 
 def test_base_prompt_does_not_assume_git_workspace(tmp_path) -> None:

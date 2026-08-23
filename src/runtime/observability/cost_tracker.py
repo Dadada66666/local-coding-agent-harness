@@ -22,7 +22,6 @@ OUTPUT_CATEGORIES = ("assistant_text", "tool_calls", "other")
 USAGE_FIELDS = (
     "calls",
     "input_tokens",
-    "logical_input_tokens",
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
     "cache_deleted_input_tokens",
@@ -30,9 +29,21 @@ USAGE_FIELDS = (
 )
 
 
-def _empty_bucket(categories: tuple[str, ...]) -> dict[str, dict[str, int]]:
+def _empty_bucket(
+    categories: tuple[str, ...], *, provider_allocated: bool = False
+) -> dict[str, dict[str, int | float]]:
+    if provider_allocated:
+        return {
+            category: {
+                "chars": 0,
+                "estimated_tokens": 0,
+                "allocated_tokens": 0,
+                "share": 0,
+            }
+            for category in categories
+        }
     return {
-        category: {"chars": 0, "estimated_tokens": 0, "allocated_tokens": 0, "share": 0}
+        category: {"chars": 0, "estimated_tokens": 0, "estimated_share": 0}
         for category in categories
     }
 
@@ -49,13 +60,13 @@ def _fingerprint(value: Any) -> str:
     return hashlib.sha256(_render(value).encode("utf-8")).hexdigest()
 
 
-def _add_text(bucket: dict[str, dict[str, int]], category: str, value: Any) -> None:
+def _add_text(bucket: dict[str, dict[str, int | float]], category: str, value: Any) -> None:
     text = _render(value)
     bucket[category]["chars"] += len(text)
     bucket[category]["estimated_tokens"] += _estimate_tokens(text)
 
 
-def _allocate_actual_tokens(bucket: dict[str, dict[str, int]], actual_tokens: int) -> None:
+def _allocate_actual_tokens(bucket: dict[str, dict[str, int | float]], actual_tokens: int) -> None:
     total_estimated = sum(item["estimated_tokens"] for item in bucket.values())
     remaining = max(actual_tokens, 0)
     categories = list(bucket)
@@ -75,12 +86,22 @@ def _allocate_actual_tokens(bucket: dict[str, dict[str, int]], actual_tokens: in
         remaining -= allocated
 
 
-def _merge_buckets(target: dict[str, dict[str, int]], source: dict[str, dict[str, int]]) -> None:
+def _set_estimated_shares(bucket: dict[str, dict[str, int | float]]) -> None:
+    total_estimated = sum(int(item["estimated_tokens"]) for item in bucket.values())
+    for item in bucket.values():
+        estimated = int(item["estimated_tokens"])
+        item["estimated_share"] = round(estimated / total_estimated, 4) if total_estimated else 0
+
+
+def _merge_buckets(
+    target: dict[str, dict[str, int | float]],
+    source: dict[str, dict[str, int | float]],
+) -> None:
     for category, item in source.items():
-        target.setdefault(category, {"chars": 0, "estimated_tokens": 0, "allocated_tokens": 0})
-        target[category]["chars"] += item.get("chars", 0)
-        target[category]["estimated_tokens"] += item.get("estimated_tokens", 0)
-        target[category]["allocated_tokens"] += item.get("allocated_tokens", 0)
+        target.setdefault(category, {})
+        for field in ("chars", "estimated_tokens", "allocated_tokens"):
+            if field in item:
+                target[category][field] = int(target[category].get(field, 0)) + int(item[field])
 
 
 class CostTracker:
@@ -92,7 +113,6 @@ class CostTracker:
         self.cache_creation_input_tokens = 0
         self.cache_read_input_tokens = 0
         self.cache_deleted_input_tokens = 0
-        self.logical_input_tokens = 0
         self.compaction_calls = 0
         self.compaction_usage = {field: 0 for field in USAGE_FIELDS if field != "calls"}
         self.turns: list[dict[str, Any]] = []
@@ -114,7 +134,6 @@ class CostTracker:
         self.cache_creation_input_tokens += cache_creation
         self.cache_read_input_tokens += cache_read
         self.cache_deleted_input_tokens += cache_deleted
-        self.logical_input_tokens += input_tokens + cache_creation + cache_read
 
     def record_model_call(
         self,
@@ -136,7 +155,6 @@ class CostTracker:
         cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
         cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
         cache_deleted = getattr(usage, "cache_deleted_input_tokens", 0) or 0
-        logical_input_tokens = input_tokens + cache_creation + cache_read
         input_breakdown = self._input_breakdown(system, messages, tools)
         output_breakdown = self._output_breakdown(response_message)
         request_prefix = self._request_prefix(
@@ -147,7 +165,7 @@ class CostTracker:
             plan_phase=plan_phase,
         )
 
-        _allocate_actual_tokens(input_breakdown, logical_input_tokens)
+        _set_estimated_shares(input_breakdown)
         _allocate_actual_tokens(output_breakdown, output_tokens)
 
         self.calls += 1
@@ -156,23 +174,28 @@ class CostTracker:
         self.cache_creation_input_tokens += cache_creation
         self.cache_read_input_tokens += cache_read
         self.cache_deleted_input_tokens += cache_deleted
-        self.logical_input_tokens += logical_input_tokens
         self.turns.append(
             {
                 "turn_id": turn_id,
                 "input_tokens": input_tokens,
-                "logical_input_tokens": logical_input_tokens,
                 "cache_creation_input_tokens": cache_creation,
                 "cache_read_input_tokens": cache_read,
                 "cache_deleted_input_tokens": cache_deleted,
                 "output_tokens": output_tokens,
                 "total_tokens": input_tokens + output_tokens,
-                "logical_total_tokens": logical_input_tokens + output_tokens,
                 "request_prefix": request_prefix,
                 "input_breakdown": input_breakdown,
                 "output_breakdown": output_breakdown,
-                "top_input_categories": self._top_categories(input_breakdown),
-                "top_output_categories": self._top_categories(output_breakdown),
+                "top_input_categories": self._top_categories(
+                    input_breakdown,
+                    token_field="estimated_tokens",
+                    share_field="estimated_share",
+                ),
+                "top_output_categories": self._top_categories(
+                    output_breakdown,
+                    token_field="allocated_tokens",
+                    share_field="share",
+                ),
             }
         )
 
@@ -186,7 +209,6 @@ class CostTracker:
         cache_deleted = int(getattr(usage, "cache_deleted_input_tokens", 0) or 0)
         self.compaction_calls += 1
         self.compaction_usage["input_tokens"] += input_tokens
-        self.compaction_usage["logical_input_tokens"] += input_tokens + cache_creation + cache_read
         self.compaction_usage["cache_creation_input_tokens"] += cache_creation
         self.compaction_usage["cache_read_input_tokens"] += cache_read
         self.compaction_usage["cache_deleted_input_tokens"] += cache_deleted
@@ -240,13 +262,11 @@ class CostTracker:
                 {
                     "calls": self.calls,
                     "input_tokens": self.input_tokens,
-                    "logical_input_tokens": self.logical_input_tokens,
                     "cache_creation_input_tokens": self.cache_creation_input_tokens,
                     "cache_read_input_tokens": self.cache_read_input_tokens,
                     "cache_deleted_input_tokens": self.cache_deleted_input_tokens,
                     "output_tokens": self.output_tokens,
                     "total_tokens": self.input_tokens + self.output_tokens,
-                    "logical_total_tokens": self.logical_input_tokens + self.output_tokens,
                     "estimated_cost_usd": None,
                     "context_compaction_provider_usage": {
                         "calls": self.compaction_calls,
@@ -266,10 +286,9 @@ class CostTracker:
                     "source_read_efficiency": self._source_efficiency(context),
                     "token_breakdown": {
                         "note": (
-                            "Breakdowns are local estimates for optimization. "
-                            "Provider usage fields remain the billing source of truth. "
-                            "logical_input_tokens includes cache creation and cache reads; "
-                            "logical_total_tokens adds model output to that logical input."
+                            "Input breakdowns are local estimates only; Provider usage fields "
+                            "remain separate raw diagnostics. Output allocation uses the raw "
+                            "Provider output total."
                         ),
                         "aggregate": self._aggregate_breakdown(),
                         "turns": self.turns,
@@ -287,7 +306,7 @@ class CostTracker:
         system: str,
         messages: list[dict],
         tools: list[dict],
-    ) -> dict[str, dict[str, int]]:
+    ) -> dict[str, dict[str, int | float]]:
         bucket = _empty_bucket(INPUT_CATEGORIES)
         _add_text(bucket, "system_prompt", system)
         _add_text(bucket, "tool_schemas", tools)
@@ -304,7 +323,7 @@ class CostTracker:
 
         return bucket
 
-    def _add_user_content(self, bucket: dict[str, dict[str, int]], content: Any) -> None:
+    def _add_user_content(self, bucket: dict[str, dict[str, int | float]], content: Any) -> None:
         if isinstance(content, str):
             compacted_prefixes = ("[Context checkpoint v3]",)
             category = (
@@ -323,7 +342,9 @@ class CostTracker:
 
         _add_text(bucket, "user_messages", content)
 
-    def _add_assistant_content(self, bucket: dict[str, dict[str, int]], content: Any) -> None:
+    def _add_assistant_content(
+        self, bucket: dict[str, dict[str, int | float]], content: Any
+    ) -> None:
         if isinstance(content, str):
             _add_text(bucket, "assistant_messages", content)
             return
@@ -342,8 +363,8 @@ class CostTracker:
 
         _add_text(bucket, "assistant_messages", content)
 
-    def _output_breakdown(self, response_message: dict) -> dict[str, dict[str, int]]:
-        bucket = _empty_bucket(OUTPUT_CATEGORIES)
+    def _output_breakdown(self, response_message: dict) -> dict[str, dict[str, int | float]]:
+        bucket = _empty_bucket(OUTPUT_CATEGORIES, provider_allocated=True)
         content = response_message.get("content")
 
         if isinstance(content, str):
@@ -365,39 +386,46 @@ class CostTracker:
         _add_text(bucket, "other", response_message)
         return bucket
 
-    def _aggregate_breakdown(self) -> dict[str, dict[str, dict[str, int]]]:
+    def _aggregate_breakdown(self) -> dict[str, dict[str, dict[str, int | float]]]:
         input_totals = _empty_bucket(INPUT_CATEGORIES)
-        output_totals = _empty_bucket(OUTPUT_CATEGORIES)
+        output_totals = _empty_bucket(OUTPUT_CATEGORIES, provider_allocated=True)
 
         for turn in self.turns:
             _merge_buckets(input_totals, turn["input_breakdown"])
             _merge_buckets(output_totals, turn["output_breakdown"])
 
-        self._add_aggregate_shares(input_totals, self.logical_input_tokens)
+        _set_estimated_shares(input_totals)
         self._add_aggregate_shares(output_totals, self.output_tokens)
         return {"input": input_totals, "output": output_totals}
 
-    def _add_aggregate_shares(self, bucket: dict[str, dict[str, int]], total_tokens: int) -> None:
+    def _add_aggregate_shares(
+        self, bucket: dict[str, dict[str, int | float]], total_tokens: int
+    ) -> None:
         for item in bucket.values():
             allocated = item.get("allocated_tokens", 0)
             item["share"] = round(allocated / total_tokens, 4) if total_tokens else 0
 
     def _top_categories(
-        self, bucket: dict[str, dict[str, int]], limit: int = 3
+        self,
+        bucket: dict[str, dict[str, int | float]],
+        *,
+        token_field: str,
+        share_field: str,
+        limit: int = 3,
     ) -> list[dict[str, Any]]:
         ranked = sorted(
             (
                 {
                     "category": category,
-                    "allocated_tokens": item.get("allocated_tokens", 0),
-                    "share": item.get("share", 0),
+                    token_field: item.get(token_field, 0),
+                    share_field: item.get(share_field, 0),
                 }
                 for category, item in bucket.items()
             ),
-            key=lambda item: item["allocated_tokens"],
+            key=lambda item: item[token_field],
             reverse=True,
         )
-        return [item for item in ranked[:limit] if item["allocated_tokens"] > 0]
+        return [item for item in ranked[:limit] if item[token_field] > 0]
 
     def _current_task_cost(self, context) -> dict[str, Any] | None:
         if context is None:
@@ -448,5 +476,4 @@ class CostTracker:
         return {
             **values,
             "total_tokens": values["input_tokens"] + values["output_tokens"],
-            "logical_total_tokens": (values["logical_input_tokens"] + values["output_tokens"]),
         }

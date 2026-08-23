@@ -120,7 +120,7 @@ def test_model_client_preserves_provider_stop_reason() -> None:
     assert response.stop_reason == "end_turn"
 
 
-def test_model_client_preserves_cache_usage_fields() -> None:
+def test_model_client_preserves_raw_cache_usage_fields_without_logical_aliases() -> None:
     provider_response = SimpleNamespace(
         content=[{"type": "text", "text": "done"}],
         usage=SimpleNamespace(
@@ -141,9 +141,40 @@ def test_model_client_preserves_cache_usage_fields() -> None:
 
     response = client.call(system="system", messages=[], tools=[])
 
-    assert response.usage.logical_input_tokens == 60
-    assert response.usage.context_tokens == 62
+    assert response.usage.input_tokens == 10
+    assert response.usage.cache_creation_input_tokens == 20
+    assert response.usage.cache_read_input_tokens == 30
     assert response.usage.cache_deleted_input_tokens == 4
+    assert not hasattr(response.usage, "logical_input_tokens")
+    assert not hasattr(response.usage, "context_tokens")
+
+
+def test_loop_passes_current_verification_fact_to_prompt_builder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import agent.loop as loop_module
+
+    observed: list[dict | None] = []
+    original = loop_module.build_system_prompt
+
+    def capture_prompt(*args, **kwargs):
+        observed.append(kwargs.get("task_test_result"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "build_system_prompt", capture_prompt)
+    model = FakeModelClient([final_response("done")])
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("answer", include_initial_message=True)
+    verification = {
+        "ok": False,
+        "verification_level": "static",
+        "command": "git diff --check",
+    }
+    context.task_test_result = verification
+
+    runner.run_until_idle(context)
+
+    assert verification in observed
 
 
 def test_model_client_classifies_context_overflow_errors() -> None:

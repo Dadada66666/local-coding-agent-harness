@@ -118,7 +118,7 @@ def test_which_test_binary_is_discovery_even_without_verify_purpose() -> None:
     assert result.metadata["verification_ignored"] is True
 
 
-def test_cd_wrapped_git_diff_is_discovery() -> None:
+def test_cd_wrapped_git_diff_check_is_static_verification() -> None:
     context, result = run_test_result_hook(
         arguments={
             "command": "cd project && git diff --check",
@@ -126,6 +126,34 @@ def test_cd_wrapped_git_diff_is_discovery() -> None:
         },
         metadata={"purpose": "verify"},
         ok=False,
+    )
+
+    assert context.task_test_result["ok"] is False
+    assert context.task_test_result["command"] == "cd project && git diff --check"
+    assert context.task_test_result["verification_level"] == "static"
+    assert result.metadata["verification_command"] is True
+
+
+def test_git_diff_no_index_check_is_static_verification() -> None:
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "git diff --no-index --check before after",
+            "purpose": "verify",
+        },
+        metadata={"purpose": "verify"},
+        ok=False,
+    )
+
+    assert context.task_test_result["ok"] is False
+    assert context.task_test_result["verification_level"] == "static"
+    assert result.metadata["verification_command"] is True
+
+
+def test_plain_git_diff_remains_discovery() -> None:
+    context, result = run_test_result_hook(
+        arguments={"command": "git diff -- app.py", "purpose": "verify"},
+        metadata={"purpose": "verify"},
+        ok=True,
     )
 
     assert context.last_test_result is None

@@ -54,7 +54,6 @@ class TraceLogger:
             "cache_deleted_input_tokens": getattr(
                 usage, "cache_deleted_input_tokens", None
             ),
-            "logical_input_tokens": getattr(usage, "logical_input_tokens", None),
         }
         if turn_id is not None:
             event["turn_id"] = turn_id

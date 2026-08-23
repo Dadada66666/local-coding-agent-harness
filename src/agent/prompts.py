@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import platform
 from pathlib import Path
 
@@ -50,7 +51,7 @@ def build_system_prompt(
     plan_state=None,
     *,
     has_user_continuation: bool = False,
-    call_budget=None,
+    task_test_result: dict | None = None,
 ) -> str:
     base = BASE_SYSTEM_PROMPT.format(
         workdir=workdir.resolve(),
@@ -64,12 +65,31 @@ def build_system_prompt(
     sections = [base.rstrip()]
     if plan_instructions:
         sections.append(plan_instructions)
-    if call_budget is not None and call_budget.approaching_limit:
-        sections.append(
-            "The task is approaching its global model-call limit; prioritize completing "
-            "the requested work."
-        )
+    if getattr(plan_state, "phase", None) is PlanPhase.COMPLETED:
+        sections.append(_authoritative_verification_prompt(task_test_result))
     return "\n\n".join(sections) + "\n"
+
+
+def _authoritative_verification_prompt(task_test_result: dict | None) -> str:
+    result = task_test_result or {}
+    ok = result.get("ok") if task_test_result is not None else None
+    status = "passed" if ok is True else "failed" if ok is False else "unavailable"
+    values = {
+        "status": status,
+        "level": result.get("verification_level") or "unavailable",
+        "command": result.get("command") or "unavailable",
+    }
+    if result.get("error"):
+        values["error"] = result["error"]
+
+    facts = "\n".join(
+        f"{key}: {json.dumps(str(value), ensure_ascii=False)}" for key, value in values.items()
+    )
+    return (
+        f"Authoritative verification:\n{facts}\n"
+        "Only this Runtime fact is authoritative for the current task verification status. "
+        "Do not report failed or unavailable verification as passed."
+    )
 
 
 def build_plan_instructions(
