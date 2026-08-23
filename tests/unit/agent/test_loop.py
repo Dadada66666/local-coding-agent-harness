@@ -11,6 +11,9 @@ from agent.loop import AgentLoop
 from agent.messages import ModelResponse, TokenUsage, ToolCall
 from agent.model_client import ModelClient, ModelContextOverflowError
 from runtime.bootstrap import build_runtime
+from runtime.mcp import MCPStartupError
+from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy
+from runtime.plan.capabilities import plan_capabilities
 
 
 class FakeModelClient:
@@ -415,3 +418,103 @@ def _has_trace_type(path: Path, event_type: str) -> bool:
         json.loads(line).get("type") == event_type
         for line in path.read_text(encoding="utf-8").splitlines()
     )
+
+
+def test_mcp_starts_only_after_agent_context_exists(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response()])
+    runner = make_runner(tmp_path, model)
+
+    class ContextCheckingRuntime:
+        def __init__(self) -> None:
+            self.started = False
+
+        def start(self, context, registry) -> None:
+            assert context.repo_path == tmp_path.resolve()
+            assert context.trace.path.parent == context.run_dir
+            assert registry is runner.runtime.tool_registry
+            self.started = True
+
+        def close(self, context) -> None:
+            return None
+
+    mcp_runtime = ContextCheckingRuntime()
+    runner.runtime.mcp_runtime = mcp_runtime
+
+    runner.create_context("inspect", include_initial_message=True)
+
+    assert mcp_runtime.started is True
+    assert model.calls == 0
+
+
+def test_failed_mcp_startup_prevents_first_provider_call(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response()])
+    runner = make_runner(tmp_path, model)
+
+    class FailingRuntime:
+        def start(self, context, registry) -> None:
+            assert context.trace.path.exists()
+            raise MCPStartupError("startup failed")
+
+        def close(self, context) -> None:
+            raise AssertionError("failed create_context is already cleaned by MCPRuntime.start")
+
+    runner.runtime.mcp_runtime = FailingRuntime()
+
+    with pytest.raises(MCPStartupError):
+        runner.run("inspect")
+
+    assert model.calls == 0
+
+
+def test_mcp_closes_before_stop_hook(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response()])
+    runner = make_runner(tmp_path, model)
+    context = runner.create_context("inspect", include_initial_message=True)
+
+    class ClosingRuntime:
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        def close(self, context) -> None:
+            self.close_count += 1
+            context.trace.log({"type": "mcp_runtime_closed"})
+
+    mcp_runtime = ClosingRuntime()
+    runner.runtime.mcp_runtime = mcp_runtime
+    runner.finish(context)
+    runner.finish(context)
+
+    event_types = [
+        json.loads(line)["type"]
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert event_types.index("mcp_runtime_closed") < event_types.index("stop")
+    assert mcp_runtime.close_count == 1
+
+
+@pytest.mark.parametrize(
+    ("policy", "execution_path", "phase", "visible"),
+    [
+        (PlanPolicy.OFF, ExecutionPath.UNDECIDED, PlanPhase.INACTIVE, True),
+        (PlanPolicy.AUTO, ExecutionPath.DIRECT, PlanPhase.INACTIVE, True),
+        (PlanPolicy.AUTO, ExecutionPath.UNDECIDED, PlanPhase.INACTIVE, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.PLANNING, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.AWAITING_APPROVAL, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.EXECUTING, True),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.COMPLETED, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.CANCELLED, False),
+    ],
+)
+def test_existing_plan_capabilities_govern_mcp_visibility(
+    policy,
+    execution_path,
+    phase,
+    visible,
+) -> None:
+    state = SimpleNamespace(
+        policy=policy,
+        execution_path=execution_path,
+        phase=phase,
+    )
+
+    assert plan_capabilities(state).tool_is_visible("mcp__demo__echo") is visible

@@ -15,7 +15,7 @@ Local Coding Agent Harness 是一个本地 Coding Agent Runtime。它让模型�
 
 ## 当前范围
 
-本项目聚焦单个本地 agent loop。不包含 sub-agent、MCP、后台任务、插件发现、worktree 隔离或 LangGraph adapter。
+本项目聚焦单个本地 agent loop。它包含一个可选 MCP Client，但不包含 sub-agent、MCP Server 托管、后台任务、插件发现、worktree 隔离或 LangGraph adapter。
 
 核心目录：
 
@@ -96,6 +96,35 @@ agent replay <run_id>
 - `read_only`：只允许读取和搜索；写入会被 gate。
 - `accept_edits`：允许普通文件编辑和安全命令；风险命令仍会被 gate。
 - `manual_approval`：编辑和命令执行前都询问用户。
+
+## MCP Client
+
+只有宿主显式传入配置路径时才启用 MCP：
+
+```bash
+agent --mcp-config /absolute/path/to/mcp.json
+agent run "使用已配置的服务" --mcp-config /absolute/path/to/mcp.json
+```
+
+严格的 v1 配置支持 stdio 与裸 Streamable HTTP：
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/server.py"]
+    },
+    "remote": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}
+```
+
+Runtime 不会自动发现仓库内的 MCP 配置。v1 不支持 stdio 环境变量注入、凭据、HTTP headers、OAuth、旧 SSE、resources、prompts 或 MCP tasks。远程工具在 planning 与 approval 阶段隐藏；direct 或已批准 executing 阶段继续使用现有 Permission Gate，并作为保守远程操作请求授权。工具参数是否合法最终由 MCP Server 判断。
 
 ## Plan Mode
 

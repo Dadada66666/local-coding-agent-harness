@@ -65,6 +65,11 @@ def main(
         "--plan-approval",
         help="Plan approval policy: manual or auto.",
     ),
+    mcp_config: Path | None = typer.Option(
+        None,
+        "--mcp-config",
+        help="Explicit host MCP client configuration path.",
+    ),
 ) -> None:
     configure_stdio()
     if ctx.invoked_subcommand is not None:
@@ -80,6 +85,7 @@ def main(
         bash_env=bash_env,
         plan_policy=resolve_plan_policy(plan_mode, force_plan, no_plan),
         plan_approval_policy=resolve_plan_approval_policy(plan_approval),
+        mcp_config=mcp_config,
     )
 
 
@@ -121,6 +127,11 @@ def run(
         "--plan-approval",
         help="Plan approval policy: manual or auto.",
     ),
+    mcp_config: Path | None = typer.Option(
+        None,
+        "--mcp-config",
+        help="Explicit host MCP client configuration path.",
+    ),
 ) -> None:
     configure_stdio()
     workdir = Path.cwd()
@@ -136,6 +147,7 @@ def run(
             bash_env,
             policy,
             resolve_plan_approval_policy(plan_approval),
+            mcp_config,
         )
         runner = build_agent_runner(repo_path=workdir, permission_mode=mode, config=config)
         context = runner.run(task)
@@ -152,6 +164,7 @@ def run(
         bash_env=bash_env,
         plan_policy=resolve_plan_policy(plan_mode, force_plan, no_plan),
         plan_approval_policy=resolve_plan_approval_policy(plan_approval),
+        mcp_config=mcp_config,
     )
 
 
@@ -192,6 +205,7 @@ def build_run_config(
     bash_env: list[str] | None = None,
     plan_policy: PlanPolicy | str = PlanPolicy.OFF,
     plan_approval_policy: PlanApprovalPolicy | str = PlanApprovalPolicy.MANUAL,
+    mcp_config: Path | None = None,
 ) -> RunConfig:
     return RunConfig(
         permission_mode=permission_mode,
@@ -200,6 +214,7 @@ def build_run_config(
         sandbox_fail_if_unavailable=sandbox_fail_if_unavailable,
         sandbox_settings_path=str(sandbox_settings) if sandbox_settings else None,
         bash_env_allowlist=tuple(bash_env or ()),
+        mcp_config_path=str(mcp_config.resolve()) if mcp_config else None,
         plan_policy=plan_policy,
         plan_approval_policy=plan_approval_policy,
     )
@@ -216,6 +231,7 @@ def start_interactive(
     bash_env: list[str] | None,
     plan_policy: PlanPolicy = PlanPolicy.OFF,
     plan_approval_policy: PlanApprovalPolicy = PlanApprovalPolicy.MANUAL,
+    mcp_config: Path | None = None,
 ) -> None:
     mode = resolve_permission(permission)
     config = build_run_config(
@@ -227,6 +243,7 @@ def start_interactive(
         bash_env,
         plan_policy,
         plan_approval_policy,
+        mcp_config,
     )
     run_interactive(workdir=workdir, permission_mode=mode, config=config)
 

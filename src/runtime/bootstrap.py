@@ -20,6 +20,8 @@ from runtime.hooks import HookEvent, HookManager
 from runtime.progress import ToolProgressPolicy
 from runtime.plan.gate import plan_gate_hook
 from runtime.recovery import RecoveryPolicy
+from runtime.config import RunConfig
+from runtime.mcp import MCPRuntime, load_mcp_config
 from tools.bash import BashTool
 from tools.delete_file import DeleteFileTool
 from tools.edit_file import EditFileTool
@@ -49,6 +51,7 @@ class RuntimeBundle:
     hooks: HookManager
     recovery_policy: RecoveryPolicy
     progress_policy: ToolProgressPolicy
+    mcp_runtime: MCPRuntime | None = None
 
 
 def build_tool_registry() -> ToolRegistry:
@@ -97,9 +100,12 @@ def build_hooks() -> HookManager:
     return hooks
 
 
-def build_runtime() -> RuntimeBundle:
+def build_runtime(config: RunConfig | None = None) -> RuntimeBundle:
     registry = build_tool_registry()
     hooks = build_hooks()
+    mcp_runtime = None
+    if config is not None and config.mcp_config_path is not None:
+        mcp_runtime = MCPRuntime(load_mcp_config(config.mcp_config_path))
     return RuntimeBundle(
         tool_registry=registry,
         executor=ToolExecutor(registry, hooks),
@@ -107,4 +113,5 @@ def build_runtime() -> RuntimeBundle:
         hooks=hooks,
         recovery_policy=RecoveryPolicy(),
         progress_policy=ToolProgressPolicy(),
+        mcp_runtime=mcp_runtime,
     )
