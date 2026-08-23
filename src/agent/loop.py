@@ -142,6 +142,17 @@ class AgentLoop:
         if context.stop_recorded:
             return
         context.stop_recorded = True
+        mcp_runtime = getattr(self.runtime, "mcp_runtime", None)
+        if mcp_runtime is not None:
+            try:
+                mcp_runtime.close(context)
+            except Exception as exc:
+                context.trace.log(
+                    {
+                        "type": "mcp_runtime_close_failed",
+                        "exception_type": exc.__class__.__name__,
+                    }
+                )
         try:
             self.runtime.hooks.trigger(HookEvent.STOP, context=context)
         except Exception as exc:
@@ -1092,7 +1103,7 @@ class AgentLoop:
     def create_context(self, task: str, include_initial_message: bool = True) -> AgentContext:
         repo_path = self.repo_path.resolve()
         initial_messages = build_initial_messages(task) if include_initial_message else []
-        return create_agent_session(
+        context = create_agent_session(
             repo_path=repo_path,
             task=task,
             permission_mode=self.permission_mode,
@@ -1104,6 +1115,13 @@ class AgentLoop:
                 self.model_client, "context_window_tokens", None
             ),
         )
+        mcp_runtime = getattr(self.runtime, "mcp_runtime", None)
+        if mcp_runtime is not None:
+            mcp_runtime.start(
+                context=context,
+                registry=self.runtime.tool_registry,
+            )
+        return context
 
     def infer_success(self, context: AgentContext) -> bool:
         if getattr(context, "task_unresolved_mutation_failure", False):

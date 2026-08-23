@@ -17,9 +17,9 @@ coding agent:
 
 ## Current Scope
 
-This project focuses on a single local agent loop. It does not implement
-sub-agents, MCP, background jobs, plugin discovery, worktree isolation, or
-LangGraph adapters.
+This project focuses on a single local agent loop. It includes an optional MCP
+client, but does not implement sub-agents, MCP server hosting, background jobs,
+plugin discovery, worktree isolation, or LangGraph adapters.
 
 Core directories:
 
@@ -107,6 +107,40 @@ Permission modes:
 - `accept_edits`: allow normal file edits and safe commands; risky commands are
   still gated.
 - `manual_approval`: ask before edits and command execution.
+
+## MCP Client
+
+MCP is disabled unless a host-owned configuration is passed explicitly:
+
+```bash
+agent --mcp-config /absolute/path/to/mcp.json
+agent run "Use the configured service" --mcp-config /absolute/path/to/mcp.json
+```
+
+The strict v1 configuration supports stdio and bare Streamable HTTP:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["/absolute/path/to/server.py"]
+    },
+    "remote": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp"
+    }
+  }
+}
+```
+
+The runtime does not auto-discover repository MCP files. Stdio environment
+injection, credentials, headers, OAuth, legacy SSE, resources, prompts, and MCP
+tasks are not supported in v1. Remote tools are hidden during planning and
+approval phases; in direct or approved execution they use the existing
+Permission Gate and require approval as conservative remote operations. MCP
+servers remain authoritative for their tool argument validation.
 
 ## Plan Mode
 

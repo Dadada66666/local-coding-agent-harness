@@ -27,6 +27,7 @@ class RunConfig:
     sandbox_fail_if_unavailable: bool = False
     sandbox_settings_path: str | None = None
     bash_env_allowlist: tuple[str, ...] = ()
+    mcp_config_path: str | None = None
     plan_policy: PlanPolicy | str = PlanPolicy.OFF
     plan_approval_policy: PlanApprovalPolicy | str = PlanApprovalPolicy.MANUAL
 

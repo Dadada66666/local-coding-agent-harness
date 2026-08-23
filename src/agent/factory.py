@@ -13,14 +13,15 @@ def build_agent_runner(
     permission_mode: str = "manual_approval",
     config: RunConfig | None = None,
 ) -> AgentLoop:
-    runtime = build_runtime()
+    resolved_config = config or RunConfig(permission_mode=permission_mode)
+    runtime = build_runtime(resolved_config)
     workdir = (repo_path or Path.cwd()).resolve()
     return AgentLoop(
         model_client=ModelClient(),
         runtime=runtime,
         repo_path=workdir,
         permission_mode=permission_mode,
-        config=config,
+        config=resolved_config,
     )
 
 
