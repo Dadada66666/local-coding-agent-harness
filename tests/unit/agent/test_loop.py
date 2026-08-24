@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from mcp import types
 import pytest
 
 from runtime.config import RunConfig
@@ -12,8 +13,10 @@ from agent.messages import ModelResponse, TokenUsage, ToolCall
 from agent.model_client import ModelClient, ModelContextOverflowError
 from runtime.bootstrap import build_runtime
 from runtime.mcp import MCPStartupError
-from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy
+from runtime.mcp.runtime import MCPCatalogEntry
+from runtime.plan import ExecutionPath, PlanPhase, PlanPolicy, PlanState
 from runtime.plan.capabilities import plan_capabilities
+from tools.mcp_tool import MCPTool, MCPToolCall, MCPToolSearch, search_terms
 
 
 class FakeModelClient:
@@ -23,6 +26,7 @@ class FakeModelClient:
         self.semantic_calls = 0
         self.max_tokens = 4096
         self.context_window_tokens = None
+        self.tool_payloads: list[str] = []
 
     def call(
         self,
@@ -49,11 +53,61 @@ class FakeModelClient:
                 usage=TokenUsage(),
                 stop_reason="end_turn",
             )
+        self.tool_payloads.append(
+            json.dumps(tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
         response = self.responses[self.calls]
         self.calls += 1
         if isinstance(response, Exception):
             raise response
         return response
+
+
+class FakeGatewayMCPRuntime:
+    def __init__(self) -> None:
+        self.remote_calls: list[tuple[str, str, dict]] = []
+        binding = MCPTool(
+            runtime=self,
+            server_id="demo",
+            remote_name="echo",
+            name="mcp__demo__echo",
+            description="Echo text.",
+            input_schema={
+                "type": "object",
+                "properties": {"text": {"type": "string"}},
+            },
+        )
+        self.catalog = (
+            MCPCatalogEntry(
+                canonical_tool_id=binding.name,
+                server_id=binding.server_id,
+                remote_name=binding.remote_name,
+                description=binding.description,
+                input_schema=binding.input_schema,
+                binding=binding,
+                server_terms=search_terms(binding.server_id),
+                name_terms=search_terms(binding.remote_name),
+                description_terms=search_terms(binding.description),
+                property_terms=search_terms("text"),
+            ),
+        )
+        self._entry = self.catalog[0]
+
+    def start(self, context, registry) -> None:
+        registry.register(MCPToolSearch(self))
+        registry.register(MCPToolCall(self))
+
+    def close(self, context) -> None:
+        return None
+
+    def resolve_catalog_tool(self, canonical_tool_id: str):
+        return self._entry if canonical_tool_id == self._entry.canonical_tool_id else None
+
+    def call_tool(self, server_id: str, remote_name: str, arguments: dict):
+        self.remote_calls.append((server_id, remote_name, arguments))
+        return types.CallToolResult(
+            content=[types.TextContent(text=str(arguments.get("text", "")))]
+        )
 
 
 def final_response(text: str = "done", stop_reason: str | None = "end_turn") -> ModelResponse:
@@ -493,23 +547,24 @@ def test_mcp_closes_before_stop_hook(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("policy", "execution_path", "phase", "visible"),
+    ("policy", "execution_path", "phase", "search_visible", "call_visible"),
     [
-        (PlanPolicy.OFF, ExecutionPath.UNDECIDED, PlanPhase.INACTIVE, True),
-        (PlanPolicy.AUTO, ExecutionPath.DIRECT, PlanPhase.INACTIVE, True),
-        (PlanPolicy.AUTO, ExecutionPath.UNDECIDED, PlanPhase.INACTIVE, False),
-        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.PLANNING, False),
-        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.AWAITING_APPROVAL, False),
-        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.EXECUTING, True),
-        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.COMPLETED, False),
-        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.CANCELLED, False),
+        (PlanPolicy.OFF, ExecutionPath.UNDECIDED, PlanPhase.INACTIVE, True, True),
+        (PlanPolicy.AUTO, ExecutionPath.DIRECT, PlanPhase.INACTIVE, True, True),
+        (PlanPolicy.AUTO, ExecutionPath.UNDECIDED, PlanPhase.INACTIVE, True, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.PLANNING, True, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.AWAITING_APPROVAL, False, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.EXECUTING, True, True),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.COMPLETED, False, False),
+        (PlanPolicy.REQUIRED, ExecutionPath.PLAN, PlanPhase.CANCELLED, False, False),
     ],
 )
-def test_existing_plan_capabilities_govern_mcp_visibility(
+def test_existing_plan_capabilities_govern_mcp_gateway_visibility(
     policy,
     execution_path,
     phase,
-    visible,
+    search_visible,
+    call_visible,
 ) -> None:
     state = SimpleNamespace(
         policy=policy,
@@ -517,4 +572,78 @@ def test_existing_plan_capabilities_govern_mcp_visibility(
         phase=phase,
     )
 
-    assert plan_capabilities(state).tool_is_visible("mcp__demo__echo") is visible
+    capabilities = plan_capabilities(state)
+    assert capabilities.tool_is_visible("mcp_tool_search") is search_visible
+    assert capabilities.tool_is_visible("mcp_tool_call") is call_visible
+
+
+def test_mcp_search_continuation_keeps_base_tools_byte_identical(tmp_path: Path) -> None:
+    model = FakeModelClient(
+        [
+            tool_response(ToolCall("search-1", "mcp_tool_search", {"query": "echo"})),
+            final_response(),
+        ]
+    )
+    runner = make_runner(tmp_path, model)
+    mcp_runtime = FakeGatewayMCPRuntime()
+    runner.runtime.mcp_runtime = mcp_runtime
+    context = runner.create_context("find MCP tools", include_initial_message=True)
+
+    runner.run_until_idle(context)
+
+    assert len(model.tool_payloads) == 2
+    assert model.tool_payloads[0] == model.tool_payloads[1]
+    assert "mcp_tool_search" in model.tool_payloads[0]
+    assert "mcp_tool_call" in model.tool_payloads[0]
+    assert "mcp__demo__echo" not in model.tool_payloads[0]
+    assert mcp_runtime.remote_calls == []
+
+
+def test_mcp_call_continuation_keeps_base_tools_byte_identical(tmp_path: Path) -> None:
+    arguments = {
+        "tool": "mcp__demo__echo",
+        "arguments": {"text": "hello"},
+    }
+    model = FakeModelClient(
+        [
+            tool_response(ToolCall("call-1", "mcp_tool_call", arguments)),
+            final_response(),
+        ]
+    )
+    runner = make_runner(tmp_path, model)
+    mcp_runtime = FakeGatewayMCPRuntime()
+    runner.runtime.mcp_runtime = mcp_runtime
+    context = runner.create_context("call MCP", include_initial_message=True)
+    context.approved_permission_scopes.add("mcp:demo:echo")
+
+    runner.run_until_idle(context)
+
+    assert len(model.tool_payloads) == 2
+    assert model.tool_payloads[0] == model.tool_payloads[1]
+    assert mcp_runtime.remote_calls == [("demo", "echo", {"text": "hello"})]
+
+
+def test_planning_search_is_local_and_forged_call_is_unavailable(tmp_path: Path) -> None:
+    model = FakeModelClient([final_response()])
+    runner = make_runner(tmp_path, model)
+    mcp_runtime = FakeGatewayMCPRuntime()
+    runner.runtime.mcp_runtime = mcp_runtime
+    context = runner.create_context("plan MCP use", include_initial_message=True)
+    context.plan_state = PlanState.initial(PlanPolicy.REQUIRED, "plan MCP use")
+
+    search_result = runner.runtime.executor.execute(
+        ToolCall("search", "mcp_tool_search", {"query": "echo"}), context
+    )
+    call_result = runner.runtime.executor.execute(
+        ToolCall(
+            "call",
+            "mcp_tool_call",
+            {"tool": "mcp__demo__echo", "arguments": {"text": "blocked"}},
+        ),
+        context,
+    )
+
+    assert search_result.ok is True
+    assert call_result.ok is False
+    assert call_result.metadata["unavailable_tool"] is True
+    assert mcp_runtime.remote_calls == []

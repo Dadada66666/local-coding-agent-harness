@@ -8,6 +8,7 @@ from agent.messages import TokenUsage
 from runtime.context.budget import measure_context
 from runtime.observability.cost_tracker import CostTracker
 from runtime.observability.trace_logger import TraceLogger
+from tools.mcp_tool import MCPToolCall, MCPToolSearch
 
 
 def test_cost_tracker_writes_per_turn_token_breakdown(monkeypatch) -> None:
@@ -249,6 +250,31 @@ def test_request_prefix_hashes_identify_static_prefix_changes() -> None:
     assert second["system_hash"] == third["system_hash"]
     assert first["tools_hash"] == second["tools_hash"]
     assert second["tools_hash"] != third["tools_hash"]
+
+
+def test_mcp_gateway_tools_hash_is_stable_across_search_and_call_continuations() -> None:
+    tracker = CostTracker(Path("unused-run-dir"))
+    runtime = SimpleNamespace()
+    tools = [MCPToolSearch(runtime).schema(), MCPToolCall(runtime).schema()]
+    usage = TokenUsage(input_tokens=10, output_tokens=2)
+
+    for turn_id, response in (
+        (1, {"role": "assistant", "content": "search"}),
+        (2, {"role": "assistant", "content": "call"}),
+        (3, {"role": "assistant", "content": "done"}),
+    ):
+        tracker.record_model_call(
+            turn_id=turn_id,
+            system="system",
+            messages=[{"role": "user", "content": "inspect MCP"}],
+            tools=tools,
+            response_message=response,
+            usage=usage,
+            plan_phase="executing",
+        )
+
+    hashes = [turn["request_prefix"]["tools_hash"] for turn in tracker.turns]
+    assert hashes[0] == hashes[1] == hashes[2]
 
 
 def test_v3_checkpoint_is_counted_as_compacted_history() -> None:

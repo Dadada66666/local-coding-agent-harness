@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from runtime.mcp.runtime import (
     _sdk_client,
 )
 from tools.base import BaseTool, ToolResult
+from tools.mcp_tool import MCPToolSearch
 from tools.registry import ToolRegistry
 
 
@@ -171,7 +173,7 @@ def test_http_client_uses_fixed_timeout_without_extra_policy(monkeypatch) -> Non
     }
 
 
-def test_start_discovers_all_pages_registers_sorted_tools_and_traces(monkeypatch) -> None:
+def test_start_builds_sorted_catalog_registers_gateways_and_traces(monkeypatch) -> None:
     clients = {
         "zeta": FakeClient(
             {
@@ -197,6 +199,10 @@ def test_start_discovers_all_pages_registers_sorted_tools_and_traces(monkeypatch
 
     assert registry.all_names() == [
         "native",
+        "mcp_tool_search",
+        "mcp_tool_call",
+    ]
+    assert [entry.canonical_tool_id for entry in runtime.catalog] == [
         "mcp__alpha__read",
         "mcp__zeta__a",
         "mcp__zeta__m",
@@ -207,10 +213,16 @@ def test_start_discovers_all_pages_registers_sorted_tools_and_traces(monkeypatch
         "mcp_tool_discovery_completed",
         "mcp_server_connected",
         "mcp_tool_discovery_completed",
+        "mcp_catalog_ready",
     ]
     assert runtime.started is True
     assert clients["zeta"].list_cursors == [None, "second", "third"]
-    assert registry.get("mcp__alpha__read").description == "MCP tool alpha/read."
+    assert runtime.resolve_catalog_tool("mcp__alpha__read").description == ("MCP tool alpha/read.")
+    assert ctx.trace.events[-1] == {
+        "type": "mcp_catalog_ready",
+        "registered_mcp_tool_count": 4,
+        "searchable_mcp_tool_count": 4,
+    }
     assert not hasattr(runtime, "startup_events")
     assert not hasattr(runtime, "startup_event_buffer")
 
@@ -258,7 +270,8 @@ def test_call_failure_does_not_reconnect_remove_adapter_or_block_later_call(monk
         runtime.call_tool("demo", "echo", {})
 
     assert runtime.call_tool("demo", "echo", {}) is result
-    assert registry.get("mcp__demo__echo") is not None
+    assert runtime.resolve_catalog_tool("mcp__demo__echo") is not None
+    assert registry.get("mcp__demo__echo") is None
     assert client.enter_count == 1
     assert client.call_count == 2
     runtime.close(ctx)
@@ -387,31 +400,93 @@ def test_non_object_or_non_serializable_schema_fails_before_registration(
 
 
 def test_registration_order_is_independent_of_config_and_discovery_order(monkeypatch) -> None:
-    clients = {
-        "alpha": FakeClient({None: page([remote_tool("z"), remote_tool("a")])}),
-        "zeta": FakeClient({None: page([remote_tool("z"), remote_tool("a")])}),
-    }
-    monkeypatch.setattr(
-        "runtime.mcp.runtime._sdk_client",
-        lambda server: clients[server.server_id],
-    )
-    runtime = MCPRuntime(
-        MCPConfig(
-            (
-                HTTPMCPServerConfig("zeta", "https://zeta.test/mcp"),
-                HTTPMCPServerConfig("alpha", "https://alpha.test/mcp"),
-            )
-        )
-    )
-    registry = ToolRegistry()
-    ctx = context()
-
-    runtime.start(ctx, registry)
-
-    assert registry.all_names() == [
+    expected_ids = [
         "mcp__alpha__a",
         "mcp__alpha__z",
         "mcp__zeta__a",
         "mcp__zeta__z",
     ]
-    runtime.close(ctx)
+
+    def snapshot(server_ids, first_name: str, second_name: str):
+        clients = {
+            server_id: FakeClient(
+                {
+                    None: page([remote_tool(first_name)], "next"),
+                    "next": page([remote_tool(second_name)]),
+                }
+            )
+            for server_id in server_ids
+        }
+        monkeypatch.setattr(
+            "runtime.mcp.runtime._sdk_client",
+            lambda server: clients[server.server_id],
+        )
+        runtime = MCPRuntime(http_config(*server_ids))
+        registry = ToolRegistry()
+        ctx = context()
+        runtime.start(ctx, registry)
+        search_result = MCPToolSearch(runtime).call(
+            {"query": "a z", "limit": 10},
+            SimpleNamespace(),
+        )
+        result = (
+            registry.all_names(),
+            [entry.canonical_tool_id for entry in runtime.catalog],
+            json.loads(search_result.content),
+        )
+        runtime.close(ctx)
+        return result
+
+    forward = snapshot(("alpha", "zeta"), "a", "z")
+    reversed_order = snapshot(("zeta", "alpha"), "z", "a")
+
+    assert forward == reversed_order
+    assert forward[0] == ["mcp_tool_search", "mcp_tool_call"]
+    assert forward[1] == expected_ids
+
+
+def test_one_hundred_remote_tools_register_only_two_direct_gateways(monkeypatch) -> None:
+    tools = [remote_tool(f"tool_{index}") for index in range(100)]
+    client = FakeClient({None: page(tools)})
+    monkeypatch.setattr("runtime.mcp.runtime._sdk_client", lambda server: client)
+    runtime = MCPRuntime(http_config("demo"))
+    registry = ToolRegistry()
+
+    runtime.start(context(), registry)
+
+    assert registry.all_names() == ["mcp_tool_search", "mcp_tool_call"]
+    assert len(runtime.catalog) == 100
+    assert all(registry.get(entry.canonical_tool_id) is None for entry in runtime.catalog)
+
+
+def test_second_start_reuses_same_immutable_catalog(monkeypatch) -> None:
+    client = FakeClient({None: page([remote_tool("echo")])})
+    monkeypatch.setattr("runtime.mcp.runtime._sdk_client", lambda server: client)
+    runtime = MCPRuntime(http_config("demo"))
+    registry = ToolRegistry()
+    ctx = context()
+
+    runtime.start(ctx, registry)
+    catalog = runtime.catalog
+    runtime.start(ctx, registry)
+
+    assert runtime.catalog is catalog
+    assert client.list_cursors == [None]
+    assert len([event for event in ctx.trace.events if event["type"] == "mcp_catalog_ready"]) == 1
+
+
+@pytest.mark.parametrize("gateway_name", ["mcp_tool_search", "mcp_tool_call"])
+def test_gateway_collision_fails_before_catalog_commit(monkeypatch, gateway_name: str) -> None:
+    client = FakeClient({None: page([remote_tool("echo")])})
+    monkeypatch.setattr("runtime.mcp.runtime._sdk_client", lambda server: client)
+    runtime = MCPRuntime(http_config("demo"))
+    registry = ToolRegistry()
+    registry.register(NativeTool(gateway_name))
+    ctx = context()
+
+    with pytest.raises(MCPStartupError):
+        runtime.start(ctx, registry)
+
+    assert registry.all_names() == [gateway_name]
+    assert runtime.catalog == ()
+    assert client.exit_count == 1
