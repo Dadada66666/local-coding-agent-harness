@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -11,12 +12,22 @@ from tools.bash import BashTool
 def test_timeout_is_bounded_and_documented_in_seconds() -> None:
     tool = BashTool()
 
-    tool.validate({"command": "echo ok", "timeout": 600}, context=None)
+    tool.validate(
+        {"command": "echo ok", "timeout": 600, "result_scope": "command"},
+        context=None,
+    )
     with pytest.raises(ToolValidationError, match="between 1 and 600 seconds"):
-        tool.validate({"command": "echo ok", "timeout": 120000}, context=None)
+        tool.validate(
+            {"command": "echo ok", "timeout": 120000, "result_scope": "command"},
+            context=None,
+        )
     with pytest.raises(ToolValidationError, match="exit_expectation"):
         tool.validate(
-            {"command": "echo ok", "exit_expectation": "sometimes"},
+            {
+                "command": "echo ok",
+                "exit_expectation": "sometimes",
+                "result_scope": "command",
+            },
             context=None,
         )
 
@@ -25,6 +36,30 @@ def test_timeout_is_bounded_and_documented_in_seconds() -> None:
         "zero",
         "nonzero",
     ]
+
+
+def test_result_scope_is_required_and_validated_exactly() -> None:
+    tool = BashTool()
+
+    assert tool.input_schema["required"] == ["command", "result_scope"]
+    assert tool.input_schema["properties"]["result_scope"]["enum"] == [
+        "command",
+        "launcher",
+    ]
+    assert (
+        "Launcher results never become authoritative verification"
+        in tool.input_schema["properties"]["result_scope"]["description"]
+    )
+    assert "launcher success is not verification success" in tool.description
+
+    for args in (
+        {"command": "echo ok"},
+        {"command": "echo ok", "result_scope": 1},
+        {"command": "echo ok", "result_scope": "COMMAND"},
+        {"command": "echo ok", "result_scope": "unknown"},
+    ):
+        with pytest.raises(ToolValidationError, match="result_scope"):
+            tool.validate(args, context=None)
 
 
 def test_verify_commands_use_fail_fast_posix_shell(monkeypatch) -> None:
@@ -64,12 +99,13 @@ def test_bash_keeps_full_output_for_post_processing(monkeypatch, tmp_path) -> No
     )
     context = SimpleNamespace(repo_path=tmp_path, sandbox=None)
 
-    result = BashTool().call({"command": "echo output"}, context)
+    result = BashTool().call({"command": "echo output", "result_scope": "command"}, context)
 
     assert result.ok is True
     assert result.content == output
     assert result.metadata["original_chars"] == len(output)
     assert result.metadata["truncated"] is False
+    assert result.metadata["result_scope"] == "command"
 
 
 @pytest.mark.parametrize(
@@ -99,7 +135,11 @@ def test_bash_matches_the_declared_exit_expectation(
     context = SimpleNamespace(repo_path=tmp_path, sandbox=None)
 
     result = BashTool().call(
-        {"command": "check", "exit_expectation": expectation},
+        {
+            "command": "check",
+            "exit_expectation": expectation,
+            "result_scope": "command",
+        },
         context,
     )
 
@@ -107,3 +147,26 @@ def test_bash_matches_the_declared_exit_expectation(
     assert result.error == expected_error
     assert result.metadata["returncode"] == returncode
     assert result.metadata["exit_expectation"] == expectation
+    assert result.metadata["result_scope"] == "command"
+
+
+def test_launcher_scope_is_preserved_on_timeout(monkeypatch, tmp_path) -> None:
+    def timeout_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=["/bin/sh"],
+            timeout=10,
+            output="partial output",
+        )
+
+    monkeypatch.setattr("tools.bash.subprocess.run", timeout_run)
+    context = SimpleNamespace(repo_path=tmp_path, sandbox=None)
+
+    result = BashTool().call(
+        {"command": "start service", "result_scope": "launcher", "timeout": 10},
+        context,
+    )
+
+    assert result.ok is False
+    assert result.error == "timeout after 10s"
+    assert result.metadata["timed_out"] is True
+    assert result.metadata["result_scope"] == "launcher"

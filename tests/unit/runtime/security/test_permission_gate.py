@@ -212,7 +212,8 @@ def test_bash_apply_patch_routes_to_edit_file_without_approval(
                 "*** Update File: demo.py\n"
                 "*** End Patch\n"
                 "PATCH"
-            )
+            ),
+            "result_scope": "command",
         },
         context,
     )
@@ -232,6 +233,7 @@ def test_verification_cannot_mix_shell_write_and_test(tmp_path: Path) -> None:
         {
             "command": "echo x > /tmp/check.js\npython -m pytest",
             "purpose": "verify",
+            "result_scope": "command",
         },
         context,
     )
@@ -257,6 +259,7 @@ def test_blocked_mixed_verification_does_not_mark_mutation_failure(
             {
                 "command": "echo x > temporary.txt\npython -m pytest",
                 "purpose": "verify",
+                "result_scope": "command",
             },
         ),
         context,
@@ -279,7 +282,10 @@ def test_bash_path_escape_write_is_denied_without_ending_task(tmp_path: Path) ->
         ToolCall(
             "outside-write",
             "bash",
-            {"command": "cat > /tmp/check.js <<'EOF'\nconst ok = true;\nEOF"},
+            {
+                "command": "cat > /tmp/check.js <<'EOF'\nconst ok = true;\nEOF",
+                "result_scope": "command",
+            },
         ),
         context,
     )
@@ -326,7 +332,11 @@ def test_network_download_reports_host_and_filesystem_effects(tmp_path: Path) ->
         "'https://incompetech.com/music/darkest-child.mp3'"
     )
 
-    decision = context.permission_gate.check(BashTool(), {"command": command}, context)
+    decision = context.permission_gate.check(
+        BashTool(),
+        {"command": command, "result_scope": "command"},
+        context,
+    )
 
     assert decision.behavior == PermissionBehavior.ASK
     assert decision.risk == BashRisk.NETWORK
@@ -367,7 +377,11 @@ def test_approved_bash_file_write_records_task_mutation(monkeypatch, tmp_path: P
     )
 
     result = runner.runtime.executor.execute(
-        ToolCall("call_1", "bash", {"command": "echo x > demo.py"}),
+        ToolCall(
+            "call_1",
+            "bash",
+            {"command": "echo x > demo.py", "result_scope": "command"},
+        ),
         context,
     )
 
@@ -397,7 +411,8 @@ def test_blocked_shell_patch_is_not_recorded_as_mutation_failure(
                     "*** Update File: demo.py\n"
                     "*** End Patch\n"
                     "PATCH"
-                )
+                ),
+                "result_scope": "command",
             },
         ),
         context,
@@ -525,7 +540,7 @@ def test_destructive_bash_denied(tmp_path: Path) -> None:
 
     decision = context.permission_gate.check(
         BashTool(),
-        {"command": "rm -rf important"},
+        {"command": "rm -rf important", "result_scope": "command"},
         context,
     )
 
@@ -545,7 +560,11 @@ def test_terminal_deny_summary_preserves_earlier_task_changes(tmp_path: Path) ->
                 )
             ),
             tool_response(
-                ToolCall("call_2", "bash", {"command": "rm -rf important"})
+                ToolCall(
+                    "call_2",
+                    "bash",
+                    {"command": "rm -rf important", "result_scope": "command"},
+                )
             ),
         ]
     )
@@ -569,7 +588,10 @@ def test_single_file_bash_delete_routes_to_delete_tool_without_cancelling(
 
     decision = context.permission_gate.check(
         BashTool(),
-        {"command": "rm temporary.py && python3 app.py"},
+        {
+            "command": "rm temporary.py && python3 app.py",
+            "result_scope": "command",
+        },
         context,
     )
 
@@ -596,11 +618,16 @@ def test_agent_can_recover_from_shell_delete_routing_failure(tmp_path: Path) -> 
                     {
                         "command": "python -m py_compile temporary.py",
                         "purpose": "verify",
+                        "result_scope": "command",
                     },
                 )
             ),
             tool_response(
-                ToolCall("call_3", "bash", {"command": "rm temporary.py"})
+                ToolCall(
+                    "call_3",
+                    "bash",
+                    {"command": "rm temporary.py", "result_scope": "command"},
+                )
             ),
             tool_response(
                 ToolCall("call_4", "delete_file", {"path": "temporary.py"})
@@ -645,7 +672,10 @@ def test_verification_command_is_not_treated_as_read_only(tmp_path: Path) -> Non
     read_only_context = read_only_runner.create_context("verify", include_initial_message=True)
     accept_runner = make_runner(tmp_path, PermissionMode.ACCEPT_EDITS)
     accept_context = accept_runner.create_context("verify", include_initial_message=True)
-    args = {"command": "python3 -m unittest -v test_demo.py"}
+    args = {
+        "command": "python3 -m unittest -v test_demo.py",
+        "result_scope": "command",
+    }
 
     read_only_decision = read_only_context.permission_gate.check(
         BashTool(),

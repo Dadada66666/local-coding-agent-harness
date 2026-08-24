@@ -62,7 +62,7 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
     runtime = build_runtime()
 
     planning_result = runtime.executor.execute(
-        ToolCall("bash-1", "bash", {"command": "echo hello"}),
+        ToolCall("bash-1", "bash", {"command": "echo hello", "result_scope": "command"}),
         context,
     )
     context.plan_controller.replace_plan(
@@ -70,7 +70,7 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
     )
     context.plan_controller.submit_for_execution()
     awaiting_result = runtime.executor.execute(
-        ToolCall("bash-2", "bash", {"command": "echo hello"}),
+        ToolCall("bash-2", "bash", {"command": "echo hello", "result_scope": "command"}),
         context,
     )
     forged_read = runtime.executor.execute(
@@ -107,7 +107,7 @@ def test_planning_and_awaiting_approval_block_bash_without_repair_state(tmp_path
     progress = runtime.progress_policy.evaluate(
         context,
         SimpleNamespace(usage=SimpleNamespace(output_tokens=0)),
-        [(ToolCall("bash-2", "bash", {"command": "echo hello"}), awaiting_result)],
+        [(ToolCall("bash-2", "bash", {"command": "echo hello", "result_scope": "command"}), awaiting_result)],
         max_output_tokens=4096,
     )
     assert progress.action == "continue"

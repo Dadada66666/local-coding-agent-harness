@@ -49,8 +49,8 @@ def run_test_result_hook(
 
 def test_verify_purpose_records_non_test_bash_failure() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": 'python -c "raise SystemExit(1)"', "purpose": "verify"},
-        metadata={"purpose": "verify"},
+        arguments={"command": 'python -c "raise SystemExit(1)"', "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command"},
     )
 
     assert context.last_test_result is not None
@@ -62,8 +62,8 @@ def test_verify_purpose_records_non_test_bash_failure() -> None:
 
 def test_verify_purpose_can_come_from_metadata() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": 'python -c "raise SystemExit(0)"'},
-        metadata={"purpose": " verify "},
+        arguments={"command": 'python -c "raise SystemExit(0)"', "result_scope": "command"},
+        metadata={"purpose": " verify ", "result_scope": "command"},
         ok=True,
     )
 
@@ -72,10 +72,61 @@ def test_verify_purpose_can_come_from_metadata() -> None:
     assert result.metadata["verification_command"] is True
 
 
+def test_launcher_scope_does_not_overwrite_existing_verification() -> None:
+    command = "opaque verification command"
+    context, _ = run_test_result_hook(
+        arguments={
+            "command": command,
+            "purpose": "verify",
+            "result_scope": "command",
+        },
+        metadata={"purpose": "verify", "result_scope": "command"},
+        ok=False,
+    )
+    recorded = context.task_test_result
+    verification_version = context.task_verification_version
+
+    context, result = run_test_result_hook(
+        arguments={
+            "command": command,
+            "purpose": "verify",
+            "result_scope": "launcher",
+        },
+        metadata={"purpose": "verify", "result_scope": "launcher"},
+        ok=True,
+        context=context,
+    )
+
+    assert context.last_test_result is recorded
+    assert context.task_test_result is recorded
+    assert context.task_verification_version == verification_version
+    assert result.metadata["verification_ignored"] is True
+    assert result.metadata["verification_ignored_reason"] == "launcher_result"
+    assert context.trace.events[-1]["type"] == "verification_ignored"
+    assert context.trace.events[-1]["reason"] == "launcher_result"
+
+
+def test_missing_result_scope_fails_closed() -> None:
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "opaque verification command",
+            "purpose": "verify",
+            "result_scope": "command",
+        },
+        metadata={"purpose": "verify"},
+        ok=True,
+    )
+
+    assert context.last_test_result is None
+    assert not hasattr(context, "task_test_result")
+    assert result.metadata["verification_ignored"] is True
+    assert result.metadata["verification_ignored_reason"] == "missing_execution_result_scope"
+
+
 def test_read_only_discovery_command_is_not_recorded_as_verification() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": "find . -maxdepth 3 -type f -print", "purpose": "verify"},
-        metadata={"purpose": "verify"},
+        arguments={"command": "find . -maxdepth 3 -type f -print", "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=True,
     )
 
@@ -86,8 +137,8 @@ def test_read_only_discovery_command_is_not_recorded_as_verification() -> None:
 
 def test_command_discovery_does_not_overwrite_real_verification() -> None:
     context, _ = run_test_result_hook(
-        arguments={"command": "node --check app.js", "purpose": "verify"},
-        metadata={"purpose": "verify"},
+        arguments={"command": "node --check app.js", "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=True,
     )
     recorded = context.task_test_result
@@ -96,8 +147,9 @@ def test_command_discovery_does_not_overwrite_real_verification() -> None:
         arguments={
             "command": "command -v chromium || command -v firefox || true",
             "purpose": "verify",
+            "result_scope": "command",
         },
-        metadata={"purpose": "verify"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=True,
         context=context,
     )
@@ -109,8 +161,8 @@ def test_command_discovery_does_not_overwrite_real_verification() -> None:
 
 def test_which_test_binary_is_discovery_even_without_verify_purpose() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": "which pytest"},
-        metadata={},
+        arguments={"command": "which pytest", "result_scope": "command"},
+        metadata={"result_scope": "command"},
         ok=True,
     )
 
@@ -123,8 +175,9 @@ def test_cd_wrapped_git_diff_check_is_static_verification() -> None:
         arguments={
             "command": "cd project && git diff --check",
             "purpose": "verify",
+            "result_scope": "command",
         },
-        metadata={"purpose": "verify"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=False,
     )
 
@@ -139,8 +192,9 @@ def test_git_diff_no_index_check_is_static_verification() -> None:
         arguments={
             "command": "git diff --no-index --check before after",
             "purpose": "verify",
+            "result_scope": "command",
         },
-        metadata={"purpose": "verify"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=False,
     )
 
@@ -151,8 +205,8 @@ def test_git_diff_no_index_check_is_static_verification() -> None:
 
 def test_plain_git_diff_remains_discovery() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": "git diff -- app.py", "purpose": "verify"},
-        metadata={"purpose": "verify"},
+        arguments={"command": "git diff -- app.py", "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=True,
     )
 
@@ -162,8 +216,8 @@ def test_plain_git_diff_remains_discovery() -> None:
 
 def test_ruff_check_remains_a_real_static_verification() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": "ruff check .", "purpose": "verify"},
-        metadata={"purpose": "verify"},
+        arguments={"command": "ruff check .", "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=True,
     )
 
@@ -174,8 +228,8 @@ def test_ruff_check_remains_a_real_static_verification() -> None:
 
 def test_test_command_is_still_recorded_without_verify_purpose() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": "PYTEST examples/demo_repo/tests"},
-        metadata={},
+        arguments={"command": "PYTEST examples/demo_repo/tests", "result_scope": "command"},
+        metadata={"result_scope": "command"},
         ok=True,
     )
 
@@ -187,8 +241,8 @@ def test_test_command_is_still_recorded_without_verify_purpose() -> None:
 
 def test_denied_bash_result_is_not_recorded_as_verification() -> None:
     context, result = run_test_result_hook(
-        arguments={"command": 'python -c "raise SystemExit(1)"', "purpose": "verify"},
-        metadata={"purpose": "verify", "denied": True},
+        arguments={"command": 'python -c "raise SystemExit(1)"', "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command", "denied": True},
     )
 
     assert context.last_test_result is None
@@ -200,8 +254,9 @@ def test_mutating_test_command_is_not_recorded_as_verification() -> None:
         arguments={
             "command": "echo x > demo.py\npython -m pytest",
             "purpose": "verify",
+            "result_scope": "command",
         },
-        metadata={"purpose": "verify", "mutation_recorded": True},
+        metadata={"purpose": "verify", "result_scope": "command", "mutation_recorded": True},
         ok=True,
     )
 
@@ -268,8 +323,8 @@ def test_infer_success_rejects_unresolved_mutation_failure() -> None:
 
 def test_verification_becomes_stale_after_a_later_mutation() -> None:
     context, _ = run_test_result_hook(
-        arguments={"command": "python -m pytest", "purpose": "verify"},
-        metadata={"purpose": "verify"},
+        arguments={"command": "python -m pytest", "purpose": "verify", "result_scope": "command"},
+        metadata={"purpose": "verify", "result_scope": "command"},
         ok=True,
     )
     context.task_changed_files = {"app.py"}

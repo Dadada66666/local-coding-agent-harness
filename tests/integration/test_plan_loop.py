@@ -438,14 +438,22 @@ def test_execution_reuses_planning_source_and_recovers_after_denied_verification
                 ToolCall(
                     "invalid-verify",
                     "bash",
-                    {"command": invalid_verification, "purpose": "verify"},
+                    {
+                        "command": invalid_verification,
+                        "purpose": "verify",
+                        "result_scope": "command",
+                    },
                 )
             ),
             tool_response(
                 ToolCall(
                     "safe-verify",
                     "bash",
-                    {"command": safe_verification, "purpose": "verify"},
+                    {
+                        "command": safe_verification,
+                        "purpose": "verify",
+                        "result_scope": "command",
+                    },
                 )
             ),
             tool_response(
@@ -471,7 +479,10 @@ def test_execution_reuses_planning_source_and_recovers_after_denied_verification
         return ToolResult(
             ok=True,
             content="JavaScript syntax is valid.",
-            metadata={"purpose": args.get("purpose")},
+            metadata={
+                "purpose": args.get("purpose"),
+                "result_scope": args["result_scope"],
+            },
         )
 
     monkeypatch.setattr(bash_tool, "call", execute_safe_command)

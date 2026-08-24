@@ -13,6 +13,7 @@ from tools.base import BaseTool, ToolResult, ToolValidationError
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_TIMEOUT_SECONDS = 600
 EXIT_EXPECTATIONS = {"zero", "nonzero"}
+RESULT_SCOPES = {"command", "launcher"}
 
 
 class BashTool(BaseTool):
@@ -21,7 +22,9 @@ class BashTool(BaseTool):
         "Run commands, tests, verification, or read-only discovery from WORKDIR. Repository "
         "mutations use edit_file/write_file/delete_file, not Bash (including apply_patch, "
         'sed -i, redirection, heredocs, or Python writes). purpose="verify" enables fail-fast '
-        "and must not mutate files; exit_expectation declares the expected status."
+        "and must not mutate files; exit_expectation declares the expected status. "
+        "result_scope is required: use command for the command/check outcome and launcher when "
+        "the result only starts or submits work; launcher success is not verification success."
     )
     input_schema = {
         "type": "object",
@@ -41,8 +44,17 @@ class BashTool(BaseTool):
                 "enum": ["zero", "nonzero"],
                 "description": "Expected overall exit status; defaults to zero.",
             },
+            "result_scope": {
+                "type": "string",
+                "enum": ["command", "launcher"],
+                "description": (
+                    "Use command when this ToolResult is the command/check outcome; use "
+                    "launcher when it only starts or submits longer-lived work. Launcher "
+                    "results never become authoritative verification."
+                ),
+            },
         },
-        "required": ["command"],
+        "required": ["command", "result_scope"],
     }
 
     read_only = False
@@ -74,12 +86,16 @@ class BashTool(BaseTool):
             raise ToolValidationError(
                 'exit_expectation must be either "zero" or "nonzero"'
             )
+        result_scope = args.get("result_scope")
+        if not isinstance(result_scope, str) or result_scope not in RESULT_SCOPES:
+            raise ToolValidationError('result_scope must be either "command" or "launcher"')
 
     def call(self, args: dict, context) -> ToolResult:
         command = str(args["command"])
         timeout = int(args.get("timeout", DEFAULT_TIMEOUT_SECONDS))
         stdin_content = args.get("input")
         purpose = args.get("purpose")
+        result_scope = args["result_scope"]
         exit_expectation = self._exit_expectation(args)
         fail_fast = str(purpose or "").strip().lower() == "verify"
         argv = self._build_command_argv(command, fail_fast=fail_fast)
@@ -126,6 +142,7 @@ class BashTool(BaseTool):
                     sandbox=sandbox_metadata,
                     environment=environment_metadata,
                     purpose=purpose,
+                    result_scope=result_scope,
                     fail_fast=fail_fast,
                     exit_expectation=exit_expectation,
                     timeout=timeout,
@@ -152,6 +169,7 @@ class BashTool(BaseTool):
                 sandbox=sandbox_metadata,
                 environment=environment_metadata,
                 purpose=purpose,
+                result_scope=result_scope,
                 fail_fast=fail_fast,
                 exit_expectation=exit_expectation,
                 returncode=completed.returncode,
@@ -240,12 +258,22 @@ class BashTool(BaseTool):
         metadata["wrapped"] = False
         return metadata
 
-    def _metadata(self, command: str, shell_name: str, stdin_mode: str, sandbox: dict, purpose=None, **extra) -> dict:
+    def _metadata(
+        self,
+        command: str,
+        shell_name: str,
+        stdin_mode: str,
+        sandbox: dict,
+        result_scope: str,
+        purpose=None,
+        **extra,
+    ) -> dict:
         metadata = {
             "command": command,
             "shell": shell_name,
             "stdin": stdin_mode,
             "sandbox": sandbox,
+            "result_scope": result_scope,
         }
         if purpose is not None:
             metadata["purpose"] = str(purpose)
