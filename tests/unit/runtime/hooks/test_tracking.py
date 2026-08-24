@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from agent.loop import AgentLoop
+from runtime.config import RunConfig
 from runtime.hooks.tracking import test_result_hook as record_test_result
+from runtime.recovery import RecoveryPolicy
 from tools.base import ToolResult
 
 
@@ -23,6 +27,8 @@ def make_context():
         current_turn_id=1,
         turn_count=0,
         mutation_version=0,
+        repair_attempts=0,
+        config=RunConfig(),
     )
 
 
@@ -58,6 +64,7 @@ def test_verify_purpose_records_non_test_bash_failure() -> None:
     assert context.last_test_result["command"] == 'python -c "raise SystemExit(1)"'
     assert result.metadata["verification_command"] is True
     assert "test_command" not in result.metadata
+    assert RecoveryPolicy().should_inject_retry(context) is True
 
 
 def test_verify_purpose_can_come_from_metadata() -> None:
@@ -70,6 +77,38 @@ def test_verify_purpose_can_come_from_metadata() -> None:
     assert context.last_test_result is not None
     assert context.last_test_result["ok"] is True
     assert result.metadata["verification_command"] is True
+
+
+@pytest.mark.parametrize("purpose", ["run", "probe"])
+def test_environment_probe_does_not_overwrite_verification_or_trigger_recovery(
+    purpose: str,
+) -> None:
+    context, _ = run_test_result_hook(
+        arguments={
+            "command": "node --check app.js",
+            "purpose": "verify",
+            "result_scope": "command",
+        },
+        metadata={"purpose": "verify", "result_scope": "command"},
+        ok=True,
+    )
+    recorded = context.task_test_result
+
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "curl -fsSI http://127.0.0.1:4173/",
+            "purpose": purpose,
+            "result_scope": "command",
+        },
+        metadata={"purpose": purpose, "result_scope": "command"},
+        ok=False,
+        context=context,
+    )
+
+    assert context.last_test_result is recorded
+    assert context.task_test_result is recorded
+    assert "verification_command" not in result.metadata
+    assert RecoveryPolicy().should_inject_retry(context) is False
 
 
 def test_launcher_scope_does_not_overwrite_existing_verification() -> None:

@@ -14,6 +14,7 @@ DEFAULT_TIMEOUT_SECONDS = 120
 MAX_TIMEOUT_SECONDS = 600
 EXIT_EXPECTATIONS = {"zero", "nonzero"}
 RESULT_SCOPES = {"command", "launcher"}
+PURPOSES = {"run", "probe", "verify"}
 
 
 class BashTool(BaseTool):
@@ -21,8 +22,10 @@ class BashTool(BaseTool):
     description = (
         "Run commands, tests, verification, or read-only discovery from WORKDIR. Repository "
         "mutations use edit_file/write_file/delete_file, not Bash (including apply_patch, "
-        'sed -i, redirection, heredocs, or Python writes). purpose="verify" enables fail-fast '
-        "and must not mutate files; exit_expectation declares the expected status. "
+        "sed -i, redirection, heredocs, or Python writes). Use purpose=verify only for "
+        "authoritative task verification; it enables fail-fast and must not mutate files. Use "
+        "purpose=probe for environment, setup, or availability diagnostics and purpose=run for "
+        "ordinary execution. exit_expectation declares the expected status. "
         "result_scope is required: use command for the command/check outcome and launcher when "
         "the result only starts or submits work; launcher success is not verification success."
     )
@@ -37,7 +40,12 @@ class BashTool(BaseTool):
             "input": {"type": "string"},
             "purpose": {
                 "type": "string",
-                "description": "Use verify for non-mutating validation; enables fail-fast.",
+                "enum": ["run", "probe", "verify"],
+                "description": (
+                    "Optional command intent. Use verify only for authoritative final task "
+                    "verification; use probe for environment/setup/availability diagnostics "
+                    "that must not become task verification; use run for ordinary execution."
+                ),
             },
             "exit_expectation": {
                 "type": "string",
@@ -89,6 +97,9 @@ class BashTool(BaseTool):
         result_scope = args.get("result_scope")
         if not isinstance(result_scope, str) or result_scope not in RESULT_SCOPES:
             raise ToolValidationError('result_scope must be either "command" or "launcher"')
+        purpose = args.get("purpose")
+        if purpose is not None and (not isinstance(purpose, str) or purpose not in PURPOSES):
+            raise ToolValidationError('purpose must be one of "run", "probe", or "verify"')
 
     def call(self, args: dict, context) -> ToolResult:
         command = str(args["command"])

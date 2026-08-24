@@ -62,6 +62,31 @@ def test_result_scope_is_required_and_validated_exactly() -> None:
             tool.validate(args, context=None)
 
 
+def test_purpose_contract_accepts_run_probe_verify_and_rejects_other_values() -> None:
+    tool = BashTool()
+
+    assert tool.input_schema["properties"]["purpose"]["enum"] == [
+        "run",
+        "probe",
+        "verify",
+    ]
+    for purpose in ("run", "probe", "verify"):
+        tool.validate(
+            {"command": "echo ok", "purpose": purpose, "result_scope": "command"},
+            context=None,
+        )
+    for purpose in ("check", "VERIFY", 1):
+        with pytest.raises(ToolValidationError, match="purpose"):
+            tool.validate(
+                {
+                    "command": "echo ok",
+                    "purpose": purpose,
+                    "result_scope": "command",
+                },
+                context=None,
+            )
+
+
 def test_verify_commands_use_fail_fast_posix_shell(monkeypatch) -> None:
     tool = BashTool()
     monkeypatch.setattr("tools.bash.platform.system", lambda: "Linux")
@@ -70,12 +95,44 @@ def test_verify_commands_use_fail_fast_posix_shell(monkeypatch) -> None:
 
     assert argv == ["/bin/sh", "-lec", "false\ntrue"]
     assert tool._shell_name(fail_fast=True) == "/bin/sh -lec"
-    assert 'purpose="verify"' in tool.description
+    assert "purpose=verify" in tool.description
     assert "fail-fast" in tool.description
     assert "edit_file/write_file/delete_file, not Bash" in tool.description
     assert "apply_patch" in tool.description
     assert "must not mutate files" in tool.description
-    assert "non-mutating validation" in tool.input_schema["properties"]["purpose"]["description"]
+    assert (
+        "authoritative final task verification"
+        in tool.input_schema["properties"]["purpose"]["description"]
+    )
+
+
+def test_probe_does_not_enable_verify_fail_fast(monkeypatch, tmp_path) -> None:
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return SimpleNamespace(stdout="ready", stderr=None, returncode=0)
+
+    monkeypatch.setattr("tools.bash.platform.system", lambda: "Linux")
+    monkeypatch.setattr("tools.bash.subprocess.run", fake_run)
+    context = SimpleNamespace(repo_path=tmp_path, sandbox=None)
+
+    result = BashTool().call(
+        {
+            "command": "curl -fsSI http://127.0.0.1:4173/",
+            "purpose": "probe",
+            "result_scope": "command",
+        },
+        context,
+    )
+
+    assert captured["argv"] == [
+        "/bin/sh",
+        "-lc",
+        "curl -fsSI http://127.0.0.1:4173/",
+    ]
+    assert result.metadata["purpose"] == "probe"
+    assert result.metadata["fail_fast"] is False
 
 
 def test_normal_commands_keep_existing_posix_shell_behavior(monkeypatch) -> None:
