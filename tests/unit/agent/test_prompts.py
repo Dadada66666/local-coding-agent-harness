@@ -79,10 +79,27 @@ def test_execution_prompt_keeps_only_lifecycle_guidance() -> None:
     assert "pending steps may be completed directly" in prompt
     assert "in_progress only for work spanning calls" in prompt
     assert "Batch routine update_step with the next known repository tool call" in prompt
+    assert "approved plan is the execution scope" in prompt
+    assert "validation/inspection-only plan does not authorize fixing" in prompt
+    assert "Material scope expansion requires replanning" in prompt
+    assert "stated outcome has been achieved or observed" in prompt
+    assert "completing a prerequisite is insufficient" in prompt
     assert "Request replanning for material deviations" in prompt
     assert "make update_plan action complete the final ToolCall" in prompt
     assert "verification reserve" not in prompt.lower()
     assert "calls remain" not in prompt.lower()
+
+
+def test_base_prompt_keeps_validation_only_tasks_read_only_without_repair_authority(
+    tmp_path,
+) -> None:
+    prompt = build_system_prompt(tmp_path, plan_state(PlanPhase.INACTIVE))
+
+    assert "validation, inspection, audit, review, or test-only tasks" in prompt
+    assert "report discovered defects instead of modifying repository files" in prompt
+    assert "unless the user explicitly requested repair or modification" in prompt
+    assert 'purpose "verify" only for authoritative final task verification' in prompt
+    assert 'use "probe" for environment, setup, or availability diagnostics' in prompt
 
 
 def test_executing_prompt_has_no_dynamic_call_budget_warning(tmp_path) -> None:

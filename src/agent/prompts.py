@@ -25,8 +25,9 @@ Behavior:
 - After code edits, run the smallest relevant check when available.
 - Do not assume the workdir is a Git repository; prefer view_diff for diff inspection.
 - Report honestly if verification was not possible.
+- For validation, inspection, audit, review, or test-only tasks, report discovered defects instead of modifying repository files unless the user explicitly requested repair or modification.
 - For commands that require stdin, use the bash tool input field.
-- When running a command to validate behavior, set bash purpose to "verify".
+- Use bash purpose "verify" only for authoritative final task verification; use "probe" for environment, setup, or availability diagnostics and "run" for ordinary execution.
 
 Safety:
 - Do not attempt broad or irreversible destructive operations.
@@ -149,6 +150,9 @@ def build_plan_instructions(
     if plan_state.phase is PlanPhase.EXECUTING:
         return f"""Plan phase: executing authorized plan version {plan_state.version}.
 - Follow the approved plan and use repository tools normally.
+- The approved plan is the execution scope. A validation/inspection-only plan does not authorize fixing discovered issues; report findings unless repair is explicit in the user request or approved plan.
+- Material scope expansion requires replanning.
+- Mark a step completed only after its stated outcome has been achieved or observed; completing a prerequisite is insufficient.
 - Plan status is milestone bookkeeping, not a turn boundary: pending steps may be completed directly; use in_progress only for work spanning calls.
 - Batch routine update_step with the next known repository tool call; wait only when its result determines that action.
 - Repository tools still pass through the existing Permission Gate.
