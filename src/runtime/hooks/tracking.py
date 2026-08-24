@@ -142,7 +142,8 @@ def test_result_hook(tool_call, tool, result, context) -> None:
         return None
 
     command = str(tool_call.arguments.get("command", ""))
-    is_test_command = _is_test_command(command)
+    purpose = _verification_purpose(tool_call, result)
+    is_test_command = purpose is None and _is_test_command(command)
     is_verification_command = _is_verification_command(tool_call, result)
 
     if is_test_command or is_verification_command:
