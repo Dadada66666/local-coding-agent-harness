@@ -50,30 +50,34 @@ def test_real_stdio_discovery_calls_and_process_reuse(tmp_path: Path) -> None:
         trace_text = json.dumps(context.trace.events)
         assert str(path) not in trace_text
         assert str(FIXTURE_SERVER) not in trace_text
-        echo = registry.get("mcp__demo__echo")
-        process_id = registry.get("mcp__demo__process_id")
-        structured = registry.get("mcp__demo__structured")
-        tool_error = registry.get("mcp__demo__tool_error")
-        unsupported = registry.get("mcp__demo__unsupported_content")
+        search = registry.get("mcp_tool_search")
+        call = registry.get("mcp_tool_call")
 
-        assert echo is not None
-        assert process_id is not None
-        assert structured is not None
-        assert tool_error is not None
-        assert unsupported is not None
-        assert echo.call({"text": "hello"}, context).content == "hello"
-        structured_result = structured.call({"value": 3}, context)
+        assert search is not None
+        assert call is not None
+        assert registry.get("mcp__demo__echo") is None
+        found = json.loads(search.call({"query": "echo"}, context).content)
+        assert found["tools"][0]["canonical_tool_id"] == "mcp__demo__echo"
+        assert (
+            call.call({"tool": "mcp__demo__echo", "arguments": {"text": "hello"}}, context).content
+            == "hello"
+        )
+        structured_result = call.call(
+            {"tool": "mcp__demo__structured", "arguments": {"value": 3}}, context
+        )
         assert structured_result.ok is True
         assert '[structured_content]\n{"double":6,"value":3}' in structured_result.content
-        error_result = tool_error.call({}, context)
+        error_result = call.call({"tool": "mcp__demo__tool_error", "arguments": {}}, context)
         assert error_result.ok is False
         assert error_result.metadata["mcp_error_kind"] == "tool_error"
-        unsupported_result = unsupported.call({}, context)
+        unsupported_result = call.call(
+            {"tool": "mcp__demo__unsupported_content", "arguments": {}}, context
+        )
         assert unsupported_result.ok is False
         assert unsupported_result.metadata["mcp_error_kind"] == "unsupported_content"
         assert "fixture-image" not in unsupported_result.content
-        first_pid = process_id.call({}, context).content
-        second_pid = process_id.call({}, context).content
+        first_pid = call.call({"tool": "mcp__demo__process_id", "arguments": {}}, context).content
+        second_pid = call.call({"tool": "mcp__demo__process_id", "arguments": {}}, context).content
         assert first_pid == second_pid
     finally:
         runtime.close(context)
@@ -103,10 +107,23 @@ def test_real_streamable_http_reuses_runtime_and_sdk_client_owner(tmp_path: Path
         runtime, registry, context = start_runtime(path)
         try:
             assert f"127.0.0.1:{port}" not in json.dumps(context.trace.events)
-            echo = registry.get("mcp__demo__echo")
-            assert echo is not None
-            assert echo.call({"text": "one"}, context).content == "one"
-            assert echo.call({"text": "two"}, context).content == "two"
+            search = registry.get("mcp_tool_search")
+            call = registry.get("mcp_tool_call")
+            assert search is not None
+            assert call is not None
+            assert json.loads(search.call({"query": "echo"}, context).content)["result_count"] == 1
+            assert (
+                call.call(
+                    {"tool": "mcp__demo__echo", "arguments": {"text": "one"}}, context
+                ).content
+                == "one"
+            )
+            assert (
+                call.call(
+                    {"tool": "mcp__demo__echo", "arguments": {"text": "two"}}, context
+                ).content
+                == "two"
+            )
             assert runtime.started is True
         finally:
             runtime.close(context)

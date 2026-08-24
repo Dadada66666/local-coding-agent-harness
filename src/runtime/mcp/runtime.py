@@ -7,6 +7,7 @@ from concurrent.futures import Future
 import json
 import re
 import threading
+from types import MappingProxyType
 from typing import Any
 
 from mcp import Client, MCPError, StdioServerParameters, stdio_client, types
@@ -38,6 +39,20 @@ class DiscoveredMCPTool:
     remote_name: str
     description: str
     input_schema: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class MCPCatalogEntry:
+    canonical_tool_id: str
+    server_id: str
+    remote_name: str
+    description: str
+    input_schema: dict[str, Any]
+    binding: Any
+    server_terms: frozenset[str]
+    name_terms: frozenset[str]
+    description_terms: frozenset[str]
+    property_terms: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +111,8 @@ class MCPRuntime:
         self._started = False
         self._closed = False
         self._lock = threading.Lock()
+        self._catalog: tuple[MCPCatalogEntry, ...] = ()
+        self._catalog_by_id = MappingProxyType({})
 
     @property
     def started(self) -> bool:
@@ -104,6 +121,13 @@ class MCPRuntime:
     @property
     def closed(self) -> bool:
         return self._closed
+
+    @property
+    def catalog(self) -> tuple[MCPCatalogEntry, ...]:
+        return self._catalog
+
+    def resolve_catalog_tool(self, canonical_tool_id: str) -> MCPCatalogEntry | None:
+        return self._catalog_by_id.get(canonical_tool_id)
 
     def start(self, context, registry) -> None:
         with self._lock:
@@ -116,7 +140,7 @@ class MCPRuntime:
         future: Future[list[_ServerDiscovery]] = Future()
         try:
             discoveries = self._submit(_StartCommand(future=future)).result()
-            adapters = self._preflight_adapters(discoveries, registry)
+            catalog, gateways = self._preflight_catalog(discoveries, registry)
         except _StartupFailure as exc:
             self._join_worker()
             self._closed = True
@@ -141,8 +165,12 @@ class MCPRuntime:
                 "MCP startup validation failed before the first provider request."
             ) from None
 
-        for adapter in adapters:
-            registry.register(adapter)
+        for gateway in gateways:
+            registry.register(gateway)
+        self._catalog = catalog
+        self._catalog_by_id = MappingProxyType(
+            {entry.canonical_tool_id: entry for entry in catalog}
+        )
         for discovery in discoveries:
             context.trace.log(
                 {
@@ -157,11 +185,15 @@ class MCPRuntime:
                     "type": "mcp_tool_discovery_completed",
                     "server_id": discovery.server_id,
                     "tool_count": len(discovery.tools),
-                    "exposed_tool_names": sorted(
-                        _exposed_name(tool.server_id, tool.remote_name) for tool in discovery.tools
-                    ),
                 }
             )
+        context.trace.log(
+            {
+                "type": "mcp_catalog_ready",
+                "registered_mcp_tool_count": len(catalog),
+                "searchable_mcp_tool_count": len(catalog),
+            }
+        )
         self._started = True
 
     def call_tool(
@@ -291,37 +323,62 @@ class MCPRuntime:
             )
         return discoveries
 
-    def _preflight_adapters(self, discoveries, registry) -> list[Any]:
-        from tools.mcp_tool import MCPTool
+    def _preflight_catalog(self, discoveries, registry):
+        from tools.mcp_tool import MCPTool, MCPToolCall, MCPToolSearch, search_terms
 
         discovered = sorted(
             (tool for discovery in discoveries for tool in discovery.tools),
             key=lambda tool: (tool.server_id, tool.remote_name),
         )
         existing_names = set(registry.all_names())
-        exposed_names: set[str] = set()
-        adapters = []
+        gateway_names = {MCPToolSearch.name, MCPToolCall.name}
+        if existing_names & gateway_names:
+            raise _PreflightFailure(
+                "collision",
+                "collision_error",
+                "MCP gateway name collides with an existing tool.",
+            )
+        canonical_names: set[str] = set()
+        catalog: list[MCPCatalogEntry] = []
         for tool in discovered:
             name = _exposed_name(tool.server_id, tool.remote_name)
             _validate_tool(tool, name)
-            if name in existing_names or name in exposed_names:
+            if name in existing_names or name in canonical_names:
                 raise _PreflightFailure(
                     "collision",
                     "collision_error",
-                    "MCP tool name collides with an existing exposed tool.",
+                    "MCP tool name collides with an existing tool identity.",
                 )
-            exposed_names.add(name)
-            adapters.append(
-                MCPTool(
-                    runtime=self,
+            canonical_names.add(name)
+            binding = MCPTool(
+                runtime=self,
+                server_id=tool.server_id,
+                remote_name=tool.remote_name,
+                name=name,
+                description=tool.description,
+                input_schema=tool.input_schema,
+            )
+            properties = tool.input_schema.get("properties")
+            property_names = properties if isinstance(properties, dict) else {}
+            catalog.append(
+                MCPCatalogEntry(
+                    canonical_tool_id=name,
                     server_id=tool.server_id,
                     remote_name=tool.remote_name,
-                    name=name,
                     description=tool.description,
                     input_schema=tool.input_schema,
+                    binding=binding,
+                    server_terms=search_terms(tool.server_id),
+                    name_terms=search_terms(tool.remote_name),
+                    description_terms=search_terms(tool.description),
+                    property_terms=frozenset(
+                        term
+                        for property_name in property_names
+                        for term in search_terms(property_name)
+                    ),
                 )
             )
-        return adapters
+        return tuple(catalog), (MCPToolSearch(self), MCPToolCall(self))
 
     def _submit(self, command: _Command) -> Future[Any]:
         if self._loop is None or self._queue is None:

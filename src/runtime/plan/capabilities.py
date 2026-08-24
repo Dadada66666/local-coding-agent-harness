@@ -16,12 +16,11 @@ READ_ONLY_INSPECTION_TOOLS = frozenset(
         "history_list_items",
         "history_search_contents",
         "history_read_item",
+        "mcp_tool_search",
     }
 )
 PLANNING_ACTIONS = frozenset({"replace_plan", "submit", "cancel"})
-EXECUTING_ACTIONS = frozenset(
-    {"update_step", "request_replan", "cancel", "complete"}
-)
+EXECUTING_ACTIONS = frozenset({"update_step", "request_replan", "cancel", "complete"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,9 +82,7 @@ def plan_capabilities(
         visible_tools = READ_ONLY_INSPECTION_TOOLS | {"update_plan"}
     elif waiting:
         visible_tools = (
-            frozenset({"resolve_plan_response"})
-            if has_user_continuation
-            else frozenset()
+            frozenset({"resolve_plan_response"}) if has_user_continuation else frozenset()
         )
     elif state.phase is PlanPhase.EXECUTING:
         visible_tools = None
