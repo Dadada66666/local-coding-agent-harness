@@ -111,6 +111,34 @@ def test_environment_probe_does_not_overwrite_verification_or_trigger_recovery(
     assert RecoveryPolicy().should_inject_retry(context) is False
 
 
+@pytest.mark.parametrize(
+    ("command", "purpose"),
+    [
+        ("pytest --version", "probe"),
+        ("npm test -- --list", "run"),
+    ],
+)
+def test_explicit_non_verification_purpose_suppresses_legacy_test_detection(
+    command: str,
+    purpose: str,
+) -> None:
+    context, result = run_test_result_hook(
+        arguments={
+            "command": command,
+            "purpose": purpose,
+            "result_scope": "command",
+        },
+        metadata={"purpose": purpose, "result_scope": "command"},
+        ok=False,
+    )
+
+    assert context.last_test_result is None
+    assert not hasattr(context, "task_test_result")
+    assert "verification_command" not in result.metadata
+    assert "test_command" not in result.metadata
+    assert RecoveryPolicy().should_inject_retry(context) is False
+
+
 def test_launcher_scope_does_not_overwrite_existing_verification() -> None:
     command = "opaque verification command"
     context, _ = run_test_result_hook(
@@ -276,6 +304,23 @@ def test_test_command_is_still_recorded_without_verify_purpose() -> None:
     assert context.last_test_result["ok"] is True
     assert result.metadata["verification_command"] is True
     assert result.metadata["test_command"] is True
+
+
+def test_explicit_verify_keeps_test_command_authoritative() -> None:
+    context, result = run_test_result_hook(
+        arguments={
+            "command": "pytest",
+            "purpose": "verify",
+            "result_scope": "command",
+        },
+        metadata={"purpose": "verify", "result_scope": "command"},
+        ok=True,
+    )
+
+    assert context.task_test_result["ok"] is True
+    assert context.task_test_result["command"] == "pytest"
+    assert result.metadata["verification_command"] is True
+    assert "test_command" not in result.metadata
 
 
 def test_denied_bash_result_is_not_recorded_as_verification() -> None:
