@@ -145,6 +145,22 @@ def test_result_hook(tool_call, tool, result, context) -> None:
     is_test_command = _is_test_command(command)
     is_verification_command = _is_verification_command(tool_call, result)
 
+    if is_test_command or is_verification_command:
+        result_scope = result.metadata.get("result_scope")
+        if result_scope != "command":
+            _record_verification_ignored(
+                tool_call,
+                result,
+                context,
+                command=command,
+                reason=(
+                    "launcher_result"
+                    if result_scope == "launcher"
+                    else "missing_execution_result_scope"
+                ),
+            )
+            return None
+
     if (
         (is_test_command or is_verification_command)
         and _mutation_operation_kind(tool_call, tool, result, context)

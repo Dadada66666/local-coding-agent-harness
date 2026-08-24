@@ -80,27 +80,27 @@ def test_bash_protected_read_is_denied_before_execution(tmp_path) -> None:
 
     direct = context.permission_gate.check(
         bash,
-        {"command": "sed -n '1,20p' .env"},
+        {"command": "sed -n '1,20p' .env", "result_scope": "command"},
         context,
     )
     compound = context.permission_gate.check(
         bash,
-        {"command": "ls -la .env && sed -n '1,20p' .env"},
+        {"command": "ls -la .env && sed -n '1,20p' .env", "result_scope": "command"},
         context,
     )
     example = context.permission_gate.check(
         bash,
-        {"command": "cat .env.example"},
+        {"command": "cat .env.example", "result_scope": "command"},
         context,
     )
     git_status = context.permission_gate.check(
         bash,
-        {"command": "git status --short"},
+        {"command": "git status --short", "result_scope": "command"},
         context,
     )
     git_config = context.permission_gate.check(
         bash,
-        {"command": "git config --list"},
+        {"command": "git config --list", "result_scope": "command"},
         context,
     )
 
@@ -120,7 +120,7 @@ def test_bash_protected_mutation_is_denied_even_without_extracted_paths(tmp_path
 
     decision = context.permission_gate.check(
         bash,
-        {"command": "Set-Content .env 'SECRET=changed'"},
+        {"command": "Set-Content .env 'SECRET=changed'", "result_scope": "command"},
         context,
     )
 
@@ -146,7 +146,7 @@ def test_tool_result_is_redacted_before_messages_and_artifacts(
     )
 
     result = runner.runtime.executor.execute(
-        ToolCall("read-secret", "bash", {"command": "printf safe"}),
+        ToolCall("read-secret", "bash", {"command": "printf safe", "result_scope": "command"}),
         context,
     )
     context.add_tool_result("read-secret", result.content)
@@ -195,7 +195,7 @@ def test_large_tool_output_is_persisted_once_and_recoverable(monkeypatch, tmp_pa
     )
 
     result = runner.runtime.executor.execute(
-        ToolCall("large-output", "bash", {"command": "printf safe"}),
+        ToolCall("large-output", "bash", {"command": "printf safe", "result_scope": "command"}),
         context,
     )
 
@@ -242,7 +242,7 @@ def test_large_output_persistence_failure_returns_bounded_preview(monkeypatch, t
     )
 
     result = runner.runtime.executor.execute(
-        ToolCall("large-output", "bash", {"command": "printf safe"}),
+        ToolCall("large-output", "bash", {"command": "printf safe", "result_scope": "command"}),
         context,
     )
 

@@ -102,11 +102,18 @@ def build_plan_instructions(
 
     if plan_state.execution_path is ExecutionPath.UNDECIDED:
         return """Plan policy: auto; execution path is undecided.
+- This is an execution-path decision phase, not open-ended task execution or capability enumeration.
 - Decide whether this task is a small, local, low-risk direct change or needs a structured plan.
-- You may inspect the repository with read-only tools first.
+- Use read-only repository inspection or capability discovery only until you have enough information to choose Direct or Plan.
+- Execution-only tools are intentionally hidden until an execution path is selected.
+- Once a relevant capability is identified and the path can be chosen, call select_execution_mode before continuing task work or further synonymous capability discovery.
+- Do not exhaustively discover every tool needed later; after selection, the Runtime exposes the existing surface for the chosen path.
 - Before Bash or any repository mutation, call select_execution_mode with a concrete reason.
 - Prefer plan for multi-module, architectural, ambiguous, security-sensitive, or dependent work.
 - A natural-language claim does not select an execution path; use the tool."""
+
+    if plan_state.execution_path is ExecutionPath.DIRECT:
+        return ""
 
     if plan_state.phase is PlanPhase.PLANNING:
         approval_rule = (

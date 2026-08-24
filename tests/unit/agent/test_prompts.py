@@ -30,6 +30,37 @@ def plan_state(phase: PlanPhase):
     )
 
 
+def auto_state(execution_path: ExecutionPath):
+    return SimpleNamespace(
+        policy=PlanPolicy.AUTO,
+        approval_policy=PlanApprovalPolicy.MANUAL,
+        execution_path=execution_path,
+        phase=PlanPhase.INACTIVE,
+        version=0,
+        steps=[],
+        revision_feedback=None,
+    )
+
+
+def test_auto_undecided_prompt_is_a_bounded_path_decision_phase() -> None:
+    prompt = build_plan_instructions(auto_state(ExecutionPath.UNDECIDED))
+
+    assert "execution-path decision phase" in prompt
+    assert "not open-ended task execution or capability enumeration" in prompt
+    assert "only until you have enough information to choose Direct or Plan" in prompt
+    assert "Execution-only tools are intentionally hidden" in prompt
+    assert "call select_execution_mode before continuing task work" in prompt
+    assert "further synonymous capability discovery" in prompt
+    assert "Do not exhaustively discover every tool needed later" in prompt
+
+
+def test_auto_direct_has_no_plan_restriction_prompt() -> None:
+    prompt = build_plan_instructions(auto_state(ExecutionPath.DIRECT))
+
+    assert prompt == ""
+    assert "Do not start unapproved repository work" not in prompt
+
+
 def test_planning_prompt_preserves_model_strategy_and_explicit_protocol() -> None:
     prompt = build_plan_instructions(plan_state(PlanPhase.PLANNING))
 
