@@ -2,20 +2,22 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Local Coding Agent Harness 是一个本地 Coding Agent Runtime。它让模型通过受控工具操作真实仓库，而不是直接访问文件系统。
+Local Coding Agent Harness 是一个可审计的本地 Coding Agent Runtime。模型通过显式、受策略约束的工具操作真实仓库，自主选择代码调查与执行策略；Runtime 负责落实文件系统、权限、计划、验证、协议和上下文容量边界。
 
-这个 runtime 保持轻量，但覆盖了 coding agent 的核心闭环：
+核心能力：
 
-- 理解用户任务
-- 检查当前工作目录
-- 通过受控工具读取和编辑文件
-- 运行验证命令
-- 在验证失败后进行修复尝试
-- 生成 trace、report、diff、cost 等运行产物
+- 绑定文件快照的精确读取与原子编辑
+- 结构化 Direct / Plan 执行路径与明确审批状态
+- 分层权限检查与可选的操作系统级 Bash Sandbox
+- 具备 ToolResult 准入和可恢复 Full Rebase 的 Context Manager V3
+- 使用稳定 search/call gateway 的 MCP V2 Client
+- 权威验证状态追踪与有界失败恢复
+- 完整 Trace、Report、Diff、Artifact 和 Provider usage 产物
+- 隔离、确定性的 Agent Evaluation Benchmark
 
-## 当前范围
+## 架构
 
-本项目聚焦单个本地 agent loop。它包含一个可选 MCP Client，但不包含 sub-agent、MCP Server 托管、后台任务、插件发现、worktree 隔离或 LangGraph adapter。
+代码将模型编排、工具语义、安全策略、上下文管理和可观测性拆分为独立 Runtime 职责。
 
 核心目录：
 
@@ -30,7 +32,7 @@ Local Coding Agent Harness 是一个本地 Coding Agent Runtime。它让模型�
 - `src/cli/`：Typer 命令、交互模式和 Trace Replay
 - `tests/unit/` 与 `tests/integration/`：按源码领域组织的测试
 
-依赖方向和主要执行链路见 [`docs/architecture.md`](docs/architecture.md)。
+依赖方向和主要执行链路见 [`docs/architecture.md`](docs/architecture.md)。Context Manager V3 与 MCP V2 分别以 [`docs/spec.md`](docs/spec.md) 和 [`docs/mcp-client-spec.md`](docs/mcp-client-spec.md) 中的冻结规范为准。
 
 ## 安装
 
@@ -97,7 +99,7 @@ agent replay <run_id>
 - `accept_edits`：允许普通文件编辑和安全命令；风险命令仍会被 gate。
 - `manual_approval`：编辑和命令执行前都询问用户。
 
-## MCP Client
+## MCP V2 Client
 
 只有宿主显式传入配置路径时才启用 MCP：
 
@@ -106,7 +108,7 @@ agent --mcp-config /absolute/path/to/mcp.json
 agent run "使用已配置的服务" --mcp-config /absolute/path/to/mcp.json
 ```
 
-严格的 v1 配置支持 stdio 与裸 Streamable HTTP：
+配置支持 stdio 与裸 Streamable HTTP：
 
 ```json
 {
@@ -124,7 +126,12 @@ agent run "使用已配置的服务" --mcp-config /absolute/path/to/mcp.json
 }
 ```
 
-Runtime 不会自动发现仓库内的 MCP 配置。v1 不支持 stdio 环境变量注入、凭据、HTTP headers、OAuth、旧 SSE、resources、prompts 或 MCP tasks。远程工具在 planning 与 approval 阶段隐藏；direct 或已批准 executing 阶段继续使用现有 Permission Gate，并作为保守远程操作请求授权。工具参数是否合法最终由 MCP Server 判断。
+`AgentContext` 创建后，Session 连接已配置的 Server，完成一次工具发现，并构建不可变 Catalog。远程 Schema 不会线性扩张 Provider 的 `tools[]`；模型只看到一个有界且稳定的 Gateway Surface：
+
+- `mcp_tool_search`：在本地 Catalog Metadata 上执行确定性搜索。
+- `mcp_tool_call`：解析一个 canonical tool ID，并通过现有 MCP binding 执行远程调用。
+
+Planning 和 Auto 未决策阶段只暴露本地 Metadata Search；Direct 和已批准执行阶段暴露两个 Gateway。单个远程 Schema 始终保留在 Runtime Catalog 中，因此搜索和调用不会重写 Provider 的基础工具面。远程调用继续经过现有 Plan Gate、Permission Gate、post-tool hooks、ToolResult admission 和 Context Manager；远程参数是否合法仍由 MCP Server 最终判断。
 
 ## Plan Mode
 
@@ -203,8 +210,6 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 模型选择理由、计划版本、授权来源、阶段和步骤进度。快照不保存环境数据，并在落盘前脱敏。`plan.json` 是计划决策与
 执行状态的审计快照，不等同于完整会话恢复。
 
-计划子系统明确不实现 SQLite、多 Worker、分布式调度、租约、心跳、后台执行、任意崩溃点恢复或 Web UI。
-
 ## 工具
 
 工具通过 `ToolRegistry` 注册，并由统一的 `ToolExecutor` 执行。每个工具自己负责参数校验、操作分类和工具语义；权限检查、trace 记录、大输出落盘、验证结果追踪等 runtime 逻辑由 hooks 处理。
@@ -239,7 +244,7 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 - no-op edit 会成功返回，但不会标记文件已变更。
 - 交互会话会区分 whole-run 状态和 current-task 状态。上一轮 prompt 的失败验证或 changed files 不会污染下一轮 prompt 的 success inference。
 - Task 生命周期显式区分 `idle`、`running`、`waiting_user`、`completed`、`failed` 和 `cancelled`。
-  `finished` 只表示当前 loop invocation 已停止；等待用户的任务不会被归档、重置，也不会触发 task-boundary 压缩。
+  `finished` 只表示当前 loop invocation 已停止；等待用户的任务不会被归档或重置。
 - `max_turns` 限制每个任务的模型调用次数（默认 40 次）；交互运行中的 trace turn ID 仍保持全局唯一。
 - runtime 会记录并校验模型 `stop_reason`。截断、拒绝或协议不一致的响应不能被报告为成功；未提供 `stop_reason` 的兼容 provider 仍使用内容块判断。
 - 并行工具调用会在一个 user message 中返回全部匹配的 `tool_result`。terminal deny 后未执行的调用会得到显式 cancelled result，保持消息历史合法。
@@ -247,9 +252,10 @@ Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠�
 - Bash 文件删除会返回非终止的工具路由失败，让模型改用 `delete_file`；递归或大范围破坏性命令仍会终止任务。
 - Shell 风险分析具备引号感知能力，并会记录复合副作用。网络命令如果同时创建目录或写文件，审批会同时展示目标主机和文件路径，不会用单一 `network` 标签隐藏写入行为。
 - 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
-- 上下文压力计算覆盖 system prompt、tool schemas、messages、预留输出和安全余量；provider usage 经本地序列化估算校准后作为保守锚点。容量软上限与默认 272K 工作目标取较小值；只有 token 限制都关闭时，字符阈值才作为兼容兜底。
-- 上下文缩减只由真实压力驱动。提前投影水位按工作目标派生并带滞回，只回收受保护 recent suffix 之前的已消费结果；单轮硬预算优先回收非源码结果，再按需回收源码页。已消费源码页转换为保持行坐标的 source stub，不生成通用 artifact；Bash、grep 和日志仍保留可恢复 artifact。完整压缩会写入有界 source manifest，append-only 审计历史不会被改写。
-- 交互任务切换时，如果已完成历史超过 token 阈值，runtime 会在下一任务开始前生成确定性 checkpoint；当前 prompt 和 append-only 审计链保持完整。
+- 上下文压力统一使用 input-only accounting，只计算 system prompt、tool schemas 和 Provider 可见 messages；输出预留与安全余量只在推导安全输入上限时应用一次。
+- 正常 Context Epoch 保持 append-only。新 ToolResult Batch 在第一次对模型可见前完成 shaping，并必须满足聚合轮次预算。
+- 只有真实 Context Pressure 才触发一次原子 Full Rebase；候选由权威 Runtime State、结构化 Semantic Handoff 和最新完整 Raw Rounds 组成。普通生命周期转换不会重写历史 Context。
+- 被移出的证据分别通过 Source、Artifact 和 History 路径恢复。Source Recovery 继续绑定 path/SHA/range；History Recovery 只把请求的证据追加到当前尾部。
 - provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
 - 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。
 - unknown tool 和参数校验失败会作为正常 tool result 进入 trace，方便排障。
@@ -279,19 +285,19 @@ provider 返回时，cache creation/read usage 与上下文管理的估算节省
 
 ## 验证机制
 
-模型运行行为验证命令时，应设置：
+Bash 的 `purpose` 用来声明命令是否属于当前任务的权威验证：
 
 ```json
 {"purpose": "verify"}
 ```
 
-runtime 会记录以下验证结果：
+支持三种意图：
 
-- `pytest`、`unittest`、`npm test` 等已知测试命令
-- 任意带 `purpose="verify"` 的 `bash` 命令
+- `verify`：当前任务最终结果的权威验证证据
+- `probe`：环境、准备状态或可用性诊断
+- `run`：普通命令执行
 
-`find`、`git status`、`git diff`、`ls`、`rg`、`grep` 等只读 discovery 命令即使带了 `verify`，也不会被当作验证结果。
-显式修改文件的命令同样不会被记录为验证；应先使用结构化文件工具完成修改，再通过独立的 `bash` 调用验证。
+`result_scope="command"` 表示退出状态描述前台命令；`result_scope="launcher"` 只描述已提交的 Launcher，因此永远不构成权威验证。未显式提供 purpose 的已知测试命令保留兼容验证语义；显式 `run` 或 `probe` 会抑制该推断。只读 Discovery、准备探测和显式修改文件的命令都不会覆盖权威验证状态。
 
 ## Sandbox Runtime
 
@@ -328,6 +334,40 @@ sandbox 是执行边界，不是 `PermissionGate` 的替代品。破坏性命令
 
 Bash 使用经过清理的环境，而不是继承 Harness 进程的完整环境。Tool output 会在
 回填模型、写 trace 或持久化 artifact 之前统一脱敏。
+
+## Agent Evaluation Benchmark
+
+`benchmarks/` 下的独立评估层通过公开 Python API 运行 Agent，不会成为生产 Runtime 的依赖。每个案例都会把干净 Fixture 复制到隔离临时工作区，拒绝意外的交互式输入，并在 Agent 结束后使用独立 pytest 进程评估最终仓库。
+
+Evaluator 明确区分四类结果：
+
+- `task_correct`：确定性外部 Oracle 通过。
+- `runtime_success`：Runtime 到达成功终态。
+- `runtime_oracle_agreement`：Runtime 成功判断与外部正确性一致。
+- `end_to_end_pass`：正确性、Runtime 完成、执行完整性和案例专属约束全部通过。
+
+当前六个合同案例覆盖确定性修复、validation-only 修改纪律、Required Plan 授权、跨模块定位、回归行为保留和有界验证行为。测试文件保持不可变，变更路径由 Benchmark 独立检查；模型调用和 Token 等效率指标只用于观测，不作为正确性门槛。
+
+顺序运行全部案例：
+
+```bash
+python -m benchmarks.runner
+```
+
+生成结果：
+
+```text
+benchmarks/results/resume.json
+benchmarks/results/resume.md
+```
+
+在 commit `a9beb66c03cb9c78eaf266606f9e02d82ab25e38`、模型 `gpt-5.6-terra` 的一次参考运行中，六个案例全部完成，外部 Oracle 与 Runtime 判断一致，且没有未授权修改：
+
+| E2E | Task correct | Runtime/oracle agreement | Unauthorized mutations | Model calls | Input tokens | Cache-read tokens |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6/6 | 6/6 | 6/6 | 0 | 38 | 255,225 | 193,792 |
+
+这组案例用于验证确定性的 Runtime 与评估合同。报告会明确记录任务集合、模型、Commit 和原始效率数据，以便复现；该结果不被表述为一般软件工程任务的总体成功率。
 
 ## 开发
 
