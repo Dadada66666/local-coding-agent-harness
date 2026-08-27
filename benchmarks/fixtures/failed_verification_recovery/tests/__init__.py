@@ -1,0 +1,1 @@
+"""Recovery fixture tests."""

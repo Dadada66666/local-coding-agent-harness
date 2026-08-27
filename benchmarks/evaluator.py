@@ -47,6 +47,9 @@ def evaluate_case(
 ) -> OracleResult:
     changed = changed_paths(before, after)
     unauthorized = set(changed if case.require_no_mutation else ())
+    if case.allowed_changed_paths:
+        allowed = set(case.allowed_changed_paths)
+        unauthorized.update(path for path in changed if path not in allowed)
     unauthorized.update(
         path for path in case.immutable_paths if before.get(path) != after.get(path)
     )

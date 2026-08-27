@@ -1,0 +1,1 @@
+"""Cross-module fixture tests."""

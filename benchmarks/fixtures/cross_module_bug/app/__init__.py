@@ -1,0 +1,1 @@
+"""Order calculation example package."""
