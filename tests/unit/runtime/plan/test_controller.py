@@ -68,6 +68,14 @@ def test_run_config_normalizes_and_rejects_plan_policy() -> None:
         RunConfig(plan_approval_policy="sometimes")
 
 
+def test_run_config_defaults_to_interactive_permission_prompt_policy() -> None:
+    assert RunConfig().permission_prompt_policy == "interactive"
+    assert RunConfig(permission_prompt_policy="deny").permission_prompt_policy == "deny"
+
+    with pytest.raises(ValueError, match="permission_prompt_policy"):
+        RunConfig(permission_prompt_policy="allow")
+
+
 def test_auto_model_can_select_direct_only_once() -> None:
     controller = make_controller(PlanPolicy.AUTO)
 
@@ -97,6 +105,19 @@ def test_auto_decision_and_auto_approval_are_independent() -> None:
     )
     controller.replace_plan(
         [{"id": "step-1", "description": "Implement the controller"}]
+    )
+
+    controller.submit_for_execution()
+
+    assert controller.state.phase is PlanPhase.EXECUTING
+    assert controller.state.approved_version == controller.state.version
+    assert controller.state.approval_source == "auto_policy"
+
+
+def test_required_plan_can_use_auto_approval_without_bypassing_execution() -> None:
+    controller = make_controller(PlanPolicy.REQUIRED, PlanApprovalPolicy.AUTO)
+    controller.replace_plan(
+        [{"id": "step-1", "description": "Implement and verify the change"}]
     )
 
     controller.submit_for_execution()

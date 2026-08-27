@@ -22,6 +22,7 @@ class RunConfig:
     max_context_recovery_attempts: int = 1
     artifact_read_max_chars: int = 6000
     permission_mode: str = "manual_approval"
+    permission_prompt_policy: str = "interactive"
     sandbox_enabled: bool = False
     sandbox_auto_allow_bash: bool = True
     sandbox_fail_if_unavailable: bool = False
@@ -72,3 +73,7 @@ class RunConfig:
             raise ValueError("max_context_recovery_attempts must be >= 0")
         if self.artifact_read_max_chars <= 0:
             raise ValueError("artifact_read_max_chars must be > 0")
+        if self.permission_prompt_policy not in {"interactive", "deny"}:
+            raise ValueError(
+                'permission_prompt_policy must be either "interactive" or "deny"'
+            )

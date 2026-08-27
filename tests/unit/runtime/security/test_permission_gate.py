@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from runtime.config import RunConfig
@@ -7,6 +8,7 @@ from agent.loop import AgentLoop
 from agent.messages import ModelResponse, TokenUsage, ToolCall
 from runtime.bootstrap import build_runtime
 from runtime.security import BashRisk, PermissionBehavior, PermissionMode, RiskClassifier
+from runtime.security.permission_rules import PermissionRule, PermissionRuleValue
 from tools.bash import BashTool
 from tools.base import ToolResult
 from tools.delete_file import DeleteFileTool
@@ -49,14 +51,148 @@ def final_response(text: str = "done") -> ModelResponse:
     )
 
 
-def make_runner(tmp_path: Path, permission_mode: str, model_client=None) -> AgentLoop:
+def make_runner(
+    tmp_path: Path,
+    permission_mode: str,
+    model_client=None,
+    *,
+    permission_prompt_policy: str = "interactive",
+) -> AgentLoop:
     return AgentLoop(
         model_client=model_client or FakeModelClient([]),
         runtime=build_runtime(),
         repo_path=tmp_path,
         permission_mode=permission_mode,
-        config=RunConfig(permission_mode=permission_mode),
+        config=RunConfig(
+            permission_mode=permission_mode,
+            permission_prompt_policy=permission_prompt_policy,
+        ),
     )
+
+
+def test_default_prompt_policy_preserves_interactive_approval(monkeypatch, tmp_path: Path) -> None:
+    runner = make_runner(tmp_path, PermissionMode.READ_ONLY)
+    context = runner.create_context("write file", include_initial_message=True)
+    prompts = []
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": prompts.append(prompt) or "n",
+    )
+    tool = WriteFileTool()
+    args = {"path": "one.py", "content": "x = 1\n"}
+
+    decision = context.permission_gate.check(tool, args, context)
+    resolved = context.permission_gate.resolve(decision, tool, args, context)
+
+    assert prompts == ["permission> "]
+    assert resolved.behavior == PermissionBehavior.DENY
+    assert resolved.decision_reason == "user_deny"
+
+
+def test_non_interactive_unapproved_ask_denies_without_stdin_and_is_traced(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        tmp_path,
+        PermissionMode.READ_ONLY,
+        permission_prompt_policy="deny",
+    )
+    context = runner.create_context("write file", include_initial_message=True)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("stdin was read")),
+    )
+
+    result = runner.runtime.executor.execute(
+        ToolCall("write", "write_file", {"path": "one.py", "content": "x = 1\n"}),
+        context,
+    )
+
+    assert result.ok is False
+    assert result.metadata["decision_reason"] == "non_interactive_unapproved"
+    assert not (tmp_path / "one.py").exists()
+    events = [
+        json.loads(line)
+        for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        event.get("type") == "permission_decision"
+        and event.get("phase") == "resolved"
+        and event.get("decision_reason") == "non_interactive_unapproved"
+        for event in events
+    )
+    assert not any(event.get("type") == "permission_user_response" for event in events)
+
+
+def test_non_interactive_matching_allow_rule_resolves_ask_without_stdin(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        tmp_path,
+        PermissionMode.READ_ONLY,
+        permission_prompt_policy="deny",
+    )
+    context = runner.create_context("write authorized file", include_initial_message=True)
+    context.permission_rules.add(
+        PermissionRule(
+            source="policy",
+            behavior="allow",
+            value=PermissionRuleValue(
+                tool_name="write_file",
+                operation_scope="write:create:allowed.py",
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("stdin was read")),
+    )
+
+    result = runner.runtime.executor.execute(
+        ToolCall(
+            "write",
+            "write_file",
+            {"path": "allowed.py", "content": "value = 1\n"},
+        ),
+        context,
+    )
+
+    assert result.ok is True
+    assert (tmp_path / "allowed.py").read_text(encoding="utf-8") == "value = 1\n"
+
+
+def test_non_interactive_allow_rule_cannot_override_hard_path_denial(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        tmp_path,
+        PermissionMode.READ_ONLY,
+        permission_prompt_policy="deny",
+    )
+    context = runner.create_context("write outside workspace", include_initial_message=True)
+    context.permission_rules.add(
+        PermissionRule(
+            source="policy",
+            behavior="allow",
+            value=PermissionRuleValue(tool_name="write_file"),
+        )
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("stdin was read")),
+    )
+    tool = WriteFileTool()
+    args = {"path": "../outside.py", "content": "x = 1\n"}
+
+    decision = context.permission_gate.check(tool, args, context)
+    resolved = context.permission_gate.resolve(decision, tool, args, context)
+
+    assert decision.behavior == PermissionBehavior.DENY
+    assert resolved is decision
+    assert resolved.decision_reason == "path_escape"
 
 
 def test_read_only_write_file_denied_terminal(monkeypatch, tmp_path: Path) -> None:

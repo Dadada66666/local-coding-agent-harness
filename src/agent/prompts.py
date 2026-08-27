@@ -129,6 +129,7 @@ def build_plan_instructions(
         )
         return f"""Plan phase: planning (read-only).
 - Inspect the repository as needed; do not modify files or run Bash.
+- Discover only enough remote capability to make the plan executable; once a suitable capability is clear, defer detailed discovery to execution unless ambiguity blocks planning.
 - Use update_plan when you have an executable, verifiable plan.
 - Prefer coarse outcome-level steps over tiny implementation todos.
 - Plan steps contain only id and description; Runtime owns execution status.

@@ -65,6 +65,8 @@ def test_planning_prompt_preserves_model_strategy_and_explicit_protocol() -> Non
     prompt = build_plan_instructions(plan_state(PlanPhase.PLANNING))
 
     assert "Inspect the repository as needed" in prompt
+    assert "only enough remote capability to make the plan executable" in prompt
+    assert "defer detailed discovery to execution unless ambiguity blocks planning" in prompt
     assert "explicit submit=true or submit=false" in prompt
     assert "Runtime owns execution status" in prompt
     assert "Planning budget:" not in prompt

@@ -8,7 +8,15 @@ import sys
 import time
 from types import SimpleNamespace
 
+from agent.loop import AgentLoop
+from agent.messages import ModelResponse, TokenUsage, ToolCall
+from runtime.bootstrap import build_runtime
+from runtime.config import RunConfig
 from runtime.mcp import MCPRuntime, load_mcp_config
+from runtime.plan import PlanApprovalPolicy, PlanPhase, PlanPolicy
+from runtime.security import PermissionMode
+from runtime.security.permission_rules import PermissionRule, PermissionRuleValue
+from runtime.task import TaskStatus
 from tools.registry import ToolRegistry
 
 
@@ -23,6 +31,44 @@ class Trace:
         self.events.append(event)
 
 
+class ScriptedModelClient:
+    max_tokens = 4096
+    context_window_tokens = 64000
+
+    def __init__(self, responses: list[ModelResponse]) -> None:
+        self.responses = list(responses)
+
+    def call(self, system: str, messages: list[dict], tools: list[dict]) -> ModelResponse:
+        return self.responses.pop(0)
+
+
+def tool_response(*calls: ToolCall) -> ModelResponse:
+    return ModelResponse(
+        message={
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    "input": call.arguments,
+                }
+                for call in calls
+            ],
+        },
+        tool_calls=list(calls),
+        usage=TokenUsage(),
+    )
+
+
+def final_response(text: str) -> ModelResponse:
+    return ModelResponse(
+        message={"role": "assistant", "content": [{"type": "text", "text": text}]},
+        text=text,
+        usage=TokenUsage(),
+    )
+
+
 def write_config(path: Path, server: dict) -> Path:
     path.write_text(json.dumps({"mcpServers": {"demo": server}}), encoding="utf-8")
     return path
@@ -34,6 +80,113 @@ def start_runtime(path: Path):
     context = SimpleNamespace(trace=Trace())
     runtime.start(context, registry)
     return runtime, registry, context
+
+
+def test_unattended_required_plan_with_preauthorized_mcp_scope_reaches_terminal_state(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    config_path = tmp_path / "playwright-mcp.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "playwright": {
+                        "type": "stdio",
+                        "command": sys.executable,
+                        "args": [str(FIXTURE_SERVER), "--transport", "stdio"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = RunConfig(
+        permission_mode=PermissionMode.ACCEPT_EDITS,
+        permission_prompt_policy="deny",
+        plan_policy=PlanPolicy.REQUIRED,
+        plan_approval_policy=PlanApprovalPolicy.AUTO,
+        mcp_config_path=str(config_path),
+    )
+    model = ScriptedModelClient(
+        [
+            tool_response(
+                ToolCall(
+                    "plan",
+                    "update_plan",
+                    {
+                        "action": "replace_plan",
+                        "steps": [{"id": "call", "description": "Call the MCP tool"}],
+                        "submit": True,
+                    },
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "remote",
+                    "mcp_tool_call",
+                    {
+                        "tool": "mcp__playwright__echo",
+                        "arguments": {"text": "browser verified"},
+                    },
+                )
+            ),
+            tool_response(
+                ToolCall(
+                    "step",
+                    "update_plan",
+                    {"action": "update_step", "step_id": "call", "status": "completed"},
+                )
+            ),
+            tool_response(ToolCall("complete", "update_plan", {"action": "complete"})),
+            final_response("benchmark complete"),
+        ]
+    )
+    runner = AgentLoop(
+        model_client=model,
+        runtime=build_runtime(config),
+        repo_path=tmp_path,
+        permission_mode=PermissionMode.ACCEPT_EDITS,
+        config=config,
+    )
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt="": (_ for _ in ()).throw(AssertionError("stdin was read")),
+    )
+    context = runner.start_interactive()
+    context.permission_rules.add(
+        PermissionRule(
+            source="policy",
+            behavior="allow",
+            value=PermissionRuleValue(
+                tool_name="mcp_tool_call",
+                operation_scope="mcp:playwright:echo",
+            ),
+        )
+    )
+
+    try:
+        runner.start_task(context, "Run the deterministic MCP benchmark")
+    finally:
+        runner.finish(context)
+
+    assert context.task_status is TaskStatus.COMPLETED
+    assert context.success is True
+    assert context.final_text == "benchmark complete"
+    assert context.plan_state.phase is PlanPhase.COMPLETED
+    assert context.plan_state.approved_version == context.plan_state.version
+    assert context.plan_state.approval_source == "auto_policy"
+    assert not model.responses
+    events = [
+        json.loads(line) for line in context.trace.path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert not any(event.get("type") == "permission_user_response" for event in events)
+    assert any(
+        event.get("type") == "tool_result"
+        and event.get("tool") == "mcp_tool_call"
+        and event.get("ok") is True
+        for event in events
+    )
 
 
 def test_real_stdio_discovery_calls_and_process_reuse(tmp_path: Path) -> None:
