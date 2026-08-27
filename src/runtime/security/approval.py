@@ -29,6 +29,18 @@ class PermissionApproval:
                 decision_reason="approved_scope",
             )
 
+        if context.config.permission_prompt_policy == "deny":
+            return self.create_decision(
+                behavior=PermissionBehavior.DENY,
+                risk=decision.risk,
+                message="Permission denied: operation is not pre-authorized.",
+                operation=decision.operation,
+                proposed_scope=scope,
+                metadata=decision.metadata,
+                terminal_on_deny=decision.terminal_on_deny,
+                decision_reason="non_interactive_unapproved",
+            )
+
         return self._ask_user(decision, tool, args, context)
 
 
