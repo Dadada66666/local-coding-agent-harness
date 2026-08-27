@@ -2,24 +2,26 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Local Coding Agent Harness is a local runtime for coding agents that work on a
-real repository through controlled tools instead of direct filesystem access.
+Local Coding Agent Harness is an auditable local runtime for coding agents that
+work on real repositories through explicit, policy-controlled tools. The model
+chooses its repository strategy; the runtime enforces filesystem, permission,
+plan, verification, protocol, and context-capacity invariants.
 
-The runtime is intentionally small, but it covers the core loop expected from a
-coding agent:
+Key capabilities:
 
-- understand a user task
-- inspect the working directory
-- read and edit files through guarded tools
-- run verification commands
-- retry after failed verification
-- write trace, report, diff, and cost artifacts
+- snapshot-bound, exact repository reads and edits
+- structured Direct / Plan execution with explicit approval state
+- layered permission checks and optional OS-level Bash sandboxing
+- Context Manager V3 with bounded ToolResult admission and recoverable rebasing
+- MCP V2 discovery through a stable search/call gateway surface
+- authoritative verification tracking and bounded failure recovery
+- complete trace, report, diff, artifact, and provider-usage output
+- an isolated, deterministic Agent evaluation benchmark
 
-## Current Scope
+## Architecture
 
-This project focuses on a single local agent loop. It includes an optional MCP
-client, but does not implement sub-agents, MCP server hosting, background jobs,
-plugin discovery, worktree isolation, or LangGraph adapters.
+The codebase keeps model orchestration, tool semantics, security policy,
+context management, and observability as separate runtime responsibilities.
 
 Core directories:
 
@@ -35,7 +37,9 @@ Core directories:
 - `tests/unit/` and `tests/integration/`: tests organized by source domain
 
 See [`docs/architecture.md`](docs/architecture.md) for the dependency map and
-the main execution paths.
+the main execution paths. Context Manager V3 and MCP V2 are governed by their
+frozen specifications in [`docs/spec.md`](docs/spec.md) and
+[`docs/mcp-client-spec.md`](docs/mcp-client-spec.md).
 
 ## Install
 
@@ -108,7 +112,7 @@ Permission modes:
   still gated.
 - `manual_approval`: ask before edits and command execution.
 
-## MCP Client
+## MCP V2 Client
 
 MCP is disabled unless a host-owned configuration is passed explicitly:
 
@@ -117,7 +121,7 @@ agent --mcp-config /absolute/path/to/mcp.json
 agent run "Use the configured service" --mcp-config /absolute/path/to/mcp.json
 ```
 
-The strict v1 configuration supports stdio and bare Streamable HTTP:
+The configuration supports stdio and bare Streamable HTTP:
 
 ```json
 {
@@ -135,12 +139,21 @@ The strict v1 configuration supports stdio and bare Streamable HTTP:
 }
 ```
 
-The runtime does not auto-discover repository MCP files. Stdio environment
-injection, credentials, headers, OAuth, legacy SSE, resources, prompts, and MCP
-tasks are not supported in v1. Remote tools are hidden during planning and
-approval phases; in direct or approved execution they use the existing
-Permission Gate and require approval as conservative remote operations. MCP
-servers remain authoritative for their tool argument validation.
+After an `AgentContext` exists, the session connects to configured servers,
+discovers their tools once, and builds one immutable catalog. Remote schemas do
+not expand the Provider `tools[]` array. Instead, the model sees a bounded,
+stable gateway surface:
+
+- `mcp_tool_search` performs deterministic local search over catalog metadata.
+- `mcp_tool_call` resolves one canonical tool ID and invokes its existing MCP
+  binding through the normal execution pipeline.
+
+Planning and Auto-undecided phases expose local metadata search; direct and
+approved execution expose both gateways. Individual remote schemas remain in
+the runtime catalog, so search and calls do not rewrite the base Provider tool
+surface. Remote calls continue through the existing Plan Gate, Permission Gate,
+post-tool hooks, ToolResult admission, and Context Manager. MCP servers remain
+authoritative for remote argument validation.
 
 ## Plan Mode
 
@@ -242,10 +255,6 @@ It excludes environment data and is redacted before persistence. `plan.json` is
 a plan decision and execution-state audit snapshot, not a complete session
 recovery mechanism.
 
-The plan subsystem intentionally does not implement SQLite, multi-worker or
-distributed scheduling, leases, heartbeats, background execution, arbitrary
-crash-point recovery, or a Web UI.
-
 ## Tools
 
 Tools are registered through `ToolRegistry` and executed through a shared
@@ -312,8 +321,7 @@ Important runtime properties:
   prompt's success inference.
 - Task lifecycle is explicit (`idle`, `running`, `waiting_user`, `completed`,
   `failed`, `cancelled`). `finished` only stops the current loop invocation;
-  waiting tasks are neither archived nor reset. Task-boundary compaction runs
-  only when a new task starts after a terminal task.
+  waiting tasks are neither archived nor reset.
 - `max_turns` limits model calls per task (40 by default), while trace turn IDs remain unique
   across an interactive run.
 - Model `stop_reason` is recorded and validated. Truncated, refused, or
@@ -332,21 +340,17 @@ Important runtime properties:
   targets in one approval scope instead of hiding the write behind `network`.
 - Directory listing and recursive search filter protected paths after canonical path
   resolution, including aliases that resolve to protected files.
-- Context pressure includes the system prompt, tool schemas, messages, reserved
-  output, and a safety margin. Provider usage anchors the local estimator when
-  available. Capacity pressure and the default 272K operating target use the
-  lower limit; the character threshold is only a compatibility fallback when
-  token limits are disabled.
-- Context reduction is pressure-driven. The eager watermark is derived from the
-  operating target and uses hysteresis. Projection only clears consumed results
-  before the protected recent suffix; the per-round hard budget prefers
-  non-source results before source pages. Consumed source slices become
-  line-based source stubs without generic artifacts, while Bash, grep, and log
-  output retain recoverable artifact references. Full compaction includes a
-  bounded source manifest. The append-only conversation audit is unchanged.
-- Interactive task boundaries compact completed history above a token threshold
-  into a deterministic checkpoint before the next task starts. The current
-  prompt and the append-only audit remain intact.
+- Context pressure uses input-only accounting for the system prompt, tool
+  schemas, and provider-visible messages. Output reservation and the safety
+  margin are applied once when deriving the applicable hard input limit.
+- Every normal Context Epoch is append-only. New ToolResult batches are shaped
+  before first model visibility and must satisfy the aggregate round budget.
+- Real context pressure triggers one atomic Full Rebase built from authoritative
+  runtime state, a structured semantic handoff, and the newest complete raw
+  rounds. Normal lifecycle transitions do not rewrite historical context.
+- Removed evidence stays recoverable through distinct Source, Artifact, and
+  History paths. Source recovery remains path/SHA/range-bound, while history
+  recovery appends requested evidence to the current tail.
 - Provider context overflow gets one bounded force-compaction retry. Repeated
   overflow or compaction failures stop cleanly instead of looping indefinitely.
 - Context measurements and savings notes are trace/report observability only;
@@ -386,22 +390,24 @@ records expose task-local usage without resetting the run audit.
 
 ## Verification
 
-When the model runs a command to validate behavior, it should set:
+The Bash `purpose` states whether a command is authoritative task verification:
 
 ```json
 {"purpose": "verify"}
 ```
 
-The runtime records verification results from:
+The supported intent values are:
 
-- known test commands such as `pytest`, `unittest`, and `npm test`
-- any `bash` command with `purpose="verify"`
+- `verify`: authoritative evidence for the current task result
+- `probe`: environment, setup, or availability diagnosis
+- `run`: ordinary command execution
 
-Read-only discovery commands such as `find`, `git status`, `git diff`, `ls`,
-`rg`, and `grep` are not treated as verification even if labeled `verify`.
-Commands that explicitly mutate files are also excluded from verification;
-perform the edit with a structured file tool, then verify it in a separate
-`bash` call.
+`result_scope="command"` means the returned exit status describes the foreground
+command; `result_scope="launcher"` describes only a submitted launcher and is
+never authoritative verification. Known test commands without an explicit
+purpose retain legacy verification behavior, while explicit `run` and `probe`
+suppress that inference. Read-only discovery, setup probes, and commands that
+explicitly mutate files do not overwrite authoritative verification state.
 
 ## Sandbox Runtime
 
@@ -446,6 +452,54 @@ writes remain controlled by runtime permission checks.
 Bash receives a sanitized environment instead of the harness process
 environment. Tool output is redacted before model feedback, trace logging, or
 artifact persistence.
+
+## Agent Evaluation Benchmark
+
+The standalone benchmark under `benchmarks/` evaluates the Agent through its
+public Python API without becoming a production runtime dependency. Each case
+copies a clean fixture into an isolated temporary workspace, rejects unexpected
+interactive input, and evaluates the final repository with an external pytest
+process.
+
+The evaluator keeps four outcomes distinct:
+
+- `task_correct`: the deterministic external oracle passed.
+- `runtime_success`: the runtime reached a successful terminal state.
+- `runtime_oracle_agreement`: runtime success and external correctness agree.
+- `end_to_end_pass`: correctness, runtime completion, execution integrity, and
+  case-specific invariants all passed.
+
+The six current contract cases cover deterministic repair, validation-only
+mutation discipline, Required Plan authorization, cross-module diagnosis,
+regression preservation, and bounded verification behavior. Test files are
+immutable, changed paths are checked independently, and efficiency metrics are
+reported without turning token or call counts into correctness gates.
+
+Run all cases sequentially:
+
+```bash
+python -m benchmarks.runner
+```
+
+Generated results are written to:
+
+```text
+benchmarks/results/resume.json
+benchmarks/results/resume.md
+```
+
+A reference run on commit `a9beb66c03cb9c78eaf266606f9e02d82ab25e38`
+with `gpt-5.6-terra` completed all six cases with external-oracle agreement and
+zero unauthorized mutations:
+
+| E2E | Task correct | Runtime/oracle agreement | Unauthorized mutations | Model calls | Input tokens | Cache-read tokens |
+|---:|---:|---:|---:|---:|---:|---:|
+| 6/6 | 6/6 | 6/6 | 0 | 38 | 255,225 | 193,792 |
+
+These cases are deterministic runtime and evaluation contracts. The report
+states the task set, model, commit, and raw efficiency observations explicitly
+so results are reproducible and are not presented as a general software-
+engineering success rate.
 
 ## Development
 
