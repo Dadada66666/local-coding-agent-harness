@@ -92,3 +92,33 @@ The reference and implementation were compared together in one composite at orig
 - Browser console errors checked after replay and cross-view navigation: none.
 
 final result: passed
+
+## Runtime-field audit
+
+- Pre-fix captures: `audit-01-economics.png`, `audit-02-lifecycle.png`, `audit-03-trace.png`.
+- Final failed-run captures: `audit-04-failed-run.png`, `audit-05-imported-economics.png`, `audit-06-imported-trace.png`.
+- Audit fixture: `tests/fixtures/failed-trace.jsonl` plus `tests/fixtures/failed-cost.json`.
+
+### Iteration 4
+
+- [P0] Actual Runtime fields were interpreted with demo-only aliases. A trace containing `task_transition.after="failed"`, `test_result.ok=false` and `tool_result.ok=false` was incorrectly rendered as Completed / Runtime Success / Verification Passed / zero tool failures.
+  - Fix: normalize the serialized `ok`, task-transition, plan-transition and explicit status fields; only an exact completed task transition is Runtime success, and unknown verification evidence is never promoted to Passed.
+- [P1] Lifecycle phases and three phase durations were fabricated from lane presence and fixed display values. This could render impossible phase order and suggest timings that were never recorded.
+  - Fix: derive phase order and timestamps from serialized plan transitions, append the real task terminal state, and replace invented durations with exact event counts.
+- [P1] Economics displayed frozen Runtime limits even when the imported run did not record them.
+  - Fix: consume recorded limit fields when present and render `not recorded` when absent; the sample run retains its explicit sample contract.
+- [P2] Failed runs used success-colored status markers in the summary and Lifecycle rail.
+  - Fix: use success, warning and failure tones consistently across all three views.
+- [P2] Trace rendered a literal `0` when a selected event had no causal neighbors, and failed verification retained a green verification icon.
+  - Fix: make the relation condition explicitly boolean and let failure state override lane color.
+
+### Final verification
+
+- The adversarial failed run is consistent across Economics, Lifecycle and Trace: Failed outcome, failed authoritative verification, one failed tool result, and a terminal Failed lifecycle node.
+- Trace search, event selection, Raw fields expansion and cross-view Open in Lifecycle navigation were exercised in the browser.
+- Missing hard-limit metadata is labeled `not recorded`; no fallback constant is presented as run evidence.
+- Browser console contains no application warning or error.
+- `npm test`: 8 passed.
+- `npm run build`: passed.
+- `npm run test:sites`: 4 passed.
+- `git diff --check -- trace-viewer`: passed.
