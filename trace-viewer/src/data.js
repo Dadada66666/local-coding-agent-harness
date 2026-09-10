@@ -118,6 +118,13 @@ export const sampleRun = {
   events: sampleEvents,
   source: { readCalls: 13, uniqueLines: 1936, duplicateLines: 85, rehydratedLines: 79 },
   context: { autoTrigger: 244800, hardLimit: 251904, fullCompactions: 0, rebases: 0 },
+  lifecycle: [
+    { label: "Inactive", ts: "2026-08-27T10:15:42.123Z", state: "done" },
+    { label: "Planning", ts: "2026-08-27T10:15:45.210Z", state: "done" },
+    { label: "Awaiting approval", ts: "2026-08-27T10:15:47.881Z", state: "warning" },
+    { label: "Executing", ts: "2026-08-27T10:15:48.302Z", state: "active" },
+    { label: "Completed", ts: now, state: "done" },
+  ],
   artifacts: 0,
   toolFailures: 1,
   repairs: 1,
@@ -140,6 +147,118 @@ const titleFromType = (type = "event") =>
 
 const first = (...values) => values.find((value) => value !== undefined && value !== null && value !== "");
 
+const eventStatus = (row, type) => {
+  const explicit = String(first(row.status, row.result, "")).toLowerCase();
+  const taskAfter = typeof row.after === "string" ? row.after.toLowerCase() : "";
+  const planAfter = String(row.after?.phase || "").toLowerCase();
+
+  if (row.ok === false || row.success === false) return "failure";
+  if (row.ok === true || row.success === true) return "success";
+  if (["failed", "failure", "error"].includes(explicit)) return "failure";
+  if (["passed", "success", "succeeded"].includes(explicit)) return "success";
+  if (type === "task_transition") {
+    if (["failed", "cancelled"].includes(taskAfter)) return "failure";
+    if (taskAfter === "completed") return "success";
+    if (taskAfter === "waiting_user") return "warning";
+    if (taskAfter === "running") return "active";
+  }
+  if (type === "plan_transition") {
+    if (["failed", "cancelled"].includes(planAfter)) return "failure";
+    if (planAfter === "completed") return "success";
+    if (planAfter === "awaiting_approval") return "warning";
+    if (planAfter) return "active";
+  }
+  if (type.includes("failed") || type.includes("error")) return "failure";
+  if (type.includes("approval") || type.includes("recovery")) return "warning";
+  if (type.includes("completed")) return "success";
+  return "neutral";
+};
+
+const phaseLabel = (value = "") =>
+  String(value)
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+
+const phaseState = (phase) => {
+  if (["failed", "cancelled"].includes(phase)) return "failure";
+  if (["awaiting_approval", "waiting_user"].includes(phase)) return "warning";
+  if (["completed", "idle"].includes(phase)) return "done";
+  return "active";
+};
+
+function deriveLifecycle(events, startedAt) {
+  const entries = [];
+  const append = (phase, ts) => {
+    if (!phase || entries.at(-1)?.phase === phase) return;
+    entries.push({ phase, label: phaseLabel(phase), ts, state: phaseState(phase) });
+  };
+
+  for (const event of events.filter((item) => item.type === "plan_transition")) {
+    const before = String(event.before?.phase || "").toLowerCase();
+    const after = String(event.after?.phase || "").toLowerCase();
+    if (!entries.length) append(before, startedAt || event.ts);
+    append(after, event.ts);
+  }
+  if (entries.length) {
+    const terminal = [...events].reverse().find((item) => {
+      const after = typeof item.after === "string" ? item.after.toLowerCase() : "";
+      return item.type === "task_transition" && ["completed", "failed", "cancelled"].includes(after);
+    });
+    if (terminal) append(terminal.after.toLowerCase(), terminal.ts);
+    return entries;
+  }
+
+  for (const event of events.filter((item) => item.type === "task_transition")) {
+    const before = typeof event.before === "string" ? event.before.toLowerCase() : "";
+    const after = typeof event.after === "string" ? event.after.toLowerCase() : "";
+    if (!entries.length) append(before, startedAt || event.ts);
+    append(after, event.ts);
+  }
+  return entries;
+}
+
+const terminalStatus = (events) => {
+  const transition = [...events].reverse().find((event) => event.type === "task_transition");
+  const value = String(first(transition?.after, transition?.status, "")).toLowerCase();
+  const labels = {
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    waiting_user: "Waiting for user",
+    running: "Running",
+    idle: "Idle",
+  };
+  if (labels[value]) return { label: labels[value], success: value === "completed" };
+  if (events.some((event) => ["run_aborted", "max_turns_exceeded"].includes(event.type))) {
+    return { label: "Failed", success: false };
+  }
+  return { label: "Incomplete", success: false };
+};
+
+const lastNumber = (values) => {
+  const value = [...values].reverse().find(
+    (item) => item !== undefined && item !== null && item !== "" && Number.isFinite(Number(item)),
+  );
+  return value === undefined ? null : Number(value);
+};
+
+const summaryFromRow = (row, type) => {
+  if (type === "task_transition") {
+    return `Task ${first(row.before, "unknown")} → ${first(row.after, "unknown")}${row.trigger ? ` (${row.trigger})` : ""}.`;
+  }
+  if (type === "plan_transition") {
+    return `Plan ${first(row.before?.phase, "unknown")} → ${first(row.after?.phase, "unknown")}${row.action ? ` (${row.action})` : ""}.`;
+  }
+  if (type === "test_result" && typeof row.ok === "boolean") {
+    return `${row.ok ? "Passed" : "Failed"}: ${first(row.command, "authoritative verification")}.`;
+  }
+  if (type === "tool_result" && typeof row.ok === "boolean") {
+    return `${first(row.tool, row.tool_name, "Tool")} ${row.ok ? "succeeded" : "failed"}.`;
+  }
+  return "Runtime event";
+};
+
 export function parseTraceJsonl(text) {
   const rows = String(text || "")
     .split(/\r?\n/)
@@ -155,16 +274,7 @@ export function parseTraceJsonl(text) {
 
   return rows.map((row, index) => {
     const type = first(row.type, row.event_type, "event");
-    const status =
-      type.includes("failed") || type.includes("error") || row.success === false
-        ? "failure"
-        : type === "test_result" && first(row.result, row.status) === "failed"
-          ? "failure"
-          : type.includes("approval") || type.includes("recovery")
-            ? "warning"
-            : type.includes("completed") || row.success === true
-              ? "success"
-              : "neutral";
+    const status = eventStatus(row, type);
     return {
       ...row,
       id: first(row.event_id, row.id, `event-${index + 1}`),
@@ -172,12 +282,12 @@ export function parseTraceJsonl(text) {
       elapsed: Number(first(row.elapsed_ms && row.elapsed_ms / 1000, row.elapsed, index)),
       lane: laneByType(type),
       type,
-      title: first(row.title, row.tool_name, row.command, titleFromType(type)),
-      summary: first(row.summary, row.message, row.reason, row.error, row.decision_reason, "Runtime event"),
+      title: first(row.title, row.tool_name, row.tool, row.command, titleFromType(type)),
+      summary: first(row.summary, row.message, row.reason, row.error, row.decision_reason, summaryFromRow(row, type)),
       status,
       turn: Number(first(row.turn_id, row.turn, 0)),
       command: first(row.command, row.metadata?.command),
-      details: first(row.details, row.content, row.output, row.error),
+      details: first(row.details, row.content, row.output, row.output_preview, row.error),
     };
   });
 }
@@ -255,14 +365,31 @@ export function buildImportedRun(traceText, costText, names = {}) {
         }));
   const verificationEvents = events.filter((event) => event.type === "test_result");
   const lastVerification = verificationEvents.at(-1);
-  const statusEvent = [...events].reverse().find((event) => event.type === "task_transition" || event.type === "stop");
+  const outcome = terminalStatus(events);
+  const verification = lastVerification?.ok === true || lastVerification?.status === "success"
+    ? "Passed"
+    : lastVerification?.ok === false || lastVerification?.status === "failure"
+      ? "Failed"
+      : "Not recorded";
+  const autoTrigger = lastNumber(events.map((event) => event.context_auto_compact_trigger));
+  const hardLimit = lastNumber([
+    cost.context_management?.hard_input_limit_tokens,
+    cost.context_management?.hard_input_limit,
+    cost.context?.hard_input_limit_tokens,
+    ...events.map((event) => event.context_hard_input_limit),
+  ]);
+  const fullRebases = Number(first(
+    cost.context_management?.full_rebase_events,
+    cost.context_management?.full_history_compactions,
+    0,
+  ));
   return {
     id: traceRunId || names.trace?.replace(/\.[^.]+$/, "") || "imported-run",
     taskId: first(events.find((event) => event.task_id)?.task_id, "task-imported"),
     task: first(events.find((event) => event.type === "user_prompt")?.content, "Imported agent run"),
-    status: statusEvent?.status === "failure" ? "Failed" : "Completed",
-    runtimeSuccess: !events.some((event) => event.type === "run_aborted" || event.type === "max_turns_exceeded"),
-    verification: lastVerification ? (lastVerification.status === "failure" ? "Failed" : "Passed") : "Not recorded",
+    status: outcome.label,
+    runtimeSuccess: outcome.success,
+    verification,
     model: first(cost.current_task?.model, cost.model, "Provider model"),
     startedAt,
     finishedAt,
@@ -271,6 +398,7 @@ export function buildImportedRun(traceText, costText, names = {}) {
     sourcePath: names.trace || "trace.jsonl",
     turns,
     events,
+    lifecycle: deriveLifecycle(events, startedAt),
     source: {
       readCalls: Number(cost.source_read_efficiency?.read_file_calls || 0),
       uniqueLines: Number(cost.source_read_efficiency?.unique_source_lines || 0),
@@ -278,10 +406,10 @@ export function buildImportedRun(traceText, costText, names = {}) {
       rehydratedLines: Number(cost.source_read_efficiency?.rehydrated_source_lines || 0),
     },
     context: {
-      autoTrigger: 244800,
-      hardLimit: 251904,
-      fullCompactions: Number(cost.context_management?.full_history_compactions || 0),
-      rebases: Number(cost.context_management?.full_history_compactions || 0),
+      autoTrigger,
+      hardLimit,
+      fullCompactions: fullRebases,
+      rebases: fullRebases,
     },
     artifacts: Number(cost.artifacts?.created || 0),
     toolFailures: events.filter((event) => event.type === "tool_result" && event.status === "failure").length,
@@ -299,4 +427,3 @@ export const laneLabels = {
   verification: "Verification",
   context: "Context",
 };
-

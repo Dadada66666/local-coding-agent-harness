@@ -2,113 +2,116 @@
 
 [English](README.md) | [中文](README.zh-CN.md)
 
-Local Coding Agent Harness 是一个可审计的本地 Coding Agent Runtime。模型通过显式、受策略约束的工具操作真实仓库，自主选择代码调查与执行策略；Runtime 负责落实文件系统、权限、计划、验证、协议和上下文容量边界。
+一个面向真实代码仓库、可审计的本地 Coding Agent Runtime。模型自主选择调查和解决策略；Runtime 负责落实执行、权限、计划、验证、协议与上下文不变量，使 Agent 的行为可控、可恢复、可复现。
 
-核心能力：
+> **Runtime enforces invariants. Model chooses strategy.**
 
-- 绑定文件快照的精确读取与原子编辑
-- 结构化 Direct / Plan 执行路径与明确审批状态
-- 分层权限检查与可选的操作系统级 Bash Sandbox
-- 具备 ToolResult 准入和可恢复 Full Rebase 的 Context Manager V3
-- 使用稳定 search/call gateway 的 MCP V2 Client
-- 权威验证状态追踪与有界失败恢复
-- 完整 Trace、Report、Diff、Artifact 和 Provider usage 产物
-- 隔离、确定性的 Agent Evaluation Benchmark
+## 项目亮点
 
-## 架构
+- **受控的仓库操作**：文件读取绑定快照，编辑采用精确原子替换，并提供路径校验、确定性 ToolResult 与变更追踪。
+- **Plan-aware 执行**：支持 Direct、Auto 和 Required Plan，具备版本化计划、明确审批状态、能力投影和前置 Plan Gate。
+- **分层安全边界**：提供权限模式、可复用 Scope Rule、命令风险分类、受保护路径检查、非交互拒绝策略，以及 Bash 的 SRT Sandbox。
+- **Context Manager V3**：包含首次可见 ToolResult 的有界准入、append-only Context Epoch、混合检查点，以及 Source、Artifact、History 的确定性恢复。
+- **MCP V2 Client**：通过不可变启动 Catalog 和两个稳定 Gateway 完成工具搜索与调用，远程 Schema 不进入 Provider 基础工具数组。
+- **以证据为准的完成语义**：结构化验证状态、有界修复恢复、变更文件追踪与独立运行产物。
+- **本地可观测性**：提供 JSONL Trace、可读时间线、报告、Diff、Token Economics，以及纯浏览器三视图 Trace Studio。
+- **确定性评估**：六个隔离 Agent 案例由外部测试 Oracle、仓库不变量和结构化 Plan 状态共同判定。
 
-代码将模型编排、工具语义、安全策略、上下文管理和可观测性拆分为独立 Runtime 职责。
+## 系统架构
 
-核心目录：
-
-- `src/agent/`：agent loop、提示词、模型客户端和消息转换
-- `src/runtime/`：会话状态、工具执行、失败恢复和运行时装配
-- `src/runtime/plan/`：计划策略、生命周期控制器、门禁和审计快照
-- `src/runtime/context/`：上下文预算、检查点、压缩和工具结果投影
-- `src/runtime/security/`：访问策略、权限 Gate、风险分析和 Sandbox
-- `src/runtime/hooks/`：生命周期、策略和状态追踪 Hooks
-- `src/runtime/observability/`：Trace、Report、Artifact、Diff 和成本统计
-- `src/tools/`：显式工具实现和注册表
-- `src/cli/`：Typer 命令、交互模式和 Trace Replay
-- `tests/unit/` 与 `tests/integration/`：按源码领域组织的测试
-
-依赖方向和主要执行链路见 [`docs/architecture.md`](docs/architecture.md)。Context Manager V3 与 MCP V2 分别以 [`docs/spec.md`](docs/spec.md) 和 [`docs/mcp-client-spec.md`](docs/mcp-client-spec.md) 中的冻结规范为准。
-
-## 安装
-
-```bash
-pip install -e ".[dev]"
+```mermaid
+flowchart LR
+    H[CLI / Python Host] --> A[Agent Loop]
+    A <--> M[Model Provider]
+    A --> P[Plan Lifecycle]
+    A --> E[Tool Executor]
+    E --> PG[Plan Gate]
+    PG --> SG[Permission Gate]
+    SG --> T[Native Tools / MCP Gateways]
+    T --> C[ToolResult Admission]
+    C --> A
+    A --> CM[Context Manager V3]
+    E --> O[Trace / Report / Diff / Artifacts]
 ```
 
-从 `.env.example` 创建 `.env`：
+Runtime 采用组合式设计，将模型编排、工具语义、授权、上下文保留和可观测性拆分为独立职责。工具调用按照固定顺序经过生命周期与安全检查，然后才允许产生副作用：
 
-```bash
-ANTHROPIC_API_KEY=
-MODEL_ID=
-MODEL_CONTEXT_WINDOW_TOKENS=
-ANTHROPIC_BASE_URL=
+```text
+lookup -> capability resolution -> Plan Gate -> validation
+       -> Permission Gate -> tool execution -> post-tool hooks
 ```
 
-默认只加载 Harness 根目录下的 `.env`，不会在当前 `WORKDIR` 中自动搜索。以安装包
-方式运行且配置文件位于其他位置时，应通过 `LCAH_ENV_FILE` 指定明确路径。
+包依赖方向与主要执行链路见[架构文档](docs/architecture.md)。
 
-当 provider 不提供模型窗口大小时，可设置 `MODEL_CONTEXT_WINDOW_TOKENS`，启用基于 token
-预算的压缩；未设置时继续使用兼容的字符阈值回退策略。
+## Runtime 核心能力
 
-模型适配层使用 Anthropic Messages API 形状，包括顶层 `system`、`messages`、`tools`、assistant `tool_use` blocks 和 user `tool_result` blocks。`ANTHROPIC_BASE_URL` 可以指向 Anthropic-compatible provider。
+### 仓库工具
 
-## CLI
+模型通过显式工具操作仓库，而不是直接获得无限制的宿主访问权限：
 
-安装后的命令：
+| 领域 | 工具 | Runtime Contract |
+| --- | --- | --- |
+| 调查 | `list_dir`、`grep`、`read_file` | 有界输出、源码范围与 SHA-aware Observation |
+| 修改 | `edit_file`、`write_file`、`delete_file` | 精确校验、原子编辑与受保护路径检查 |
+| 执行 | `bash` | purpose/scope 元数据、风险分类、超时和可选 Sandbox |
+| 证据 | `view_diff`、`read_artifact`、`history_*` | 可恢复的运行证据，不隐式修改历史上下文 |
+| 计划 | `select_execution_mode`、`update_plan`、`resolve_plan_response` | 状态相关 Schema 与受检生命周期转换 |
+| MCP | `mcp_tool_search`、`mcp_tool_call` | 不可变 Catalog 支撑的稳定 Provider 工具面 |
 
-```bash
-agent
-lcah
-```
+大 ToolResult 在第一次对模型可见前完成 Shape。源码 Observation 保存路径、SHA 和精确行范围；大型非源码输出进入 ArtifactStore，并以可恢复 Stub 留在 Context 中。
 
-未安装 console script 时可以使用：
+### Plan 生命周期
 
-```bash
-python -m cli.app
-```
+Plan Policy 与 Approval Policy 相互独立：
 
-交互模式使用当前终端目录作为 `WORKDIR`：
+| Plan Policy | 行为 |
+| --- | --- |
+| `off` | 正常 Direct 执行 |
+| `auto` | 先进行只读调查，再结构化选择 Direct 或 Plan |
+| `required` | 必须先完成只读规划，再进入授权执行 |
 
-```bash
-agent --permission accept_edits
-agent --sandbox
-```
+提交后的 Plan 具有版本号。Manual Approval 会让同一任务停留在 `awaiting_approval`；Auto Approval 会记录批准版本与 `approval_source="auto_policy"`。规划阶段隐藏修改能力，Plan Gate 会在 Permission 判断前拒绝副作用；进入 Direct 或已批准执行后，现有 Permission Gate 继续作为授权事实来源。
 
-一次性任务：
+### 权限与 Sandbox
 
-```bash
-agent run "Fix the failing tests" --permission accept_edits
-agent run "Inspect this project and summarize the structure" --permission read_only
-```
+Runtime 提供三种清晰的权限模式：
 
-读取产物：
+- `read_only`：允许仓库调查，写入仍需授权。
+- `accept_edits`：接受结构化编辑与安全命令，风险操作仍需授权。
+- `manual_approval`：文件修改和命令执行均需要批准。
 
-```bash
-agent report <run_id>
-agent replay <run_id>
-```
+非交互宿主可使用 `permission_prompt_policy="deny"`，将无法解析的权限请求明确拒绝，而不是读取 stdin。宿主可以通过已有 Rule 预授权已知 Scope，Hard Denial 仍始终优先。
 
-权限模式：
-
-- `read_only`：只允许读取和搜索；写入会被 gate。
-- `accept_edits`：允许普通文件编辑和安全命令；风险命令仍会被 gate。
-- `manual_approval`：编辑和命令执行前都询问用户。
-
-## MCP V2 Client
-
-只有宿主显式传入配置路径时才启用 MCP：
+安装 Sandbox Runtime 后，可对 Bash 命令启用隔离：
 
 ```bash
-agent --mcp-config /absolute/path/to/mcp.json
-agent run "使用已配置的服务" --mcp-config /absolute/path/to/mcp.json
+npm install -g @anthropic-ai/sandbox-runtime
+agent --sandbox --sandbox-fail-if-unavailable
 ```
 
-配置支持 stdio 与裸 Streamable HTTP：
+### Context Manager V3
+
+上下文容量和可恢复性由 Runtime 管理。CMV3 提供：
+
+- 每个新 ToolResult Batch 的 12K 聚合准入上限；
+- 同一 Context Generation 内 append-only 的 Provider-visible History；
+- 压力触发的 Full Rebase，将权威 Runtime State、结构化 Semantic Handoff 与完整近期 API Rounds 合并；
+- 原子 Generation 切换与协议完整的 Tool Call / Result 分组；
+- 基于 Source Coordinate、Artifact 和 History Window 的 append-only 恢复。
+
+完整不变量合同见 [Context Manager V3 Specification](docs/spec.md)。
+
+### MCP V2 Client
+
+MCP 仅在宿主显式传入配置时启用：
+
+```bash
+agent run "使用已配置的服务检查目标" \
+  --mcp-config /absolute/path/to/mcp.json \
+  --permission accept_edits
+```
+
+配置示例：
 
 ```json
 {
@@ -126,269 +129,157 @@ agent run "使用已配置的服务" --mcp-config /absolute/path/to/mcp.json
 }
 ```
 
-`AgentContext` 创建后，Session 连接已配置的 Server，完成一次工具发现，并构建不可变 Catalog。远程 Schema 不会线性扩张 Provider 的 `tools[]`；模型只看到一个有界且稳定的 Gateway Surface：
+AgentContext 创建后，Runtime 连接 Server、执行一次工具发现、校验 Identity 与 Schema，并冻结确定性 Catalog。Provider 只看到两个有界 Gateway：
 
-- `mcp_tool_search`：在本地 Catalog Metadata 上执行确定性搜索。
-- `mcp_tool_call`：解析一个 canonical tool ID，并通过现有 MCP binding 执行远程调用。
+- `mcp_tool_search`：在本地搜索 Catalog Metadata。
+- `mcp_tool_call`：调用一个 Canonical Remote Tool，并继续经过现有 Plan、Permission、Hook、Admission 和 Context Pipeline。
 
-Planning 和 Auto 未决策阶段只暴露本地 Metadata Search；Direct 和已批准执行阶段暴露两个 Gateway。单个远程 Schema 始终保留在 Runtime Catalog 中，因此搜索和调用不会重写 Provider 的基础工具面。远程调用继续经过现有 Plan Gate、Permission Gate、post-tool hooks、ToolResult admission 和 Context Manager；远程参数是否合法仍由 MCP Server 最终判断。
+因此远程工具数量增长不会线性放大 Provider 基础工具面。完整合同见 [MCP Client V2 Specification](docs/mcp-client-spec.md)。
 
-## Plan Mode
+## 快速开始
 
-Plan Mode 是可选的 Runtime 能力，包含三种策略：
+### 环境要求
 
-- `off`：保持原有 agent loop。不会注入计划提示词，不暴露计划工具，不执行计划门禁，也不写入
-  `plan.json`。为保证向后兼容，这是默认值。
-- `auto`：模型可以先使用只读工具检查仓库，但在执行 Bash 或修改仓库前，必须通过
-  `select_execution_mode` 结构化选择 `direct` 或 `plan`。选择 direct 后沿用原流程；选择 plan
-  后保持只读，直到提交结构化计划。
-- `required`：任务直接进入只读规划。
+- Python 3.11+
+- Anthropic 或兼容 Anthropic Messages API 的模型服务
 
-执行路径策略与审批策略彼此独立。审批默认是 `manual`，因此 `auto` 和 `required` 下提交的计划都会
-暂停在 `awaiting_approval`。只有显式设置 `--plan-approval auto`，Runtime 才会自动授权已提交版本。
-
-启动参数：
+### 安装
 
 ```bash
-agent --plan-mode auto
-agent --plan-mode required
-agent --plan-mode off
-agent --plan       # 等价于 --plan-mode required
-agent --no-plan    # 等价于 --plan-mode off
-agent --plan-mode auto --plan-approval manual
-agent --plan-mode auto --plan-approval auto
+python -m venv .venv
+
+# Linux / macOS
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+
+pip install -e ".[dev]"
 ```
 
-冲突参数会明确报错，不会静默覆盖。交互模式还支持：
+根据 `.env.example` 创建 `.env`，配置模型服务：
+
+```bash
+ANTHROPIC_API_KEY=
+MODEL_ID=
+MODEL_CONTEXT_WINDOW_TOKENS=
+ANTHROPIC_BASE_URL=
+```
+
+`ANTHROPIC_BASE_URL` 可以指向 Anthropic-compatible Endpoint。Runtime 使用 Anthropic Messages 形状传递 System Prompt、Messages、Tools、`tool_use` 和 `tool_result`。
+
+### 运行
+
+请在希望 Agent 操作的目标仓库目录中执行命令；当前目录就是 `WORKDIR`。
+
+```bash
+# 交互式会话
+agent --permission accept_edits
+
+# 一次性任务
+agent run "修复失败测试并验证结果" \
+  --permission accept_edits
+
+# Required Plan + 自动批准 Plan
+agent run "重构解析器并运行完整测试" \
+  --plan-mode required \
+  --plan-approval auto \
+  --permission accept_edits
+
+# 查看已有运行
+agent report <run_id>
+agent replay <run_id>
+```
+
+`lcah` 是 `agent` 的别名。未安装 Console Script 时，可以使用 `python -m cli.app`。
+
+## 运行证据
+
+每次运行都会在以下目录写入可审计产物：
 
 ```text
-/plan-mode auto|required|off
-/plan-approval manual|auto
-/plan
-/approve
-/revise <feedback>
-/cancel-plan
-/plan-status
-```
-
-`/approve` 和 `/revise` 会恢复同一个任务，不会调用 `begin_task()`；模型调用次数、mutation、
-verification、recovery 和上下文预算都保持连续。审批提示中的 `1`、`2`、`3` 分别表示批准执行、修改
-计划和拒绝执行；选择 `2` 后会继续询问修改意见。精确回复 `同意`、`同意执行`、`批准`、`批准执行`、
-`approve` 或 `approved` 时，Runtime 通过确定性 fast path 直接批准，不消耗一次模型调用来解释授权。
-匹配只裁剪首尾空白并将 ASCII 转为小写，不做 substring 匹配，因此“我不同意”和附带条件的回复绝不会
-被直接批准。其他普通文本仍属于原任务续接，由动态可见的 `resolve_plan_response` 结构化解释。
-
-Auto 模式不使用关键词或 prompt 长度规则判断任务复杂度，而是由模型结合任务与实际仓库，通过可追踪的
-工具调用选择 direct 或 plan。
-
-Plan Gate 与 Permission Gate 职责不同。未选择模式、规划中、以及 required 等待批准时，Plan Gate
-会在权限判断前阻止 Bash 和仓库副作用；direct 或已授权执行阶段则把调用交回现有 Permission Gate。
-计划状态本身不会自动批准任何文件或命令权限。
-
-工具可见性按计划状态动态收窄。规划阶段只暴露检查工具和当前阶段合法的计划 action；存在新用户输入的
-待批准阶段只暴露 `resolve_plan_response`。`ToolRegistry.resolve()` 同时决定 schema 可见性和 Executor
-可调用性，Plan Gate 继续作为纵深防御，不把可见性当安全边界。
-
-规划阶段保持只读，直到模型显式提交或取消计划。合法的仓库调查不会因为阶段调用次数或 Draft 年龄而被
-关闭；全局 `max_turns` 仍是任务级安全上限，调用预算只用于观测。计划步骤数量继续由模型根据真实依赖
-决定，每次 `replace_plan` 都必须显式提供 `submit=true` 或 `submit=false`。
-
-规划输入中的步骤只包含 ID 和描述，执行状态由 Runtime 维护。Replan 时，仅当步骤 ID 与描述都匹配
-此前通过已授权执行控制器完成的步骤，`completed` 状态才会被保留，模型不能伪造执行历史。
-
-进入该审批解析回合前，已消费源码会投影为有界 source stub。审批响应只要包含任何非 resolver 工具，
-Runtime 就会拒绝整个 batch，并提供一次仅限 resolver 的自动纠错；再次失败则暂停，不进入循环。
-
-计划工具使用同一份 capability 投影：
-
-- `auto + undecided`：显示 `select_execution_mode`
-- `plan + planning/executing`：显示 `update_plan`
-- `awaiting_approval + 新用户回复`：显示 `resolve_plan_response`
-- `off`、direct、completed 和 cancelled：不显示计划工具
-
-活跃计划会原子写入 `<WORKDIR>/.agent/runs/<run_id>/plan.json`，记录决策与审批策略、task ID/status、
-模型选择理由、计划版本、授权来源、阶段和步骤进度。快照不保存环境数据，并在落盘前脱敏。`plan.json` 是计划决策与
-执行状态的审计快照，不等同于完整会话恢复。
-
-## 工具
-
-工具通过 `ToolRegistry` 注册，并由统一的 `ToolExecutor` 执行。每个工具自己负责参数校验、操作分类和工具语义；权限检查、trace 记录、大输出落盘、验证结果追踪等 runtime 逻辑由 hooks 处理。
-
-当前工具：
-
-- `list_dir`：列出可见文件和目录，跳过 `.agent`、`.git`、`.venv`、`node_modules`、`__pycache__` 等 runtime/cache 目录。
-- `grep`：搜索 UTF-8 仓库文本，带匹配数量限制和截断 metadata。
-- `read_file`：按行号读取 UTF-8 文本，并记录文件 snapshot。每页明确返回总行数、实际行范围、
-  `next_offset` 和 `has_more`；task-local、绑定 SHA 的区间覆盖会识别重叠和完整扫描。未变化且已完整扫描
-  的源码再次被宽范围读取时只返回小型提示，并引导使用 grep 或窄行范围；源码变化会自动使覆盖失效。
-  非 UTF-8 文件会返回普通工具失败，而不是未处理的 decode exception。
-- `read_artifact`：通过当前 run 内有效的不透明 ID，分页读取大工具结果；不接受文件系统路径。
-- `write_file`：写入完整的 UTF-8 文件。新文件使用排他创建；已有文件必须具备完整且最新的 snapshot，并通过原子替换写入。成功写入会更新文件 snapshot。
-- `edit_file`：基于已知 snapshot 做 exact text replacement。支持单处 `old_text` / `new_text`，也支持 `edits` 批量替换。重复匹配默认保持 ambiguous；`occurrence` 可指定某一次匹配，`replace_all` 可显式替换全部匹配。批量编辑是原子操作。
-- `delete_file`：删除一个已有 snapshot 的普通文件。`accept_edits` 下可自动清理当前任务创建的文件；删除预先存在的文件需要审批。不支持目录和符号链接。
-- `bash`：在 `WORKDIR` 下运行验证或检查命令。命令可以带 `purpose="verify"`，使验证结果进入 report success 判断。验证命令采用 fail-fast 语义，不能夹带显式文件修改；预期整体返回非零状态时可设置 `exit_expectation="nonzero"`。shell patch 会被路由到结构化文件工具。
-- `view_diff`：在 git 仓库中查看 diff；非 git 目录会返回干净的 "diff unavailable" 结果。
-- `select_execution_mode`：仅在 auto 未决策阶段动态可见，记录模型选择 direct 或 plan 的具体理由。
-- `update_plan`：仅在计划生命周期相关阶段动态可见；Planning 替换必须显式声明是否提交，且不能设置执行
-  状态；Executing action 更新由 Runtime 掌控的步骤进度。该工具不能批准 manual 计划。
-- `resolve_plan_response`：仅在等待审批且存在新用户续接时可见，结构化记录批准、修改或取消。
-
-文件工具由 `AgentContext.safe_path()` 约束，读写不能逃逸 `WORKDIR`。
-
-## Runtime 行为
-
-关键 runtime 属性：
-
-- 文件编辑需要来自 `read_file`、`write_file` 或成功 `edit_file` 的已知 snapshot。
-- 成功编辑会刷新 snapshot，所以同一文件多次编辑不需要无意义地重新读取。
-- no-op edit 会成功返回，但不会标记文件已变更。
-- 交互会话会区分 whole-run 状态和 current-task 状态。上一轮 prompt 的失败验证或 changed files 不会污染下一轮 prompt 的 success inference。
-- Task 生命周期显式区分 `idle`、`running`、`waiting_user`、`completed`、`failed` 和 `cancelled`。
-  `finished` 只表示当前 loop invocation 已停止；等待用户的任务不会被归档或重置。
-- `max_turns` 限制每个任务的模型调用次数（默认 40 次）；交互运行中的 trace turn ID 仍保持全局唯一。
-- runtime 会记录并校验模型 `stop_reason`。截断、拒绝或协议不一致的响应不能被报告为成功；未提供 `stop_reason` 的兼容 provider 仍使用内容块判断。
-- 并行工具调用会在一个 user message 中返回全部匹配的 `tool_result`。terminal deny 后未执行的调用会得到显式 cancelled result，保持消息历史合法。
-- 成功验证会绑定当前 mutation version。验证后的文件修改会让证据变为 stale，直到重新运行验证。
-- Bash 文件删除会返回非终止的工具路由失败，让模型改用 `delete_file`；递归或大范围破坏性命令仍会终止任务。
-- Shell 风险分析具备引号感知能力，并会记录复合副作用。网络命令如果同时创建目录或写文件，审批会同时展示目标主机和文件路径，不会用单一 `network` 标签隐藏写入行为。
-- 目录列举和递归搜索会在 canonical path 解析后过滤受保护路径，包括最终解析到受保护文件的路径别名。
-- 上下文压力统一使用 input-only accounting，只计算 system prompt、tool schemas 和 Provider 可见 messages；输出预留与安全余量只在推导安全输入上限时应用一次。
-- 正常 Context Epoch 保持 append-only。新 ToolResult Batch 在第一次对模型可见前完成 shaping，并必须满足聚合轮次预算。
-- 只有真实 Context Pressure 才触发一次原子 Full Rebase；候选由权威 Runtime State、结构化 Semantic Handoff 和最新完整 Raw Rounds 组成。普通生命周期转换不会重写历史 Context。
-- 被移出的证据分别通过 Source、Artifact 和 History 路径恢复。Source Recovery 继续绑定 path/SHA/range；History Recovery 只把请求的证据追加到当前尾部。
-- provider context overflow 只允许一次有界强制压缩重试；重复溢出或连续压缩失败会明确停止，不会进入死循环。
-- 上下文测量和节省量只写入 trace/report，不会追加到模型 messages。
-- unknown tool 和参数校验失败会作为正常 tool result 进入 trace，方便排障。
-- recovery prompt 不会重复塞入已经存在于前一个 tool result 中的大段失败输出。
-
-## 运行产物
-
-每次运行写入：
-
-```bash
 <WORKDIR>/.agent/runs/<run_id>/
 ```
 
-产物：
+| 产物 | 用途 |
+| --- | --- |
+| `trace.jsonl` | 机器可读的生命周期、模型、权限、工具、上下文和验证事件 |
+| `readable_trace.md` | 按发生顺序生成的可读 Trace |
+| `report.md` | 任务结果、变更文件、验证、Sandbox 和 Token 摘要 |
+| `diff.patch` | Runtime 捕获的最终仓库 Diff |
+| `cost.json` | 每次调用的 Provider Usage、Cache 字段、Prefix Fingerprint 和汇总 |
+| `plan.json` | 启用 Plan Mode 时生成的版本与审批审计快照 |
+| `artifacts/` | 可恢复的大 ToolResult Payload |
 
-- `trace.jsonl`：结构化 runtime events
-- `readable_trace.md`：开发者友好的对话/工具链路视图
-- `report.md`：task/session 成本、变更文件、验证等级、已恢复失败、sandbox 和 artifact
-- `diff.patch`：git diff，非 git 目录会写入清晰占位内容
-- `cost.json`：模型 usage 和每轮 token breakdown 估算
-- `plan.json`：按需生成的计划决策与执行状态审计快照
-- `artifacts/`：完整大工具输出，可在当前 run 内通过不透明 ID 恢复
+## Agent Trace Studio
 
-`cost.json` 会把模型输入/输出拆成 system prompt、tool schemas、user messages、assistant tool calls、tool results、compacted history、assistant text、tool calls 等类别。这个 breakdown 是本地优化估算；provider 返回的 usage 才是计费真实来源。
-provider 返回时，cache creation/read usage 与上下文管理的估算节省量也会分别记录。
-顶层 totals 保持 session 累计口径；`current_task` 和已完成任务记录提供任务级 usage，不会重置整次运行的审计数据。
-
-## 验证机制
-
-Bash 的 `purpose` 用来声明命令是否属于当前任务的权威验证：
-
-```json
-{"purpose": "verify"}
-```
-
-支持三种意图：
-
-- `verify`：当前任务最终结果的权威验证证据
-- `probe`：环境、准备状态或可用性诊断
-- `run`：普通命令执行
-
-`result_scope="command"` 表示退出状态描述前台命令；`result_scope="launcher"` 只描述已提交的 Launcher，因此永远不构成权威验证。未显式提供 purpose 的已知测试命令保留兼容验证语义；显式 `run` 或 `probe` 会抑制该推断。只读 Discovery、准备探测和显式修改文件的命令都不会覆盖权威验证状态。
-
-## Sandbox Runtime
-
-Bash 命令可以通过 Anthropic Sandbox Runtime (`srt`) 包裹，作为额外的本地执行边界：
+`trace-viewer/` 是独立浏览器应用，在本地浏览器内解析运行产物，不导入也不修改生产 Runtime。
 
 ```bash
-npm install -g @anthropic-ai/sandbox-runtime
-srt --version
-agent --sandbox
+cd trace-viewer
+npm install
+npm run dev
 ```
 
-常用选项：
+打开一次运行的 `trace.jsonl` 和可选的 `cost.json`，即可从三个互补视角分析 Agent：
 
-- `--sandbox-fail-if-unavailable`：如果 `srt` 不可运行，启动直接失败。
-- `--sandbox-settings <path>`：使用自定义 SRT settings 文件。
-- `--sandbox-auto-allow/--no-sandbox-auto-allow`：控制 strong sandbox 可用时 unknown bash 是否自动允许。
-- `--bash-env <name>`：显式向 Bash 传入一个非敏感环境变量；可重复指定。Provider
-  Key 和名称疑似 secret/token/password 的变量永远不会继承。
+- **Economics**：逐轮 Input、Cache Reuse、Uncached Input、Output、Context Pressure 和源码读取效率。
+- **Lifecycle**：在同一因果时间线上查看 Model、Plan、Permission、Tool、Verification 与 Context 事件。
+- **Trace**：查看有序事件细节、失败证据、恢复关联、耗时、Replay 与前向兼容 Raw Fields。
 
-Linux/macOS：
-
-- 使用 `srt --settings <settings_path> ...`
-- `.env`、`.agent`、`.mcp.json` 和 SSH 数据在 OS 读取边界被拒绝；`git status`
-  所需的 Git 元数据仍可由 Git 内部读取，但直接 Bash 引用和所有受保护写入仍会被 gate
-- 启动时运行 OS 级 protected-read canary，只有确认读取被拒绝后才视为 strong boundary
-
-Windows：
-
-- 命令以 `srt <real-shell-argv...>` 包裹，不使用 `--settings`
-- runtime 将其视为 weak boundary
-- 不能因为安装了 `srt` 就自动批准 unknown bash
-
-sandbox 是执行边界，不是 `PermissionGate` 的替代品。破坏性命令、网络命令、受保护路径、通过 shell 写文件等仍由 runtime permission checks 控制。
-
-Bash 使用经过清理的环境，而不是继承 Harness 进程的完整环境。Tool output 会在
-回填模型、写 trace 或持久化 artifact 之前统一脱敏。
+![Agent Trace Studio](trace-viewer/qa-trace.png)
 
 ## Agent Evaluation Benchmark
 
-`benchmarks/` 下的独立评估层通过公开 Python API 运行 Agent，不会成为生产 Runtime 的依赖。每个案例都会把干净 Fixture 复制到隔离临时工作区，拒绝意外的交互式输入，并在 Agent 结束后使用独立 pytest 进程评估最终仓库。
+独立的 `benchmarks/` 包通过公开 Python API 在隔离临时工作区中评估 Agent。正确性由外部 pytest、不可变文件检查、允许变更边界和结构化 Plan 不变量共同决定，而不是依赖模型最终回复。
 
-Evaluator 明确区分四类结果：
+六个确定性案例覆盖：
 
-- `task_correct`：确定性外部 Oracle 通过。
-- `runtime_success`：Runtime 到达成功终态。
-- `runtime_oracle_agreement`：Runtime 成功判断与外部正确性一致。
-- `end_to_end_pass`：正确性、Runtime 完成、执行完整性和案例专属约束全部通过。
+- Direct Bug Fix 与 Validation-only 修改纪律；
+- Required Plan + Auto Approval 的完整执行；
+- 跨模块诊断与保留既有行为的回归修复；
+- 权威验证暴露不完整修复后的恢复过程。
 
-当前六个合同案例覆盖确定性修复、validation-only 修改纪律、Required Plan 授权、跨模块定位、回归行为保留和有界验证行为。测试文件保持不可变，变更路径由 Benchmark 独立检查；模型调用和 Token 等效率指标只用于观测，不作为正确性门槛。
-
-顺序运行全部案例：
+顺序运行完整评估：
 
 ```bash
 python -m benchmarks.runner
 ```
 
-生成结果：
+结果写入：
 
 ```text
 benchmarks/results/resume.json
 benchmarks/results/resume.md
 ```
 
-在 commit `a9beb66c03cb9c78eaf266606f9e02d82ab25e38`、模型 `gpt-5.6-terra` 的一次参考运行中，六个案例全部完成，外部 Oracle 与 Runtime 判断一致，且没有未授权修改：
+报告会分别记录 Task Correctness、Runtime Success、End-to-end Pass 和 Runtime/Oracle Agreement。Model Calls、Input/Output Tokens、Cache Reads、Tool Failures 与 Repair Attempts 只作为效率观测指标。
 
-| E2E | Task correct | Runtime/oracle agreement | Unauthorized mutations | Model calls | Input tokens | Cache-read tokens |
-|---:|---:|---:|---:|---:|---:|---:|
-| 6/6 | 6/6 | 6/6 | 0 | 38 | 255,225 | 193,792 |
-
-这组案例用于验证确定性的 Runtime 与评估合同。报告会明确记录任务集合、模型、Commit 和原始效率数据，以便复现；该结果不被表述为一般软件工程任务的总体成功率。
-
-## 开发
-
-运行 lint：
+## 开发验证
 
 ```bash
-python -m ruff check . --no-cache
+pytest
+ruff check .
+ruff format --check .
 ```
 
-运行测试：
+Trace Studio 验证：
 
 ```bash
-python -m pytest -q -p no:cacheprovider
+cd trace-viewer
+npm test
+npm run build
 ```
 
-Windows 下如果 pytest 无法创建或清理默认 temp/cache 目录，可以使用仓库内临时目录：
+## 仓库结构
 
-```powershell
-New-Item -ItemType Directory -Force -Path .tmp | Out-Null
-$env:GIT_CEILING_DIRECTORIES=(Resolve-Path .tmp).Path
-python -m pytest -q -p no:cacheprovider --basetemp=.tmp\pytest-full
-```
-
-测试覆盖工具语义、权限行为、验证追踪、trace/report 生成、recovery、上下文压缩和 interactive 状态隔离。
+| 路径 | 职责 |
+| --- | --- |
+| `src/agent/` | 模型循环、Prompt、Message Conversion 与 Provider Client |
+| `src/runtime/` | Session Composition、执行策略、Context、安全、恢复和可观测性 |
+| `src/tools/` | Native Tools 与 MCP Gateway Adapter |
+| `src/cli/` | 交互式与一次性 CLI 入口 |
+| `tests/` | Runtime Contract 的 Unit / Integration Coverage |
+| `benchmarks/` | 隔离的端到端 Agent Evaluation |
+| `trace-viewer/` | 本地三视图 Trace 分析应用 |
+| `docs/` | 架构文档与冻结实现规范 |

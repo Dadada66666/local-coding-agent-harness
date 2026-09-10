@@ -254,7 +254,7 @@ function TraceInspector({ event, events, onSelect, onClose, onLifecycle }) {
     <aside className="trace-inspector">
       <div className="trace-inspector-title"><span>Event inspector</span><button onClick={onClose} title="Close inspector"><X size={17} /></button></div>
       <div className="trace-inspector-hero">
-        <span className={`trace-inspector-icon ${event.lane}`}><Icon size={19} weight="duotone" /></span>
+        <span className={`trace-inspector-icon ${event.lane} ${event.status}`}><Icon size={19} weight="duotone" /></span>
         <div><small>{laneLabels[event.lane] || event.lane}</small><h2>{event.title}</h2><span className={`trace-status-pill ${event.status}`}>{event.status}</span></div>
       </div>
       <div className="trace-fact-grid">
@@ -274,7 +274,7 @@ function TraceInspector({ event, events, onSelect, onClose, onLifecycle }) {
         <dl className="trace-operation-facts">{operational.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{String(value)}</dd></div>)}</dl>
       </section>}
       {event.details && <section className="trace-inspector-section"><span className="trace-inspector-label">Evidence excerpt</span><pre>{typeof event.details === "string" ? event.details : JSON.stringify(event.details, null, 2)}</pre></section>}
-      {(parent || effects.length) && <section className="trace-inspector-section">
+      {(parent || effects.length > 0) && <section className="trace-inspector-section">
         <span className="trace-inspector-label">Causal neighborhood</span>
         <div className="trace-relations">
           {parent && <button onClick={() => onSelect(parent.id)}><span>Caused by</span><strong>{parent.title}</strong><CaretRight size={13} /></button>}
@@ -361,7 +361,7 @@ export function TraceView({ run, selectedEventId, onSelectEvent, onLifecycle }) 
           <div className="trace-run-meta">
             <span><Clock size={14} /> {run.duration}</span>
             <span><Sparkle size={14} /> {run.turns.length} model calls</span>
-            <span className={run.verification === "Passed" ? "success" : "warning"}><ShieldCheck size={14} /> {run.verification}</span>
+            <span className={run.verification === "Passed" ? "success" : run.verification === "Failed" ? "failure" : "warning"}><ShieldCheck size={14} /> {run.verification}</span>
           </div>
         </header>
         <section className="trace-critical-path">

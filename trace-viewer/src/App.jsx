@@ -90,6 +90,18 @@ function StatusDot({ status = "success" }) {
   return <span className={`status-dot ${status}`} aria-hidden="true" />;
 }
 
+function runStatusTone(run) {
+  if (run.runtimeSuccess) return "success";
+  if (["Failed", "Cancelled"].includes(run.status)) return "failure";
+  return "warning";
+}
+
+function verificationTone(verification) {
+  if (verification === "Passed") return "success";
+  if (verification === "Failed") return "failure";
+  return "warning";
+}
+
 function Metric({ label, value, tone, suffix }) {
   return (
     <div className="metric">
@@ -142,10 +154,10 @@ function RunSummary({ run }) {
       <div className="run-picker">
         <span>Run</span>
         <div className="run-value" title={run.id}>
-          <span>{run.id}</span><CheckCircle size={14} weight="fill" />
+          <span>{run.id}</span><StatusDot status={runStatusTone(run)} />
         </div>
       </div>
-      <Metric label="Status" value={<><StatusDot /> {run.status}</>} />
+      <Metric label="Status" value={<><StatusDot status={runStatusTone(run)} /> {run.status}</>} />
       <Metric label="Model" value={run.model} />
       <Metric label="Duration" value={run.duration} />
       <Metric label="Model calls" value={run.turns.length} />
@@ -325,7 +337,7 @@ function PressureChart({ run, selectedTurn }) {
         <div className="pressure-legend">
           <span><i className="pressure-line auto" /> Observed input</span>
           <span><i className="pressure-line trigger" /> Relative chart guide</span>
-          <span className="real-limits">Runtime contract: trigger {compact.format(run.context.autoTrigger)} · hard {compact.format(run.context.hardLimit)}</span>
+          <span className="real-limits">Recorded limits: trigger {run.context.autoTrigger == null ? "not recorded" : compact.format(run.context.autoTrigger)} · hard {run.context.hardLimit == null ? "not recorded" : compact.format(run.context.hardLimit)}</span>
         </div>
       </div>
       <div className="success-note"><CheckCircle size={17} weight="fill" /> {run.context.rebases ? `${run.context.rebases} full rebase event(s) recorded.` : "No full rebase occurred in this run."}</div>
@@ -388,25 +400,22 @@ function EmptyState() {
 }
 
 function LifecycleMap({ run }) {
-  const phases = [
-    ["Inactive", run.startedAt, "done"],
-    ["Planning", run.events.find((event) => event.lane === "plan")?.ts, "done"],
-    ["Awaiting approval", run.events.find((event) => event.lane === "permission")?.ts, "warning"],
-    ["Executing", run.events.find((event) => event.lane === "tool")?.ts, "active"],
-    ["Completed", run.finishedAt, "done"],
+  const phases = run.lifecycle || [];
+  const counts = [
+    ["Tool events", run.events.filter((event) => event.lane === "tool").length],
+    ["Verification facts", run.events.filter((event) => event.type === "test_result").length],
+    ["Recovery events", run.events.filter((event) => `${event.type} ${event.title}`.toLowerCase().includes("recovery")).length],
   ];
   return (
     <div className="lifecycle-map">
       <h3>Lifecycle map</h3>
-      {phases.map(([label, ts, state], index) => (
-        <div className={`phase-node ${state}`} key={label}>
+      {phases.length ? phases.map(({ label, ts, state }, index) => (
+        <div className={`phase-node ${state}`} key={`${label}-${index}`}>
           <i /><span>{label}</span><time>{formatTime(ts)}</time>{index < phases.length - 1 && <b />}
         </div>
-      ))}
+      )) : <div className="lifecycle-unavailable">No lifecycle transitions recorded</div>}
       <div className="phase-details">
-        <span><i /> Tool execution <strong>00:03:12</strong></span>
-        <span><i /> Verification <strong>00:01:27</strong></span>
-        <span><i /> Recovery <strong>00:01:18</strong></span>
+        {counts.map(([label, value]) => <span key={label}><i /> {label} <strong>{value}</strong></span>)}
       </div>
     </div>
   );
@@ -426,13 +435,13 @@ function LeftRail({ run, query, setQuery, mode, setMode, bookmarks, onSelectEven
         {mode === "runs" ? <>
           <label className="run-search"><MagnifyingGlass size={15} /><input id="run-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search current run…" /></label>
           {run.id.toLowerCase().includes(query.toLowerCase()) && (
-            <div className="run-row selected"><span><strong>{run.id.slice(0, 22)}</strong><small>runtime {run.duration} · {run.turns.length} calls</small></span><StatusDot /></div>
+            <div className="run-row selected"><span><strong>{run.id.slice(0, 22)}</strong><small>runtime {run.duration} · {run.turns.length} calls</small></span><StatusDot status={runStatusTone(run)} /></div>
           )}
           <div className="task-group"><span>Tasks (1)</span><div><Target size={14} /> {run.taskId}</div></div>
           <LifecycleMap run={run} />
           <div className="rail-outcome">
-            <div><span>Outcome</span><strong>{run.runtimeSuccess ? "Runtime Success" : "Runtime Failed"}</strong></div>
-            <div><span>Verification</span><strong>{run.verification}</strong></div>
+            <div><span>Outcome</span><strong className={runStatusTone(run)}>{run.runtimeSuccess ? "Runtime Success" : `Runtime ${run.status}`}</strong></div>
+            <div><span>Verification</span><strong className={verificationTone(run.verification)}>{run.verification}</strong></div>
             <div><span>Model calls</span><strong>{run.turns.length}</strong></div>
             <div><span>Total input</span><strong>{number.format(run.turns.reduce((sum, turn) => sum + turn.input, 0))}</strong></div>
           </div>
@@ -453,8 +462,8 @@ function OutcomeStrip({ run }) {
   const input = run.turns.reduce((sum, turn) => sum + turn.input, 0);
   return (
     <div className="outcome-strip">
-      <div><span>Runtime</span><strong className={run.runtimeSuccess ? "success" : "failure"}>{run.runtimeSuccess ? "Success" : "Failed"}</strong><CheckCircle size={28} weight="duotone" /></div>
-      <div><span>Verification</span><strong className={run.verification === "Passed" ? "success" : "warning"}>{run.verification}</strong><ShieldCheck size={28} weight="duotone" /></div>
+      <div><span>Runtime</span><strong className={run.runtimeSuccess ? "success" : "failure"}>{run.runtimeSuccess ? "Success" : run.status}</strong>{run.runtimeSuccess ? <CheckCircle size={28} weight="duotone" /> : <WarningCircle size={28} weight="duotone" />}</div>
+      <div><span>Verification</span><strong className={verificationTone(run.verification)}>{run.verification}</strong><ShieldCheck size={28} weight="duotone" /></div>
       <div><span>Model calls</span><strong>{run.turns.length} calls</strong><Heartbeat size={25} /></div>
       <div><span>Total input</span><strong>{number.format(input)}</strong><Stack size={25} /></div>
     </div>

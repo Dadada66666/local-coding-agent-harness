@@ -1,0 +1,7 @@
+{"type":"task_transition","run_id":"failed-runtime-fields","task_id":"task-1","before":"idle","after":"running","ts_iso":"2026-08-27T00:00:00Z","elapsed_ms":0}
+{"type":"plan_transition","before":{"phase":"inactive"},"after":{"phase":"planning"},"ts_iso":"2026-08-27T00:00:01Z","elapsed_ms":1000}
+{"type":"plan_transition","before":{"phase":"planning"},"after":{"phase":"executing"},"ts_iso":"2026-08-27T00:00:02Z","elapsed_ms":2000}
+{"type":"model_call_start","turn_id":1,"context_auto_compact_trigger":123456,"ts_iso":"2026-08-27T00:00:03Z","elapsed_ms":3000}
+{"type":"tool_result","turn_id":1,"tool":"bash","ok":false,"error":"command failed","output_preview":"1 failed","ts_iso":"2026-08-27T00:00:04Z","elapsed_ms":4000}
+{"type":"test_result","turn_id":1,"ok":false,"command":"pytest","verification_level":"tests","ts_iso":"2026-08-27T00:00:05Z","elapsed_ms":5000}
+{"type":"task_transition","run_id":"failed-runtime-fields","task_id":"task-1","before":"running","after":"failed","trigger":"verification_failed","ts_iso":"2026-08-27T00:00:06Z","elapsed_ms":6000}
